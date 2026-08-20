@@ -28,9 +28,17 @@ def _scoring_evidence(result: dict[str, Any], value_key: str) -> EvidenceValue[s
     sources = [SourceRef(
         str(result.get("engineering_source_type", "scoring_service")),
         str(result.get("engineering_source", "migration-only-domain-policy")),
-        str(result.get("engineering_rule_id", "")),
-        str(result.get("engineering_basis", "")),
+        str(result.get("engineering_location", result.get("engineering_rule_id", ""))),
+        str(result.get("engineering_excerpt", result.get("engineering_basis", ""))),
     )]
+    for source in result.get("fact_sources", []):
+        if isinstance(source, dict):
+            sources.append(SourceRef(
+                str(source.get("source_type", "project_fact")),
+                str(source.get("source_id", "")),
+                str(source.get("location", "")),
+                str(source.get("excerpt", "")),
+            ))
     if result.get("template_standard_source"):
         contract_hash = str(result.get("template_standard_contract_hash", ""))
         sources.append(SourceRef(
@@ -47,7 +55,10 @@ def _scoring_evidence(result: dict[str, Any], value_key: str) -> EvidenceValue[s
         status=status,
         sources=sources,
         rule_version=str(result.get("engineering_rule_version", "")),
-        review_reason="" if status is ReviewStatus.FINALIZED else "Domain评分判据尚未获得项目批准",
+        review_reason=(
+            "" if status is ReviewStatus.FINALIZED
+            else str(result.get("engineering_basis", "Scoring evidence is pending."))
+        ),
     )
 
 
@@ -81,6 +92,7 @@ def score_structured_scenarios(
             )
         candidate = scenario_by_id[scenario_id]
         scenario = {"scenario_id": scenario_id, **candidate.facts}
+        scenario["_fact_provenance"] = candidate.fact_provenance
         scenario.setdefault("situational_description", candidate.situational_description)
         scenario.setdefault("situational_detailing", candidate.situational_detailing)
         hazard_event = str(assessment.get("hazardous_event", ""))
@@ -97,10 +109,20 @@ def score_structured_scenarios(
             scored["controllability"], "controllability_score"
         )
         exposure_method = str(scored["exposure"].get("exposure_method", "")).upper()
-        asil_value = asil_table.determine(severity.value, exposure.value, controllability.value)
+        valid_scores = (
+            severity.value in {"S0", "S1", "S2", "S3"}
+            and exposure.value in {"E0", "E1", "E2", "E3", "E4"}
+            and controllability.value in {"C0", "C1", "C2", "C3"}
+        )
+        asil_value = (
+            asil_table.determine(
+                severity.value, exposure.value, controllability.value
+            )
+            if valid_scores else ""
+        )
         asil_status = (
             ReviewStatus.FINALIZED
-            if asil_value not in {"NA", "N/A"}
+            if asil_value and asil_value not in {"NA", "N/A"}
             and all(
                 item.status is ReviewStatus.FINALIZED
                 for item in (severity, exposure, controllability)
@@ -110,10 +132,16 @@ def score_structured_scenarios(
         asil = EvidenceValue(
             value=asil_value,
             status=asil_status,
-            sources=[asil_table.evidence_source(
-                severity.value, exposure.value, controllability.value
-            )],
-            review_reason="" if asil_status is ReviewStatus.FINALIZED else "ASIL查表输入S/E/C尚未全部批准",
+            sources=(
+                [asil_table.evidence_source(
+                    severity.value, exposure.value, controllability.value
+                )]
+                if valid_scores else []
+            ),
+            review_reason=(
+                "" if asil_status is ReviewStatus.FINALIZED
+                else "ASIL lookup requires complete, approved S/E/C values."
+            ),
         )
         ftti_result = ftti.evaluate(scenario, hazard_event, asil_value)
         ftti_status = (

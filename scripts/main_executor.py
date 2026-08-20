@@ -946,7 +946,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser_agent.add_argument("--item", required=True, help="Item Definition文档路径")
     parser_agent.add_argument("--template", required=True, help="HARA模板Excel路径")
     parser_agent.add_argument("--output", required=True, help="输出报告路径")
-    parser_agent.add_argument("--domain", required=True, help="显式Domain名称，如avp")
+    parser_agent.add_argument(
+        "--domain", help="迁移期标记；不再选择Agent工程规则"
+    )
     parser_agent.add_argument("--run-dir", default="runtime/agent", help="Checkpoint目录")
     parser_agent.add_argument("--run-id", default="hara-run", help="运行ID")
     parser_agent.add_argument("--resume", action="store_true", help="从新Agent checkpoint恢复")
@@ -965,7 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser_agent.add_argument(
         "--allow-legacy-speed-fallback",
         action="store_true",
-        help="显式允许Draft使用未批准Domain Profile迁移速度",
+        help="已废弃的兼容参数；Agent仍对缺失ProjectFacts fail closed",
     )
     parser_agent.add_argument(
         "--max-workers", type=int, default=4,
@@ -976,7 +978,9 @@ def build_parser() -> argparse.ArgumentParser:
         "agent-doctor", help="检查新Agent生产运行条件，不执行分析"
     )
     parser_agent_doctor.add_argument("--template", required=True, help="HARA模板Excel路径")
-    parser_agent_doctor.add_argument("--domain", required=True, help="显式Domain名称，如avp")
+    parser_agent_doctor.add_argument(
+        "--domain", help="迁移期兼容参数；doctor不再依赖Domain Profile"
+    )
     parser_fallback.add_argument(
         "--allow-draft", action="store_true",
         help="允许生成带水印的Draft/Diagnostic报告；正式Fail-Closed为默认值",
@@ -1012,9 +1016,11 @@ def main():
 
             forwarded = [
                 "analyze", "--item", args.item, "--template", args.template,
-                "--output", args.output, "--domain", args.domain,
+                "--output", args.output,
                 "--run-dir", args.run_dir, "--run-id", args.run_id,
             ]
+            if args.domain:
+                forwarded.extend(["--domain", args.domain])
             if args.resume:
                 forwarded.append("--resume")
             if args.allow_draft:
@@ -1038,9 +1044,10 @@ def main():
                 sys.path.insert(0, str(source_root))
             from hara_agent.cli import main as agent_main
 
-            success = agent_main([
-                "doctor", "--template", args.template, "--domain", args.domain,
-            ]) == 0
+            forwarded = ["doctor", "--template", args.template]
+            if args.domain:
+                forwarded.extend(["--domain", args.domain])
+            success = agent_main(forwarded) == 0
         else:
             parser.print_help()
             sys.exit(1)

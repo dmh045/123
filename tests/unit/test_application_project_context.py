@@ -7,7 +7,6 @@ import pytest
 
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
-from hara_agent.domains import default_domain_registry
 from hara_agent.models import (
     FactProvenance,
     ItemDefinitionFacts,
@@ -16,11 +15,16 @@ from hara_agent.models import (
     SpeedEnvelope,
 )
 from hara_agent.services.analysis import (
-    DomainScenarioCandidateService,
+    MethodScenarioCandidateService,
     UnresolvedProjectContextError,
 )
 from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
+from hara_agent.template import TemplateRoleCompiler
 from hara_agent.workflow import HARAState
+
+
+ROOT = Path(__file__).resolve().parents[2]
+TEMPLATE = ROOT / "references" / "HARA_Template_AI_20260327.xlsx"
 
 
 def _config(**changes) -> RunConfig:
@@ -40,6 +44,10 @@ def _facts(*, contextual: bool = True, aggregate: bool = True) -> ItemDefinition
     return ItemDefinitionFacts(
         system_description="AVP",
         item_boundary="vehicle motion control",
+        operating_modes=["parking"],
+        odd_locations=["停车场"],
+        odd_weather_conditions=["晴天"],
+        odd_road_surfaces=["干燥路面"],
         speed_min_kph=0 if aggregate else None,
         speed_max_kph=30 if aggregate else None,
         speed_envelopes=(
@@ -68,9 +76,9 @@ def _state(facts: ItemDefinitionFacts) -> HARAState:
     )
 
 
-def _service() -> DomainScenarioCandidateService:
-    runtime = default_domain_registry().create("avp", require_approved=False)
-    return DomainScenarioCandidateService(runtime.policy)
+def _service() -> MethodScenarioCandidateService:
+    method = TemplateRoleCompiler().compile_method(TEMPLATE, use_manifest=False)
+    return MethodScenarioCandidateService(method)
 
 
 @pytest.mark.parametrize(
@@ -95,10 +103,55 @@ def test_application_candidate_path_uses_parking_envelope_and_provenance():
     assert candidates
     assert audit["ego_speed_kph"] == 5.0
     assert audit["speed_resolution"]["resolution_source"] == "SpeedEnvelope"
+    assert audit["combination_strategy"] == "method_dimensions_constrained_by_project_facts"
     assert all(item.operating_mode == "parking" for item in candidates)
     assert all(item.facts["ego_speed_kph"] == 5.0 for item in candidates)
     assert all(
         item.fact_provenance["ego_speed_kph"]["provenance"] == "PROJECT_INPUT"
+        for item in candidates
+    )
+    assert all(
+        source.source_type != "domain_profile"
+        for item in candidates for source in item.sources
+    )
+
+
+def test_method_speed_bands_have_deterministic_template_boundaries():
+    service = _service()
+    speed_dimension = next(
+        item for item in service.method.scenario_model.dimensions
+        if item.canonical_name == "VEHICLE_SPEED"
+    )
+
+    matches_at_zero = [
+        value for value in speed_dimension.values
+        if service._speed_value_matches(value, 0.0)
+    ]
+    matches_at_fifteen = [
+        value for value in speed_dimension.values
+        if service._speed_value_matches(value, 15.0)
+    ]
+    matches_at_thirty = [
+        value for value in speed_dimension.values
+        if service._speed_value_matches(value, 30.0)
+    ]
+
+    assert len(matches_at_zero) == 1 and "Standstill" in matches_at_zero[0]
+    assert len(matches_at_fifteen) == 1 and "0 < v" in matches_at_fifteen[0]
+    assert len(matches_at_thirty) == 1 and "15 < v" in matches_at_thirty[0]
+
+
+def test_unmatched_project_dimension_remains_pending_without_synonym_guessing():
+    facts = _facts()
+    facts.odd_weather_conditions = ["正常天气"]
+    app = HARAApplication(_config(), object())
+
+    candidates, audit = app.prepare_scenario_candidates(_state(facts), _service())
+
+    assert audit["unresolved_binding_candidate_count"] == len(candidates)
+    assert all(
+        item.facts["method_scenario_dimensions"]["WEATHER"]["binding_status"]
+        == "UNRESOLVED"
         for item in candidates
     )
 
@@ -127,18 +180,12 @@ def test_application_aggregate_fallback_requires_explicit_authorization():
     assert result.fallback_used is True
 
 
-def test_legacy_profile_fallback_is_explicit_and_preserves_migration_provenance():
+def test_legacy_profile_fallback_flag_cannot_restore_domain_speed_authority():
     state = _state(_facts(contextual=False, aggregate=False))
     app = HARAApplication(_config(allow_legacy_speed_fallback=True), object())
 
-    candidates, audit = app.prepare_scenario_candidates(state, _service())
-
-    assert audit["speed_source_status"] == "MIGRATION_FALLBACK"
-    assert audit["speed_resolution"]["provenance"] == "LEGACY_MIGRATION"
-    assert all(
-        item.fact_provenance["ego_speed_kph"]["provenance"] == "LEGACY_MIGRATION"
-        for item in candidates
-    )
+    with pytest.raises(UnresolvedProjectContextError):
+        app.prepare_scenario_candidates(state, _service())
 
 
 def test_scenario_context_and_provenance_survive_checkpoint_roundtrip():

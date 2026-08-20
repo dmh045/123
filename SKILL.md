@@ -41,7 +41,9 @@ The Domain runtime and three-phase/17-step scripts remain `MIGRATION_ONLY` for
 baseline comparison until Template-Driven cutover. Do not add new business
 rules to them and do not treat them as future authority. P0 Template Role
 discovery and P0-2 full MethodContract compilation live under
-`src/hara_agent/template/`. P0-3a compiles and injects one MethodContract into
+`src/hara_agent/template/`. P0-3b compiles and injects one MethodContract into
 the existing Application/WorkflowGraph; it does not create a second workflow.
-The remaining Domain candidate/scoring/Safety Goal dependencies are explicit
-release blockers until their in-place generic replacements are complete.
+Scenario binding, S/E/C execution, ASIL lookup, and review-gated SG/Safe-State
+proposals now use generic MethodContract services. Remaining release blockers
+are grounded canonical risk facts, unresolved template semantics, and the
+ReportContract renderer cutover—not Domain runtime dependencies.

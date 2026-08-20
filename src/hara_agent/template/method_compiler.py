@@ -546,6 +546,11 @@ class FullTemplateCompiler:
         numbers = [float(item.replace(",", ".")) for item in re.findall(r"-?\d+(?:[.,]\d+)?", text)]
         if not numbers:
             return None
+        lowered = text.casefold()
+        if "more than" in lowered and len(numbers) == 1:
+            return RangePredicate(field, numbers[0], None, False, None, unit, source)
+        if "less than" in lowered and len(numbers) == 1:
+            return RangePredicate(field, None, numbers[0], None, False, unit, source)
         if "<=" in text and len(numbers) == 1:
             return RangePredicate(field, None, numbers[0], None, True, unit, source)
         if ">=" in text and len(numbers) == 1:

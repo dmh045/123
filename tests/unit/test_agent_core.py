@@ -3561,7 +3561,7 @@ def test_application_generates_audited_draft_at_pending_quality_gate():
         item["event"] == "method_contract_compiled"
         for item in result.state.audit_trail
     )
-    assert any(
+    assert not any(
         item.get("issue_type") == "migration_runtime_dependency"
         for item in result.state.pending_reviews
     )
@@ -3570,15 +3570,23 @@ def test_application_generates_audited_draft_at_pending_quality_gate():
     )
     assert len(result.state.risk_results) == candidate_event["atomic_candidate_count"]
     assert all(
-        risk.severity.sources[1].source_type == "method_contract"
+        risk.severity.sources[0].source_type == "method_contract"
         for risk in result.state.risk_results
     )
-    assert len(result.state.safety_goals) > 0
+    assert all(risk.severity.value == "" for risk in result.state.risk_results)
+    assert len(result.state.safety_goals) == 0
     assert not result.state.can_publish
     assert output.is_file()
     assert any(item["event"] == "draft_excel_report_rendered" for item in result.state.audit_trail)
     assert candidate_event["ego_speed_kph"] == 5.0
-    assert candidate_event["speed_source_status"] == "EXPLICIT_AGGREGATE_FALLBACK"
+    assert candidate_event["speed_source_status"] == "RESOLVED_AGGREGATE_FALLBACK"
+    assert candidate_event["combination_strategy"] == (
+        "method_dimensions_constrained_by_project_facts"
+    )
+    assert all(
+        source.source_type != "domain_profile"
+        for candidate in result.state.scenarios for source in candidate.sources
+    )
     guideword_event = next(
         item for item in result.state.audit_trail
         if item["event"] == "guideword_applicability_assessed"

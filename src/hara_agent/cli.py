@@ -8,7 +8,6 @@ from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
 from hara_agent.config import LLMConfig
 from hara_agent.contracts import CompileStatus
-from hara_agent.domains import default_domain_registry
 from hara_agent.template import TemplateRoleCompiler
 
 
@@ -19,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--item", required=True, type=Path)
     analyze.add_argument("--template", required=True, type=Path)
     analyze.add_argument("--output", required=True, type=Path)
-    analyze.add_argument("--domain", required=True)
+    analyze.add_argument("--domain", help="迁移期标记；不再选择Agent工程规则")
     analyze.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     analyze.add_argument("--run-id", default="hara-run")
     analyze.add_argument("--resume", action="store_true")
@@ -32,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--max-workers", type=int, default=4)
     doctor = subparsers.add_parser("doctor", help="检查新Agent生产运行条件，不执行分析")
     doctor.add_argument("--template", required=True, type=Path)
-    doctor.add_argument("--domain", required=True)
+    doctor.add_argument("--domain", help="迁移期兼容参数；doctor不再依赖Domain Profile")
     return parser
 
 
@@ -40,18 +39,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
         checks = {}
-        try:
-            profile = default_domain_registry().create(
-                args.domain, require_approved=False
-            ).profile
-            checks["domain_profile"] = {
-                "ok": True,
-                "version": profile.version,
-                "approval_status": profile.approval_status,
-                "approved": profile.is_approved,
-            }
-        except Exception as exc:
-            checks["domain_profile"] = {"ok": False, "error": str(exc)}
         try:
             method = TemplateRoleCompiler().compile_method(args.template)
             method_ok = (
@@ -87,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             "ready_for_draft": ready_for_draft,
             "ready_for_release": ready_for_release,
             "release_blockers": [
-                "Domain candidate/scoring/Safety Goal services remain migration-only"
+                "Template rule ambiguities and semantic SG/Safe-State derivation require review"
             ],
             "checks": checks,
         }, ensure_ascii=False, indent=2))

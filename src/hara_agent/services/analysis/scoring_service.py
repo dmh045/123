@@ -69,7 +69,6 @@ class DomainScoringService:
             "engineering_status": decision["engineering_status"],
             "engineering_basis": decision["basis"],
             "template_standard_source": str(self.standards.source_path),
-            "template_standard_contract_hash": self.standards.method_contract_hash,
             "template_standard_sheet": standard.sheet,
             "template_standard_location": standard.location,
             "template_standard_description": standard.description,

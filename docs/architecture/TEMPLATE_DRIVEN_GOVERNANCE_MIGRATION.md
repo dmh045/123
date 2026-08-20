@@ -68,7 +68,7 @@ severity results, exposure method selection, workflow coordinate mismatches,
 and NA versus QM). None is silently repaired from the migration-only Domain
 runtime.
 
-## P0-3a Existing-Chain MethodContract Injection
+## P0-3 Existing-Chain MethodContract Cutover
 
 The existing `HARAApplication` and `WorkflowGraph` remain the only Agent
 calculation chain. Application now compiles the active workbook once and
@@ -78,19 +78,27 @@ injects the resulting MethodContract into that chain:
   workbook reader.
 - Scenario dimension metadata and required fact types are recorded in the run
   audit from the same contract.
-- Migration scoring receives S/E/C scale evidence adapted from the compiled
-  contract instead of rereading named worksheets.
+- Scenario candidates bind ProjectFacts to dimensions from
+  `MethodContract.scenario_model`; unmatched or ambiguous values remain
+  `PENDING`.
+- S/E/C scoring executes compiled rules against exact canonical facts and
+  finalized provenance. It performs no prose, keyword, or Domain fallback.
 - ASIL lookup executes `MethodContract.asil` directly and preserves `NA`.
+- Safety Goal and Safe State services create deterministic intent proposals,
+  aggregate Max ASIL/minimum FTTI, and remain review-gated when the template
+  requires semantic derivation.
 - Checkpoints carry the template hash and reject resume against another
   contract.
 - `agent-doctor` reports MethodContract readiness instead of the legacy fixed
   template contract.
 
 This is a source-authority cutover, not a claim that generic evaluation is
-finished. Domain scenario candidates, S/E/C decisions, and Safety Goal
-catalogs are still explicit migration dependencies. Application adds a
-`migration_runtime_dependency` pending review so those values can generate a
-Draft for differential testing but can never pass the formal release gate.
+finished. `HARAApplication` no longer imports or assembles Domain scenario,
+scoring, or Safety Goal services. Current formal-release blockers are the
+canonical project/scenario facts not yet extracted for every rule, unresolved
+template rule boundaries/variables/results, semantic SG/Safe-State review, and
+the fixed renderer pending ReportContract cutover. These conditions remain
+traceable `PENDING` and can generate only a Draft.
 
 Role discovery priority is:
 
@@ -148,7 +156,7 @@ Nothing in this inventory is deleted in P0.
 
 ## Next Phases
 
-1. P0-3 Generic Rule Engine + Template-Driven ProjectFacts Planning
-2. P0-4 Application differential and quality gates
-3. P0-5 Application Cutover
-4. P0-6 Delete Old Runtime
+1. P0-3c bounded canonical RiskFact interpretation and human confirmation
+2. P0-4 ReportContract renderer cutover plus differential/quality gates
+3. P0-5 make the Template-Driven Application the default production route
+4. P0-6 delete the old Domain and legacy runtimes after retained-baseline signoff

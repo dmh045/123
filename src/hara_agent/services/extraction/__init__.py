@@ -3,7 +3,6 @@ from .template_inputs import TemplateInputReader, TemplateInputs
 from .template_scoring import (
     TemplateScoreLevel,
     TemplateScoringStandards,
-    scoring_standards_from_method_contract,
 )
 from .artifact_cache import ValidatedArtifactCache
 from .targeted_verification import (
@@ -28,7 +27,6 @@ from .evidence_retrieval import (
 __all__ = [
     "DocumentArtifact", "DocumentBlock", "DocumentReader",
     "TemplateInputReader", "TemplateInputs", "TemplateScoreLevel", "TemplateScoringStandards",
-    "scoring_standards_from_method_contract",
     "ValidatedArtifactCache",
     "DeterministicSourceVerifier", "RequiredFactQuery", "VerifiedSourceBlock",
     "block_value", "normalize_source_text", "verify_missing_fact",

@@ -9,7 +9,7 @@ def aggregate_safety_goals(
     state: HARAState,
     catalog: SafetyGoalService,
 ) -> HARAState:
-    """Map non-QM risks to approved-domain SG definitions and aggregate them."""
+    """Derive and aggregate non-QM safety intents through the active service."""
     malfunctions = {
         str(item.get("malfunction_id", "")): item for item in state.malfunctions
     }
@@ -29,9 +29,6 @@ def aggregate_safety_goals(
         if function is None:
             raise ValueError(f"Safety Goal聚合缺少Function外键: {malfunction.get('function_id')!r}")
         function_name = str(function.get("name", ""))
-        sg_id = catalog.classify(function_name)
-        if not sg_id:
-            raise ValueError(f"Domain Profile缺少安全相关Function的SG映射: {function_name!r}")
         ftti_result = {
             "ftti_value_s": risk.ftti_seconds.value,
             "ftti_status": (
@@ -39,8 +36,7 @@ def aggregate_safety_goals(
                 else "NEEDS_REVIEW"
             ),
         }
-        catalog.register(
-            sg_id=sg_id,
+        registration = catalog.register_intent(
             function_name=function_name,
             malfunction=str(malfunction.get("description", "")),
             guideword=str(malfunction.get("guideword", "")),
@@ -49,6 +45,7 @@ def aggregate_safety_goals(
             asil=str(risk.asil.value),
             ftti_result=ftti_result,
         )
+        sg_id = registration["sg_id"]
         risk.safety_goal_id = sg_id
         scenario_ids_by_goal.setdefault(sg_id, []).append(risk.scenario_id)
         risk_status_by_goal.setdefault(sg_id, []).extend([
@@ -80,7 +77,10 @@ def aggregate_safety_goals(
             state.pending_reviews.append({
                 "safety_goal_id": sg_id,
                 "field": "safety_goal",
-                "reason": "Domain Profile或关联风险判据尚未全部批准",
+                "reason": (
+                    "Safety Goal/Safe State semantic derivation or associated risk "
+                    "evidence is not fully approved."
+                ),
             })
 
     state.safety_goals = goals

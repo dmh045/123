@@ -2,6 +2,9 @@ from .asil_service import MethodContractASILService, TemplateASILService
 from .ftti_service import FTTIService, FTTI_FINALIZED, FTTI_NEEDS_REVIEW, FTTI_NOT_REQUIRED
 from .risk_aggregation_service import RiskAggregationService
 from .scoring_service import DomainScoringService
+from .method_rule_service import MethodRuleScoringService, RuleEvaluation
+from .method_scenario_service import MethodScenarioCandidateService
+from .method_safety_goal_service import MethodSafetyGoalService
 from .safety_goal_service import SafetyGoalCatalogService
 from .scenario_candidate_service import AVPScenarioCandidateService, DomainScenarioCandidateService
 from .project_fact_resolver import (
@@ -16,7 +19,8 @@ from .project_fact_resolver import (
 from .protocols import ASILLookupService, SafetyGoalService, ScenarioScoringService
 
 __all__ = [
-    "DomainScoringService", "FTTIService", "FTTI_FINALIZED", "FTTI_NEEDS_REVIEW",
+    "DomainScoringService", "MethodRuleScoringService", "RuleEvaluation",
+    "MethodScenarioCandidateService", "MethodSafetyGoalService", "FTTIService", "FTTI_FINALIZED", "FTTI_NEEDS_REVIEW",
     "FTTI_NOT_REQUIRED", "RiskAggregationService", "SafetyGoalCatalogService",
     "MethodContractASILService", "TemplateASILService",
     "ASILLookupService", "SafetyGoalService", "ScenarioScoringService",

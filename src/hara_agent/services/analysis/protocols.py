@@ -29,10 +29,7 @@ class SafetyGoalService(Protocol):
     def is_approved(self) -> bool:
         ...
 
-    def classify(self, function_name: str) -> str | None:
-        ...
-
-    def register(self, **kwargs: Any) -> dict[str, str]:
+    def register_intent(self, **kwargs: Any) -> dict[str, str]:
         ...
 
     def to_dict(self) -> dict[str, dict[str, Any]]:

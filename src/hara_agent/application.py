@@ -5,23 +5,19 @@ import os
 
 from hara_agent.config import LLMConfig, RunConfig
 from hara_agent.contracts import CompileStatus
-from hara_agent.domains import default_domain_registry
 from hara_agent.infrastructure.llm import LLMClient, create_llm_client
 from hara_agent.services.analysis import (
-    DomainScenarioCandidateService,
-    DomainScoringService,
     FTTIService,
     MethodContractASILService,
-    SafetyGoalCatalogService,
+    MethodRuleScoringService,
+    MethodScenarioCandidateService,
+    MethodSafetyGoalService,
     ProjectFactResolver,
     SpeedResolutionResult,
     UnresolvedProjectContextError,
 )
 from hara_agent.models import ItemDefinitionFacts, SourceRef
-from hara_agent.services.extraction import (
-    ValidatedArtifactCache,
-    scoring_standards_from_method_contract,
-)
+from hara_agent.services.extraction import ValidatedArtifactCache
 from hara_agent.services.reporting import HARAExcelRenderer
 from hara_agent.services.semantic import (
     FunctionExtractionAgent,
@@ -57,8 +53,6 @@ class HARAApplication:
 
     def run(self) -> WorkflowRunResult:
         self.config.validate()
-        if not self.config.domain:
-            raise ValueError("必须显式提供domain；迁移期禁止仅凭关键词静默选择Domain Profile")
         method = TemplateRoleCompiler().compile_method(self.config.template_path)
         if (
             method.compile_status is CompileStatus.NOT_READY
@@ -73,18 +67,8 @@ class HARAApplication:
             "compile_status": method.compile_status.value,
             "engineering_rules_compiled": method.engineering_rules_compiled,
         }
-        runtime = default_domain_registry().create(
-            self.config.domain,
-            profile_path=self.config.domain_profile_path,
-            require_approved=False,
-        )
-        profile = runtime.profile
-        policy = runtime.policy
-        scoring_standards = scoring_standards_from_method_contract(
-            method, self.config.template_path
-        )
         guidewords = [item.name for item in method.guidewords.guidewords]
-        candidate_service = DomainScenarioCandidateService(policy)
+        candidate_service = MethodScenarioCandidateService(method)
 
         def report_batch(name: str, completed: int, total: int) -> None:
             print(
@@ -120,8 +104,10 @@ class HARAApplication:
         else:
             state = HARAState(
                 run_id=self.config.run_id,
-                domain=profile.name,
-                profile_version=profile.version,
+                # Retain migration-era state fields for checkpoint compatibility;
+                # they no longer select engineering rules on the Agent path.
+                domain=self.config.domain or "",
+                profile_version="",
                 method_contract=method_ref,
             )
             state.record(
@@ -130,24 +116,21 @@ class HARAApplication:
                 **method_ref,
                 guideword_count=len(guidewords),
                 scenario_dimension_count=len(method.scenario_model.dimensions),
-                scoring_standard_counts=scoring_standards.counts,
+                scoring_standard_counts={
+                    "severity_rules": len(method.severity.rules),
+                    "exposure_duration_rules": len(method.exposure.duration_rules),
+                    "exposure_frequency_rules": len(method.exposure.frequency_rules),
+                    "controllability_rules": len(method.controllability.criteria),
+                },
                 required_fact_types=[
                     item.fact_type.value for item in method.required_fact_specs
                 ],
                 warning_codes=sorted({item.code.value for item in method.warnings}),
             )
-        if not any(
-            item.get("issue_type") == "migration_runtime_dependency"
-            for item in state.pending_reviews
-        ):
-            state.pending_reviews.append({
-                "issue_type": "migration_runtime_dependency",
-                "field": "scenario_scoring_and_safety_goal_derivation",
-                "reason": (
-                    "Domain candidate/scoring/Safety Goal services remain migration-only; "
-                    "formal release is blocked until in-place MethodContract execution cutover"
-                ),
-            })
+        state.pending_reviews = [
+            item for item in state.pending_reviews
+            if item.get("issue_type") != "migration_runtime_dependency"
+        ]
         graph = build_hara_agent_graph(
             SemanticWorkflowInputs(
                 item_path=self.config.item_path,
@@ -169,10 +152,10 @@ class HARAApplication:
                 scenarios=ScenarioFeasibilityAgent(self.llm_client),
             ),
             RiskWorkflowServices(
-                scoring=DomainScoringService(policy, scoring_standards),
+                scoring=MethodRuleScoringService(method),
                 asil_table=MethodContractASILService(method),
                 ftti=FTTIService(),
-                safety_goals=SafetyGoalCatalogService(profile),
+                safety_goals=MethodSafetyGoalService(method),
             ),
             checkpoint_repository=checkpoints,
             reporting=ReportingWorkflowConfig(
@@ -206,7 +189,7 @@ class HARAApplication:
             )
         return result
 
-    def resolve_project_speed_context(self, state: HARAState) -> SpeedResolutionResult | None:
+    def resolve_project_speed_context(self, state: HARAState) -> SpeedResolutionResult:
         operating_mode = str(self.config.operating_mode or "").strip()
         if not operating_mode:
             raise UnresolvedProjectContextError(
@@ -229,37 +212,31 @@ class HARAApplication:
             )
         typed = state.item_definition.get("typed", {})
         if not isinstance(typed, dict) or not typed:
-            if self.config.allow_legacy_speed_fallback:
-                return None
             raise UnresolvedProjectContextError(
                 operating_mode, "typed ProjectFacts are unavailable"
             )
         facts = ItemDefinitionFacts.from_dict(typed)
-        try:
-            return ProjectFactResolver().resolve_speed_context(
-                facts,
-                operating_mode,
-                allow_aggregate_fallback=self.config.allow_aggregate_speed_fallback,
-            )
-        except UnresolvedProjectContextError:
-            if self.config.allow_legacy_speed_fallback and not facts.speed_envelopes:
-                return None
-            raise
+        return ProjectFactResolver().resolve_speed_context(
+            facts,
+            operating_mode,
+            allow_aggregate_fallback=self.config.allow_aggregate_speed_fallback,
+        )
 
     def prepare_scenario_candidates(
         self,
         state: HARAState,
-        candidate_service: DomainScenarioCandidateService,
+        candidate_service: MethodScenarioCandidateService,
     ):
         typed = state.item_definition.get("typed", {})
+        if not isinstance(typed, dict) or not typed:
+            raise UnresolvedProjectContextError(
+                str(self.config.operating_mode or ""),
+                "typed ProjectFacts are unavailable",
+            )
+        facts = ItemDefinitionFacts.from_dict(typed)
         resolution = self.resolve_project_speed_context(state)
         return candidate_service.generate(
-            operating_mode=(
-                resolution.operating_mode
-                if resolution is not None else str(self.config.operating_mode or "")
-            ),
+            project_facts=facts,
+            operating_mode=resolution.operating_mode,
             speed_resolution=resolution,
-            allow_legacy_speed_fallback=self.config.allow_legacy_speed_fallback,
-            project_driver_contexts=list(typed.get("driver_contexts", [])),
-            project_exposure_inputs=list(typed.get("exposure_inputs", [])),
         )

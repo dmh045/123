@@ -82,6 +82,15 @@ class SafetyGoalCatalogService:
             result[sg_id] = entry
         return result
 
+    def register_intent(self, **kwargs: Any) -> dict[str, str]:
+        function_name = str(kwargs["function_name"])
+        sg_id = self.classify(function_name)
+        if not sg_id:
+            raise ValueError(
+                f"Domain Profile lacks an SG mapping for function: {function_name!r}"
+            )
+        return self.register(sg_id=sg_id, **kwargs)
+
     @staticmethod
     def _aggregate_ftti(results: list[dict[str, Any]]) -> dict[str, Any]:
         values = [float(item["ftti_value_s"]) for item in results if item.get("ftti_value_s") is not None]

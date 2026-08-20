@@ -5,7 +5,6 @@ from pathlib import Path
 
 from hara_agent.cli import main as cli_main
 from hara_agent.services.analysis import MethodContractASILService
-from hara_agent.services.extraction import scoring_standards_from_method_contract
 from hara_agent.template import TemplateRoleCompiler
 from hara_agent.workflow import HARAState
 
@@ -27,21 +26,6 @@ def test_runtime_asil_lookup_preserves_compiled_na_and_exact_source():
     assert source.source_type == "method_contract"
     assert source.location.startswith("ASIL_Table!")
     assert method.metadata["template_hash"] in source.excerpt
-
-
-def test_migration_scoring_adapter_uses_compiled_method_without_workbook_read():
-    method = _method()
-    standards = scoring_standards_from_method_contract(method, TEMPLATE)
-
-    assert standards.counts == {
-        "severity": 4,
-        "exposure_duration": 5,
-        "exposure_frequency": 5,
-        "controllability": 4,
-    }
-    assert standards.reference("severity", "S2").sheet == "Severity"
-    assert standards.reference("exposure", "E3", "T").sheet == "Exposure"
-    assert standards.method_contract_hash == method.metadata["template_hash"]
 
 
 def test_checkpoint_round_trip_retains_method_contract_identity():
@@ -69,13 +53,12 @@ def test_doctor_reports_method_contract_and_never_claims_release_ready(
         "hara_agent.cli.LLMConfig.from_env", lambda: ValidLLMConfig()
     )
 
-    result = cli_main([
-        "doctor", "--domain", "avp", "--template", str(TEMPLATE),
-    ])
+    result = cli_main(["doctor", "--template", str(TEMPLATE)])
     payload = json.loads(capsys.readouterr().out)
 
     assert result == 0
     assert payload["ready_for_draft"] is True
     assert payload["ready_for_release"] is False
     assert payload["checks"]["method_contract"]["ok"] is True
+    assert "domain_profile" not in payload["checks"]
     assert "template_hash" in payload["checks"]["method_contract"]

@@ -35,12 +35,12 @@
     "scenario_model": "0fcab2541e32b16eae86b23a7283053f671d5def344acde90971668c769fb8a6",
     "severity": "b7501449d8d3470d3e5ce355de8fd59069eb0df7f05e9a40ed5f88a8b2fb08b7",
     "exposure": "dbacdb7c36cab1ad5e256c458aaeae1bd4c0ff85876f0821fef40e32897570fd",
-    "controllability": "aa38c254ada50919bc6cbdef6288b3ef15b120bb8377990dee7725189ba9ed79",
+    "controllability": "8d0f24ca95b8fb0995d3e771875842754a87f1aa40e58a813227e77ed97fc953",
     "asil": "f2aa2776db17afcc7334a418dcf81c50f2adfb37de322a1d9c95d3d6c9bca1d7",
     "safety_goal_method": "fb4854c8fe3c02ed91674d8892cfb6e7f7261478b66487f5dc585edd5f9ac20e",
     "safe_state_method": "ad8b8bb9d536644bfa5b3f17cc954713109a6ff4996df029a6abce78cd9b0b71",
     "report_contract": "9675d02ae1f5d4f4f3961847fdf48df18263df6ee96ced4d2816e146875a4e2f",
-    "required_fact_specs": "942954ca82ffbedb6ee8b8431e84d5ee421960715d978a36faca75174902aea3"
+    "required_fact_specs": "ae98363d3481f965b8f91940ee3b24e86c612ddac1e6edf899a8112b3c2ebc06"
   },
   "source_hash_digest": "5cbe954ad61a41eaaeb26ba9e735b029d7bfa5e95a54b68b2d88d123ba6bbd08",
   "diagnostics": [

@@ -6,10 +6,12 @@ P0-2 now compiles the hash-bound `TemplateRoleContract` into a typed,
 source-traceable `MethodContract`. The current template compiles offline as
 `READY_WITH_WARNINGS`: executable rules are structurally complete, while
 unresolved workbook semantics remain explicit and fail closed. The legacy
-Domain/runtime path remains `MIGRATION_ONLY`. P0-3a now compiles one contract
-per Application run and uses it for Guidewords, scenario metadata, scoring
-scale evidence, ASIL lookup, doctor output, and checkpoint identity. Remaining
-Domain candidate/scoring/Safety Goal dependencies are explicit release
+Domain/runtime path remains `MIGRATION_ONLY`. P0-3b keeps the existing
+Application/WorkflowGraph and now uses generic MethodContract services for
+scenario binding, S/E/C rule execution, ASIL lookup, and Safety Goal/Safe State
+proposals. Domain candidates, scoring, and SG catalogs are no longer assembled
+into the Agent path. Missing canonical risk facts, unresolved template rule
+semantics, and semantic SG/Safe-State derivation remain fail-closed release
 blockers; no second computation chain was added. See
 [`FULL_TEMPLATE_COMPILER.md`](docs/architecture/FULL_TEMPLATE_COMPILER.md).
 
@@ -32,9 +34,9 @@ Template Role Contract 是系统按 `template_hash` 自动发现和缓存的派�
 | 路径 | 入口 | 当前定位 | 默认生产路由 |
 |---|---|---|---|
 | 三阶段 Controller | `main_executor.py analyze` | MIGRATION_ONLY基线 | 是（切换前） |
-| Typed Agent / `WorkflowGraph` | `main_executor.py agent` | MIGRATION_ONLY验证/Draft | 否 |
+| Typed Agent / `WorkflowGraph` | `main_executor.py agent` | Template-Driven Draft/差分验证 | 否（正式切换前） |
 | 17-step Engine | `main_executor.py fallback` | MIGRATION_ONLY回归 | 否 |
-| Template-Driven Runtime | P0-2 MethodContract编译已建立，尚未切换 | 目标架构 | 切换后唯一 |
+| Template-Driven Runtime | P0-3b已接入原Application计算链 | 目标架构迁移中 | 切换后唯一 |
 
 `WorkflowGraph` 是项目自实现的同步 runner，不是 LangGraph。当前事实、可复现命令、
 已知阻断和下一阶段依赖关系见
@@ -53,7 +55,6 @@ Template Role Contract 是系统按 `template_hash` 自动发现和缓存的派�
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\main_executor.py agent `
-  --domain avp `
   --item .\input\ItemDef.docx `
   --template .\references\HARA_Template_AI_20260327.xlsx `
   --output .\output\HARA_Report_Output.xlsx `
@@ -66,8 +67,9 @@ Template Role Contract 是系统按 `template_hash` 自动发现和缓存的派�
 `--operating-mode` 是 Scenario Candidate 的结构化运行模式输入；生产链不会从 Scenario 名称、ID 或自由文本猜测模式。
 Application 使用该值通过 `ProjectFactResolver` 选择同模式的 `SpeedEnvelope`，未知或缺失模式默认
 `UNRESOLVED_PROJECT_CONTEXT`。仅旧 ProjectFacts 没有 contextual envelope 时，才可显式使用
-`--allow-aggregate-speed-fallback`；Draft/迁移回归如需 Domain Profile 旧速度，还必须显式使用
-`--allow-legacy-speed-fallback`。两类 fallback 都保留 diagnostics/provenance，并保持待评审状态。
+`--allow-aggregate-speed-fallback`；该结果保留 `DERIVED/PENDING`
+provenance。`--allow-legacy-speed-fallback` 仅保留为命令行兼容参数，不再恢复
+Domain Profile 速度权威；缺失 ProjectFacts 时仍 fail closed。
 
 `--max-workers`控制局部补抽取、Guideword、Malfunction及Scenario语义任务的受控并发，
 范围1～32、默认4。设为1可执行确定性顺序回归；运行时会在stderr输出阶段耗时和批次进度。
@@ -89,14 +91,13 @@ Item/Function Artifact；不保存原始LLM响应，也不包含API Key。使用
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\main_executor.py agent-doctor `
-  --domain avp `
   --template .\references\HARA_Template_AI_20260327.xlsx
 ```
 
 该命令分别报告 Draft 与正式发布 readiness，不调用模型，也不生成报告。
 只有 `ready_for_draft=true` 才说明当前环境具备运行新 Agent 的最低条件；
-该 Doctor 仍报告旧 Runtime 的 Profile 状态；它不代表未来 MethodContract 的
-release readiness。Harness 的 `READY` 不等价于环境或正式发布 READY。
+该 Doctor 检查 MethodContract 与 LLM 配置，不再依赖 Domain Profile。
+Harness 的 `READY` 不等价于环境或正式发布 READY。
 
 如果项目提供了经确认的自车速度，可增加：
 
@@ -117,7 +118,7 @@ $env:PYTHONPATH="src"
 - 正式模式默认 Fail-Closed；存在 `PENDING` 时不会生成正式报告。
 - `--allow-draft` 只生成带可见水印的评审稿，不会把待评审项改成已批准。
 - ASIL 仅从本次输入模板的 `ASIL_Table` 查表，禁止默认矩阵和数值求和。
-- 当前旧链仍由 Domain Profile 给出 S/E/C 映射候选；目标链必须直接执行从 Template 编译的规则，缺失或歧义时保持 `PENDING`。
+- Agent 主链已直接执行 Template 编译的 S/E/C 规则；只接受精确规范事实和可追溯 provenance，缺失、边界或结果歧义保持 `PENDING`。
 - Exposure的`T/F`分别表示平均运行时间占比/场景发生频率，禁止由E等级机械推导。
 
 ## MIGRATION_ONLY 旧入口

@@ -17,11 +17,13 @@ filled from a Domain Profile, legacy engine, keyword default, or copied matrix.
 
 P0-2 Full Template Compiler is available under `src/hara_agent/template/` and
 compiles the current workbook to a typed, source-traceable `MethodContract`.
-P0-3a injects that contract into the existing `HARAApplication` and
-`WorkflowGraph`: Guidewords, scenario ontology metadata, S/E/C scale evidence,
-ASIL lookup, doctor output, and checkpoint template identity now share one
-compiled source. Domain scenario candidates, S/E/C decisions, and Safety Goal
-catalogs still remain migration-only and therefore block formal release.
+P0-3b keeps the existing `HARAApplication` and `WorkflowGraph` and injects
+generic MethodContract services in place: scenario dimensions are constrained
+by grounded ProjectFacts, S/E/C executes compiled rules, ASIL executes the
+compiled matrix, and Safety Goal/Safe State outputs are deterministic review-
+gated proposals. Domain candidate/scoring/SG services are not assembled into
+the Agent path. Canonical risk-fact gaps and unresolved method semantics still
+block formal release.
 
 The existing Domain runtime and legacy scripts remain operational only as
 `MIGRATION_ONLY` regression baselines until Template-Driven cutover. Do not add
@@ -34,8 +36,8 @@ legacy/deprecated runtime.
 
 | Command | Purpose |
 |---------|---------|
-| `python scripts/main_executor.py agent --domain avp --item FILE --template FILE --output FILE --max-workers 4 --allow-draft` | **Migration-only Agent path** - typed state, controlled LLM concurrency, checkpoint, quality gate and template-preserving Draft report |
-| `python scripts/main_executor.py agent-doctor --domain avp --template FILE` | Read-only readiness check for template, Domain Profile and LLM configuration |
+| `python scripts/main_executor.py agent --item FILE --template FILE --output FILE --max-workers 4 --allow-draft` | **Template-driven Agent path under cutover** - typed state, controlled LLM concurrency, checkpoint, quality gate and template-preserving Draft report |
+| `python scripts/main_executor.py agent-doctor --template FILE` | Read-only readiness check for MethodContract and LLM configuration |
 | `python scripts/main_executor.py analyze --system NAME --item FILE --template FILE` | **Smart analysis** - auto-detect experience library, else use 3-phase engine |
 | `python scripts/main_executor.py analyze --function NAME --item FILE --template FILE` | Analyze by function name |
 | `python scripts/main_executor.py analyze --system NAME --item FILE --template FILE --resume` | Resume from checkpoint |
