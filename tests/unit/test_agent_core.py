@@ -35,7 +35,7 @@ from hara_agent.models import (  # noqa: E402
 )
 from hara_agent.services.analysis import (  # noqa: E402
     DomainScoringService,
-    AVPScenarioCandidateService,
+    DomainScenarioCandidateService,
     FTTIService,
     RiskAggregationService,
     SafetyGoalCatalogService,
@@ -80,7 +80,6 @@ from hara_agent.services.validation import DownstreamPreflightService  # noqa: E
 from hara_agent.services.extraction import TemplateInputReader  # noqa: E402
 from hara_agent.services.extraction import ValidatedArtifactCache  # noqa: E402
 from scoring_sg_engine import (  # noqa: E402
-    AVPSafetyGoalCatalog,
     ControllabilityReasoningEngine,
     SeverityReasoningEngine,
 )
@@ -196,7 +195,7 @@ def test_domain_registry_is_explicit_and_fail_closed():
 
 def test_avp_safety_goal_catalog_comes_from_domain_profile():
     profile = load_domain_profile("avp", require_approved=False)
-    catalog = AVPSafetyGoalCatalog(profile)
+    catalog = SafetyGoalCatalogService(profile)
 
     assert catalog.classify("输出制动扭矩") == "SG_AVP_02"
     assert catalog.classify("车辆转向扭矩请求") == "SG_AVP_03"
@@ -3290,7 +3289,7 @@ def test_template_input_reader_loads_guidewords_and_dimensions_without_cartesian
 
 def test_avp_candidate_service_uses_risk_categories_not_template_cartesian_product():
     profile = load_domain_profile("avp", require_approved=False)
-    service = AVPScenarioCandidateService(AVPDomainPolicy(profile))
+    service = DomainScenarioCandidateService(AVPDomainPolicy(profile))
 
     candidates, audit = service.generate()
 
@@ -3309,7 +3308,7 @@ def test_avp_candidate_service_uses_risk_categories_not_template_cartesian_produ
 
 def test_atomic_scenario_expansion_is_stable_distinct_and_provenanced():
     profile = load_domain_profile("avp", require_approved=False)
-    service = AVPScenarioCandidateService(AVPDomainPolicy(profile))
+    service = DomainScenarioCandidateService(AVPDomainPolicy(profile))
     first, _ = service.generate(ego_speed_kph=5.0)
     second, _ = service.generate(ego_speed_kph=5.0)
     selected = [item for item in first if item.source_scenario_id == "near_vehicle_10"]
@@ -3328,7 +3327,7 @@ def test_atomic_scenario_expansion_is_stable_distinct_and_provenanced():
 
 def test_scenario_fact_consistency_preflight_uses_declared_relative_speed_basis():
     with pytest.raises(ScenarioFactConsistencyError, match="field=relative_speed_kph"):
-        AVPScenarioCandidateService._validate_fact_consistency(
+        DomainScenarioCandidateService._validate_fact_consistency(
             "source", "variant", {
                 "ego_speed_kph": 5.0, "target_speed_kph": 0.0,
                 "relative_speed_kph": 0.0, "relative_speed_mode": "ego",
@@ -3338,7 +3337,7 @@ def test_scenario_fact_consistency_preflight_uses_declared_relative_speed_basis(
 
 def test_scenario_structured_speed_is_not_overwritten_by_standstill_label():
     profile = load_domain_profile("avp", require_approved=False)
-    candidates, _ = AVPScenarioCandidateService(AVPDomainPolicy(profile)).generate(
+    candidates, _ = DomainScenarioCandidateService(AVPDomainPolicy(profile)).generate(
         ego_speed_kph=5.0,
     )
     standstill = next(
@@ -3381,7 +3380,7 @@ def test_scenario_smoke_wires_runtime_policy_and_enters_scenario_agent(monkeypat
     CheckpointRepository(smoke_dir).save(checkpoint)
 
     received_policies = []
-    real_candidate_service = scenario_smoke.AVPScenarioCandidateService
+    real_candidate_service = scenario_smoke.DomainScenarioCandidateService
 
     class RecordingCandidateService:
         def __init__(self, policy):
@@ -3415,7 +3414,9 @@ def test_scenario_smoke_wires_runtime_policy_and_enters_scenario_agent(monkeypat
             return LLMResponse(data={"assessments": assessments}, model="fake-model")
 
     runtime = default_domain_registry().create("avp", require_approved=False)
-    monkeypatch.setattr(scenario_smoke, "AVPScenarioCandidateService", RecordingCandidateService)
+    monkeypatch.setattr(
+        scenario_smoke, "DomainScenarioCandidateService", RecordingCandidateService
+    )
     monkeypatch.setattr(scenario_smoke, "create_llm_client", lambda config: FakeClient())
     monkeypatch.setenv("HARA_LLM_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("HARA_LLM_MODEL", "fake-model")

@@ -17,7 +17,7 @@ from hara_agent.domains import default_domain_registry
 from hara_agent.infrastructure.llm import create_llm_client
 from hara_agent.models import MalfunctionCandidate, ReviewStatus
 from hara_agent.services.analysis import (
-    AVPScenarioCandidateService, DomainScoringService, FTTIService,
+    DomainScenarioCandidateService, DomainScoringService, FTTIService,
     SafetyGoalCatalogService, TemplateASILService,
 )
 from hara_agent.services.extraction import TemplateInputReader
@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     selected_ids = {item.malfunction_id for item in selected_malfunctions}
     state.malfunctions = [item for item in state.malfunctions if item["malfunction_id"] in selected_ids]
 
-    scenario_candidates = AVPScenarioCandidateService(policy)
+    scenario_candidates = DomainScenarioCandidateService(policy)
     candidates, _ = scenario_candidates.generate(
         ego_speed_kph=args.ego_speed_kph,
     )

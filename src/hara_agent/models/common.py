@@ -21,6 +21,7 @@ class FactProvenance(str, Enum):
     LEGACY_MIGRATION = "LEGACY_MIGRATION"
     DERIVED = "DERIVED"
     LLM_INFERENCE = "LLM_INFERENCE"
+    HUMAN_CONFIRMATION = "HUMAN_CONFIRMATION"
 
 
 # Architecture documents use authority and provenance for the same axis.

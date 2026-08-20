@@ -15,6 +15,7 @@ from hara_agent.models import (
     SourceRef,
 )
 from hara_agent.services.analysis.project_fact_resolver import SpeedResolutionResult
+from .method_risk_fact_service import MethodRiskFactBindingService
 from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
 
 
@@ -23,6 +24,7 @@ class MethodScenarioCandidateService:
 
     def __init__(self, method: MethodContract):
         self.method = method
+        self.risk_facts = MethodRiskFactBindingService(method)
 
     @staticmethod
     def _normalize(value: str) -> str:
@@ -198,6 +200,7 @@ class MethodScenarioCandidateService:
         ]
         contexts = self._driver_contexts(project_facts)
         candidates: list[ScenarioCandidate] = []
+        risk_fact_audits: list[dict[str, Any]] = []
         unresolved_count = 0
         project_sources = list(project_facts.sources)
         speed_sources = list(speed_resolution.source_refs)
@@ -277,6 +280,14 @@ class MethodScenarioCandidateService:
                 json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
             ).hexdigest()
             scenario_id = f"SCN-METHOD-{fingerprint[:16].upper()}"
+            risk_binding = self.risk_facts.bind(project_facts, {
+                **facts,
+                "scenario_id": scenario_id,
+                "atomic_variant": context["context_id"],
+            })
+            facts.update(risk_binding.values)
+            fact_provenance.update(risk_binding.provenance)
+            risk_fact_audits.append(risk_binding.audit)
             summary = "；".join(
                 value["method_value"] or value["project_value"] or f"{name}:未解析"
                 for name, value in bindings.items()
@@ -310,10 +321,14 @@ class MethodScenarioCandidateService:
                 context_resolution={
                     "ego_speed_kph": speed_resolution.to_dict(),
                     "dimension_bindings": bindings,
+                    "risk_fact_binding": risk_binding.audit,
                 },
                 fact_provenance=fact_provenance,
                 status=(ReviewStatus.FINALIZED if finalized else ReviewStatus.PENDING),
-                sources=list(dict.fromkeys([*project_sources, *speed_sources, *method_sources])),
+                sources=list(dict.fromkeys([
+                    *project_sources, *speed_sources, *method_sources,
+                    *risk_binding.sources,
+                ])),
                 rule_version=self.method.contract_version,
                 review_reason=(
                     "" if finalized
@@ -336,5 +351,20 @@ class MethodScenarioCandidateService:
             "speed_source_status": speed_resolution.resolution_status.value,
             "speed_resolution": speed_resolution.to_dict(),
             "driver_context_count": len(contexts),
+            "bound_risk_fact_count": sum(
+                len(item["bound_fact_types"]) for item in risk_fact_audits
+            ),
+            "missing_risk_fact_types": sorted({
+                fact_type for item in risk_fact_audits
+                for fact_type in item["missing_fact_types"]
+            }),
+            "conflicting_risk_fact_types": sorted({
+                fact_type for item in risk_fact_audits
+                for fact_type in item["conflicting_fact_types"]
+            }),
+            "risk_fact_template_hash_mismatch_count": max(
+                (item["template_hash_mismatch_count"] for item in risk_fact_audits),
+                default=0,
+            ),
             "scenario_contract_version": SCENARIO_CONTRACT_VERSION,
         }

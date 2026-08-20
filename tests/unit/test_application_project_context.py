@@ -7,9 +7,13 @@ import pytest
 
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
+from hara_agent.contracts import FactType
 from hara_agent.models import (
     FactProvenance,
     ItemDefinitionFacts,
+    MethodRiskFactBinding,
+    ReviewStatus,
+    RiskFact,
     ScenarioCandidate,
     SourceRef,
     SpeedEnvelope,
@@ -152,6 +156,45 @@ def test_unmatched_project_dimension_remains_pending_without_synonym_guessing():
     assert all(
         item.facts["method_scenario_dimensions"]["WEATHER"]["binding_status"]
         == "UNRESOLVED"
+        for item in candidates
+    )
+
+
+def test_application_candidate_carries_hash_bound_canonical_risk_fact():
+    service = _service()
+    facts = _facts()
+    source = SourceRef(
+        "human_confirmation", "review-1", "EXPOSURE", "confirmed F"
+    )
+    facts.risk_facts = [RiskFact(
+        fact_id="RF-EXPOSURE-PARKING",
+        parameter="exposure method",
+        value="F",
+        context={"operating_mode": "parking"},
+        source_refs=[source],
+        provenance=FactProvenance.PROJECT_INPUT,
+        approval=ReviewStatus.FINALIZED,
+        produced_by="source_extraction",
+    )]
+    facts.method_risk_fact_bindings = [MethodRiskFactBinding(
+        source_fact_id="RF-EXPOSURE-PARKING",
+        target_fact_type=FactType.EXPOSURE.value,
+        method_contract_hash=str(service.method.metadata["template_hash"]),
+        source_refs=[source],
+        provenance=FactProvenance.HUMAN_CONFIRMATION,
+        approval=ReviewStatus.FINALIZED,
+        binding_method="engineering_review",
+    )]
+
+    candidates, audit = HARAApplication(_config(), object()).prepare_scenario_candidates(
+        _state(facts), service
+    )
+
+    assert audit["bound_risk_fact_count"] == len(candidates)
+    assert all(item.facts["exposure_method"] == "F" for item in candidates)
+    assert all(
+        item.fact_provenance["exposure_method"]["provenance"]
+        == "HUMAN_CONFIRMATION"
         for item in candidates
     )
 

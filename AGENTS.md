@@ -17,13 +17,16 @@ filled from a Domain Profile, legacy engine, keyword default, or copied matrix.
 
 P0-2 Full Template Compiler is available under `src/hara_agent/template/` and
 compiles the current workbook to a typed, source-traceable `MethodContract`.
-P0-3b keeps the existing `HARAApplication` and `WorkflowGraph` and injects
+P0-3c keeps the existing `HARAApplication` and `WorkflowGraph` and injects
 generic MethodContract services in place: scenario dimensions are constrained
 by grounded ProjectFacts, S/E/C executes compiled rules, ASIL executes the
 compiled matrix, and Safety Goal/Safe State outputs are deterministic review-
 gated proposals. Domain candidate/scoring/SG services are not assembled into
 the Agent path. Canonical risk-fact gaps and unresolved method semantics still
-block formal release.
+block formal release. Risk facts are strong typed and source-linked but remain
+template-independent. A separate MethodRiskFactBinding is bound to the exact
+MethodContract template hash; hash mismatch, invalid units/values, or equal-
+specificity conflicts remain unresolved.
 
 The existing Domain runtime and legacy scripts remain operational only as
 `MIGRATION_ONLY` regression baselines until Template-Driven cutover. Do not add

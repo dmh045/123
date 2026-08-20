@@ -4,6 +4,7 @@ from .item_definition import FunctionDefinition
 from .item_facts import ItemDefinitionFacts, SpeedEnvelope
 from .project_facts import (
     ConstraintOperator, DriverContextFact, DriverLocation,
+    MethodRiskFactBinding, RiskFact,
     NumericConstraintFact, ProjectFactOutputType,
 )
 from .malfunction import GuidewordAssessment, MalfunctionCandidate
@@ -14,7 +15,7 @@ from .scenario import ScenarioCandidate, ScenarioFeasibilityAssessment
 __all__ = [
     "EvidenceValue", "EvidenceKind", "EvidenceRecord", "EVIDENCE_NAMESPACES",
     "FactAuthority", "FactProvenance", "FunctionDefinition", "ItemDefinitionFacts",
-    "SpeedEnvelope", "ConstraintOperator", "DriverContextFact", "DriverLocation",
+    "SpeedEnvelope", "RiskFact", "MethodRiskFactBinding", "ConstraintOperator", "DriverContextFact", "DriverLocation",
     "NumericConstraintFact", "ProjectFactOutputType", "GuidewordAssessment", "MalfunctionCandidate",
     "ReviewStatus", "RiskAssessment", "RiskGroup", "SafetyGoal",
     "ScenarioCandidate", "ScenarioFeasibilityAssessment", "SourceRef",

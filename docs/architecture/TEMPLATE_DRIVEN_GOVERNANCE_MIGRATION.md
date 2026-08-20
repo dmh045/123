@@ -108,9 +108,19 @@ Role discovery priority is:
 4. bounded LLM classification of existing candidates;
 5. fail closed.
 
-## Deletion Inventory for Cutover
+## Deletion Inventory and Retirement Gates
 
-Nothing in this inventory is deleted in P0.
+Deletion is staged by observable gates, not by file age.
+
+Already safe and removed during P0-3:
+
+- the `MethodContract -> TemplateScoringStandards -> DomainScoringService`
+  bridge, which recreated dual authority;
+- the `AVPScenarioCandidateService` and `AVPSafetyGoalCatalog` aliases;
+- Domain/Profile assembly and legacy-speed fallback from `HARAApplication`.
+
+The files below remain only because the default route, differential harness,
+or legacy report baseline still imports them. They receive no new rules.
 
 ### Files and configuration
 
@@ -130,8 +140,7 @@ Nothing in this inventory is deleted in P0.
 ### Classes and interfaces
 
 - `DomainRegistry`, `DomainRuntime`, `DomainProfile`, `DomainPolicy`
-- `AVPDomainPolicy`, `DomainScenarioCandidateService`,
-  `AVPScenarioCandidateService`
+- `AVPDomainPolicy`, `DomainScenarioCandidateService`
 - `DomainScoringService`, `SafetyGoalCatalogService`
 - `V13ScoringAdapter` and three-phase JSON import nodes
 - fixed `HARATemplateContract` coordinates after the Report Role Contract takes
@@ -160,3 +169,26 @@ Nothing in this inventory is deleted in P0.
 2. P0-4 ReportContract renderer cutover plus differential/quality gates
 3. P0-5 make the Template-Driven Application the default production route
 4. P0-6 delete the old Domain and legacy runtimes after retained-baseline signoff
+
+P0-3c keeps source facts template-independent. `RiskFact` stores reusable
+project/scenario evidence; `MethodRiskFactBinding` stores the target Method IR
+FactType, exact `template_hash`, binding provenance, and approval. A workbook
+change recompiles/reconfirms bindings without forcing source fact re-extraction.
+Exact canonical parameter names bind automatically; noncanonical or ambiguous
+parameters require a separate reviewed binding record.
+
+### Concrete deletion gates
+
+- After P0-3c: delete only obsolete adapters/aliases and no-op Agent
+  compatibility fields whose repository-wide consumer count is zero.
+- After P0-4: remove fixed `HARATemplateContract` coordinates only when the
+  ReportContract renderer passes workbook integrity, column mapping, merge,
+  styling, and Draft watermark regression tests.
+- After P0-5: remove Agent `--domain`, `domain_profile_path`, and legacy-speed
+  compatibility fields once the template-driven command is the default route
+  and old checkpoints have an explicit archive/migration policy.
+- At P0-6: delete `src/hara_agent/domains/`, `config/domains/`, compatibility
+  import nodes, three-phase/17-step engines, old scoring/catalog services, and
+  their tests only after representative real-item differential findings are
+  reviewed, the new renderer is signed off, and the pre-deletion baseline is
+  retained in Git. Do not keep a second deprecated runtime afterward.

@@ -850,9 +850,6 @@ class SafetyGoalGenerator:
         return f"避免因{guideword_text}{malfunction_text}导致在{scenario_text}发生{hazard_text}"
 
 
-AVPSafetyGoalCatalog = SafetyGoalCatalogService
-
-
 class SafetyStateGenerator:
     """安全状态推理引擎（Step17）"""
 
@@ -1001,7 +998,7 @@ class ScoringSGEngine:
         self.risk_aggregation_service = RiskAggregationService()
         self.safety_goal_generator = SafetyGoalGenerator()
         self.safety_state_generator = SafetyStateGenerator()
-        self.avp_safety_goal_catalog = AVPSafetyGoalCatalog(self.domain_profile)
+        self.avp_safety_goal_catalog = SafetyGoalCatalogService(self.domain_profile)
 
     @staticmethod
     def _tag_legacy_scoring_result(result: Dict[str, Any], dimension: str):
@@ -1146,7 +1143,7 @@ class ScoringSGEngine:
         """执行完整的Step9-17流程"""
         # A controller may retry the same engine instance.  Aggregation must
         # be rebuilt from the current run instead of retaining old links.
-        self.avp_safety_goal_catalog = AVPSafetyGoalCatalog(self.domain_profile)
+        self.avp_safety_goal_catalog = SafetyGoalCatalogService(self.domain_profile)
         if not self.load_inputs():
             return {"success": False, "error": "加载输入数据失败"}
 

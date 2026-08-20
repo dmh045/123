@@ -6,13 +6,18 @@ P0-2 now compiles the hash-bound `TemplateRoleContract` into a typed,
 source-traceable `MethodContract`. The current template compiles offline as
 `READY_WITH_WARNINGS`: executable rules are structurally complete, while
 unresolved workbook semantics remain explicit and fail closed. The legacy
-Domain/runtime path remains `MIGRATION_ONLY`. P0-3b keeps the existing
+Domain/runtime path remains `MIGRATION_ONLY`. P0-3c keeps the existing
 Application/WorkflowGraph and now uses generic MethodContract services for
 scenario binding, S/E/C rule execution, ASIL lookup, and Safety Goal/Safe State
 proposals. Domain candidates, scoring, and SG catalogs are no longer assembled
 into the Agent path. Missing canonical risk facts, unresolved template rule
 semantics, and semantic SG/Safe-State derivation remain fail-closed release
-blockers; no second computation chain was added. See
+blockers. Reusable `RiskFact` records are independent from templates; a
+separate `MethodRiskFactBinding` maps them to Method IR and binds only that
+mapping/confirmation to the exact `template_hash`. A different hash is rejected and
+equal-specificity conflicts remain unresolved. Exact ontology-name bindings
+compile automatically; the bounded semantic RiskFact producer and confirmation
+UI are still pending. No second computation chain was added. See
 [`FULL_TEMPLATE_COMPILER.md`](docs/architecture/FULL_TEMPLATE_COMPILER.md).
 
 HARA V13 已确定 Template-Driven 目标架构：
@@ -36,7 +41,7 @@ Template Role Contract 是系统按 `template_hash` 自动发现和缓存的派�
 | 三阶段 Controller | `main_executor.py analyze` | MIGRATION_ONLY基线 | 是（切换前） |
 | Typed Agent / `WorkflowGraph` | `main_executor.py agent` | Template-Driven Draft/差分验证 | 否（正式切换前） |
 | 17-step Engine | `main_executor.py fallback` | MIGRATION_ONLY回归 | 否 |
-| Template-Driven Runtime | P0-3b已接入原Application计算链 | 目标架构迁移中 | 切换后唯一 |
+| Template-Driven Runtime | P0-3c已建立hash-bound RiskFact绑定 | 目标架构迁移中 | 切换后唯一 |
 
 `WorkflowGraph` 是项目自实现的同步 runner，不是 LangGraph。当前事实、可复现命令、
 已知阻断和下一阶段依赖关系见

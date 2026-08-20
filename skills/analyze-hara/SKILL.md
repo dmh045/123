@@ -15,6 +15,8 @@ description: Perform evidence-linked HARA semantic analysis after Item Definitio
 6. Evaluate all feasible, risk-distinguishing candidates before aggregation. Do not enforce a fixed number of scenarios per malfunction.
 7. Aggregate only scenarios with an equivalent risk signature; retain covered scenario IDs and the merge rationale.
 8. Execute compiled template S/E/C rules against scenario facts and produce concise, source-linked rationales. Mark missing rules or facts `PENDING`.
+   Accept canonical facts only when their MethodContract hash matches; resolve
+   neither invalid units/values nor equal-specificity context conflicts by precedence guessing.
 9. Calculate ASIL only through `MethodContract.asil`, compiled from the active template; never use arithmetic scoring or a copied matrix.
 10. Propose Safety Goals by safety intent, highest ASIL, most stringent FTTI, and safe-state semantics rather than one goal per HARA row.
 

@@ -13,6 +13,9 @@ description: Extract and validate a typed, traceable HARA Item Definition from D
 4. Keep the concise function name separate from its output and supporting description.
 5. Build the ODD envelope from all operating modes and sub-phases, while preserving mode-specific limits.
 6. Run structural and semantic validation before releasing functions to HAZOP analysis.
+7. Emit risk-fact candidates only through the strong typed, template-independent
+   contract with exact source evidence. Compile a separate MethodRiskFactBinding
+   for the active template; bounded LLM output remains `PENDING` until approved.
 
 ## Rejection rules
 

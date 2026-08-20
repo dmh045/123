@@ -20,7 +20,7 @@ from hara_agent.config import LLMConfig
 from hara_agent.domains import default_domain_registry
 from hara_agent.infrastructure.llm import create_llm_client
 from hara_agent.models import MalfunctionCandidate, ReviewStatus
-from hara_agent.services.analysis import AVPScenarioCandidateService
+from hara_agent.services.analysis import DomainScenarioCandidateService
 from hara_agent.services.extraction import DocumentReader
 from hara_agent.services.semantic import ItemEvidenceRouter
 from hara_agent.services.semantic import ScenarioFeasibilityAgent
@@ -70,7 +70,7 @@ def _scenario_report(args, parser):
         confidence=float(malfunction_data.get("confidence", 0.0)),
         model_local_id=malfunction_data.get("model_local_id", ""),
     )
-    candidates, _ = AVPScenarioCandidateService(runtime.policy).generate(
+    candidates, _ = DomainScenarioCandidateService(runtime.policy).generate(
         ego_speed_kph=args.ego_speed_kph,
     )
     scenario = next(item for item in candidates if item.scenario_id == args.scenario_id)

@@ -14,6 +14,8 @@ from hara_agent.contracts import (
     RangePredicate,
 )
 
+from .method_risk_fact_service import METHOD_FACT_KEYS
+
 
 @dataclass(frozen=True)
 class RuleEvaluation:
@@ -33,15 +35,10 @@ class MethodRuleScoringService:
     traceable proposal with ``PENDING`` status.
     """
 
-    FACT_KEYS = {
-        FactType.COLLISION_TYPE: "collision_type",
-        FactType.ROAD_USER_TYPE: "road_user_type",
-        FactType.SPEED_UNSPECIFIED: "speed_unspecified_kph",
-        FactType.DURATION_PERCENT: "duration_percent",
-        FactType.OCCURRENCE_FREQUENCY: "occurrence_frequency",
-        FactType.AVOIDABILITY_PERCENT: "avoidability_percent",
+    FACT_KEYS = METHOD_FACT_KEYS
+    FINAL_AUTHORITIES = {
+        "PROJECT_INPUT", "METHOD_CONTRACT", "DERIVED", "HUMAN_CONFIRMATION"
     }
-    FINAL_AUTHORITIES = {"PROJECT_INPUT", "METHOD_CONTRACT", "DERIVED"}
 
     def __init__(self, method: MethodContract):
         if not method.engineering_rules_compiled:

@@ -33,7 +33,7 @@ from hara_agent.models import (
     EvidenceKind, FactProvenance, ItemDefinitionFacts, MalfunctionCandidate,
     ReviewStatus, ScenarioCandidate, SourceRef,
 )
-from hara_agent.services.analysis import AVPScenarioCandidateService, ProjectFactResolver
+from hara_agent.services.analysis import DomainScenarioCandidateService, ProjectFactResolver
 from hara_agent.services.semantic import (
     ScenarioFeasibilityAgent, ScenarioProviderContractError,
     build_project_evidence_registry,
@@ -282,7 +282,7 @@ def _load_real_pair(args):
     project_registry = build_project_evidence_registry(facts)
     speed = ProjectFactResolver().resolve_speed_context(facts, "parking")
     runtime = default_domain_registry().create("avp", require_approved=False)
-    candidates, candidate_audit = AVPScenarioCandidateService(runtime.policy).generate(
+    candidates, candidate_audit = DomainScenarioCandidateService(runtime.policy).generate(
         operating_mode=speed.operating_mode,
         speed_resolution=speed,
         project_driver_contexts=None,

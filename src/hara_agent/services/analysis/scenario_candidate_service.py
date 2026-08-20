@@ -246,7 +246,6 @@ class DomainScenarioCandidateService:
             "scenario_contract_version": SCENARIO_CONTRACT_VERSION,
             "atomic_candidate_count": len(candidates),
         }
-
     @staticmethod
     def _identity_token(value: str) -> str:
         token = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
@@ -346,6 +345,3 @@ class DomainScenarioCandidateService:
             ],
             **metadata,
         }
-
-
-AVPScenarioCandidateService = DomainScenarioCandidateService
