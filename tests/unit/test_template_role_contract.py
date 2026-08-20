@@ -51,14 +51,9 @@ def test_current_template_discovers_all_canonical_roles():
     assert contract.binding(TemplateRole.GUIDEWORD_TABLE).region == "A2:B16"
     assert contract.binding(TemplateRole.HARA_OUTPUT_TABLE).sheet == "05_HARA"
 
-    method = TemplateRoleCompiler().compile_method_foundation(
-        TEMPLATE, use_manifest=False
-    )
-    assert method.metadata["engineering_rules_compiled"] is False
-    assert method.severity.roles == (
-        TemplateRole.SEVERITY_LEVELS,
-        TemplateRole.SEVERITY_RULES,
-    )
+    method = TemplateRoleCompiler().compile_method(TEMPLATE, use_manifest=False)
+    assert method.engineering_rules_compiled is True
+    assert len(method.severity.rules) == 24
 
 
 def test_severity_sheet_rename_keeps_same_source_regions(template_workspace: Path):

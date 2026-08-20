@@ -6,6 +6,7 @@ from hara_agent.contracts import (
     MethodContract, TemplateRoleConfirmation, TemplateRoleContract,
 )
 
+from .method_compiler import FullTemplateCompiler
 from .role_resolver import TemplateRoleClassifier, TemplateRoleResolver
 from .scanner import TemplateWorkbookScanner
 
@@ -62,15 +63,19 @@ class TemplateRoleCompiler:
             self.manifest_store.save(contract)
         return contract
 
-    def compile_method_foundation(
+    def compile_method(
         self,
         template_path: str | Path,
         *,
         confirmation: TemplateRoleConfirmation | None = None,
         use_manifest: bool = True,
     ) -> MethodContract:
-        return MethodContract.from_role_contract(
-            self.compile(
-                template_path, confirmation=confirmation, use_manifest=use_manifest
-            )
-        )
+        snapshot = self.scanner.scan(template_path)
+        role_contract: TemplateRoleContract | None = None
+        if use_manifest and confirmation is None and self.manifest_store is not None:
+            role_contract = self.manifest_store.load(snapshot.source_hash)
+        if role_contract is None:
+            role_contract = self.resolver.resolve(snapshot, confirmation=confirmation)
+            if self.manifest_store is not None:
+                self.manifest_store.save(role_contract)
+        return FullTemplateCompiler().compile(snapshot, role_contract)

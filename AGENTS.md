@@ -15,6 +15,11 @@ The repository is migrating to the following authoritative architecture:
 Missing method rules or project facts remain `PENDING`; they must never be
 filled from a Domain Profile, legacy engine, keyword default, or copied matrix.
 
+P0-2 Full Template Compiler is available under `src/hara_agent/template/` and
+compiles the current workbook to a typed, source-traceable `MethodContract`.
+Production Application cutover has not occurred; old runtime behavior remains
+comparison-only.
+
 The existing Domain runtime and legacy scripts remain operational only as
 `MIGRATION_ONLY` regression baselines until Template-Driven cutover. Do not add
 new business rules to `config/domains/`, `AVPDomainPolicy`,
@@ -57,8 +62,9 @@ main_executor.analyze() → match_input() →
 Use only the ASIL matrix discovered in the active input template and compiled
 into `MethodContract.asil`. Do not calculate ASIL from a numerical sum or copy
 the matrix into code/configuration. Missing, incomplete, conflicting, or
-ambiguous matrices and invalid S/E/C values are hard errors. Template `NA`
-entries on the S0/E0/C0 axes are exported as `QM`.
+ambiguous matrices and invalid S/E/C values are hard errors. Preserve `NA` as
+distinct from `QM` unless the active template itself proves equivalence; old
+runtime conversion behavior is not method authority.
 
 ## Fallback Governance
 

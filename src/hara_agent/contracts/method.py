@@ -4,11 +4,10 @@ import json
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 TEMPLATE_ROLE_CONTRACT_VERSION = "template-role-v1"
-METHOD_CONTRACT_VERSION = "method-contract-foundation-v1"
 
 
 class TemplateRole(str, Enum):
@@ -228,89 +227,3 @@ class TemplateRoleContract:
                 f"expected={expected_template_hash}, actual={contract.template_hash}"
             )
         return contract
-
-
-@dataclass(frozen=True)
-class MethodSection:
-    name: str
-    roles: tuple[TemplateRole, ...]
-    source_bindings: tuple[RoleBinding, ...]
-    compile_status: str = "ROLE_BOUND_RULES_NOT_COMPILED"
-
-
-@dataclass(frozen=True)
-class MethodContract:
-    """P0 boundary for the future executable method contract.
-
-    P0 binds method sections to workbook roles only. It deliberately does not
-    copy Domain Profile rules or claim that engineering rules are compiled.
-    """
-
-    metadata: dict[str, Any]
-    workflow: MethodSection
-    guidewords: MethodSection
-    scenario_model: MethodSection
-    severity: MethodSection
-    exposure: MethodSection
-    controllability: MethodSection
-    asil: MethodSection
-    safety_goal_method: MethodSection
-    safe_state_method: MethodSection
-    report_contract: MethodSection
-    required_facts: tuple[str, ...] = ()
-    diagnostics: tuple[TemplateDiagnostic, ...] = ()
-    contract_version: str = METHOD_CONTRACT_VERSION
-
-    @classmethod
-    def from_role_contract(cls, contract: TemplateRoleContract) -> "MethodContract":
-        if not contract.ready:
-            raise ValueError("TemplateRoleContract is not ready for MethodContract foundation")
-
-        def section(name: str, roles: Iterable[TemplateRole]) -> MethodSection:
-            role_tuple = tuple(roles)
-            bindings = tuple(
-                binding
-                for role in role_tuple
-                for binding in contract.bindings_for(role)
-            )
-            return MethodSection(name=name, roles=role_tuple, source_bindings=bindings)
-
-        return cls(
-            metadata={
-                "template_id": contract.template_id,
-                "template_hash": contract.template_hash,
-                "role_contract_version": contract.contract_version,
-                "engineering_rules_compiled": False,
-            },
-            workflow=section("workflow", (TemplateRole.WORKFLOW,)),
-            guidewords=section("guidewords", (TemplateRole.GUIDEWORD_TABLE,)),
-            scenario_model=section("scenario_model", (TemplateRole.SCENARIO_MODEL,)),
-            severity=section(
-                "severity", (TemplateRole.SEVERITY_LEVELS, TemplateRole.SEVERITY_RULES)
-            ),
-            exposure=section(
-                "exposure",
-                (
-                    TemplateRole.EXPOSURE_DURATION_RULES,
-                    TemplateRole.EXPOSURE_FREQUENCY_RULES,
-                    TemplateRole.EXPOSURE_EXAMPLES,
-                    TemplateRole.VDA702_SUMMARY,
-                    TemplateRole.VDA702_FULL,
-                    TemplateRole.SITUATION_CATALOG,
-                ),
-            ),
-            controllability=section(
-                "controllability",
-                (TemplateRole.CONTROLLABILITY_LEVELS, TemplateRole.CONTROLLABILITY_RULES),
-            ),
-            asil=section("asil", (TemplateRole.ASIL_MATRIX,)),
-            safety_goal_method=section(
-                "safety_goal_method", (TemplateRole.SAFETY_GOAL_METHOD,)
-            ),
-            safe_state_method=section("safe_state_method", (TemplateRole.SAFE_STATE_METHOD,)),
-            report_contract=section(
-                "report_contract",
-                (TemplateRole.HARA_OUTPUT_TABLE, TemplateRole.SAFETY_GOAL_OUTPUT_TABLE),
-            ),
-            diagnostics=contract.diagnostics,
-        )

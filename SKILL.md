@@ -40,6 +40,7 @@ input and contains no copied engineering rules.
 The Domain runtime and three-phase/17-step scripts remain `MIGRATION_ONLY` for
 baseline comparison until Template-Driven cutover. Do not add new business
 rules to them and do not treat them as future authority. P0 Template Role
-discovery lives under `src/hara_agent/template/`; subsequent phases compile the
-full MethodContract, cut over Application, and then delete the old runtime
+discovery and P0-2 full MethodContract compilation live under
+`src/hara_agent/template/`. Subsequent phases build the generic rule engine and
+ProjectFacts planning, cut over Application, and then delete the old runtime
 without a replacement compatibility path.

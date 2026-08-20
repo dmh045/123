@@ -365,16 +365,23 @@ class TemplateRoleResolver:
             if len(matched) < 4 or len({cell.column for cell in matched.values()}) < 4:
                 continue
             columns = [cell.column for cell in matched.values()]
+            header_columns = sorted(cell.column for cell in row_cells)
+            lower = min(columns)
+            upper = max(columns)
+            while lower - 1 in header_columns:
+                lower -= 1
+            while upper + 1 in header_columns:
+                upper += 1
             data_cells = [
                 cell for cell in sheet.cells
-                if cell.row >= header.row and min(columns) <= cell.column <= max(columns)
+                if cell.row >= header.row and lower <= cell.column <= upper
             ]
             region = self._cells_region(data_cells)
             found[TemplateRole.SCENARIO_MODEL].append(
                 self._binding(
                     TemplateRole.SCENARIO_MODEL, sheet, region,
                     "structural_dimension_signature",
-                    (f"dimension_count={len(matched)}", f"header_row={header.row}"),
+                    (f"dimension_count={upper - lower + 1}", f"header_row={header.row}"),
                     tuple(sorted(matched)), 0.96,
                 )
             )

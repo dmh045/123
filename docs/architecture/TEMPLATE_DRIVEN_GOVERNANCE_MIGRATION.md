@@ -53,6 +53,21 @@ template-hash-bound manifests, diagnostics, and a non-executable
 `engineering_rules_compiled=false`; full rule parsing and evaluation belong to
 the next phases.
 
+## P0-2 Full Template Compiler
+
+P0-2 extends the foundation without switching production runtime. The
+hash-bound role locations now compile through role-specific parsers into a
+typed Rule IR and full `MethodContract`. Normative rules, criteria, examples,
+assumptions/instructions, and references retain different strengths. Every
+executable normative rule has an exact workbook `SourceRef`.
+
+The current workbook compiles as `READY_WITH_WARNINGS` with
+`engineering_rules_compiled=true`. Warnings preserve unresolved source
+semantics (including the meaning of severity variable `v`, alternative
+severity results, exposure method selection, workflow coordinate mismatches,
+and NA versus QM). None is silently repaired from the migration-only Domain
+runtime.
+
 Role discovery priority is:
 
 1. explicit metadata / named ranges / structured tables that satisfy the role;
@@ -109,8 +124,7 @@ Nothing in this inventory is deleted in P0.
 
 ## Next Phases
 
-1. P0-2 Full Template Compiler
-2. P0-3 Generic ProjectFacts Compiler
-3. P0-4 Generic HARA Rule Engines
-4. P0-5 Application Cutover
-5. P0-6 Delete Old Runtime
+1. P0-3 Generic Rule Engine + Template-Driven ProjectFacts Planning
+2. P0-4 Application differential and quality gates
+3. P0-5 Application Cutover
+4. P0-6 Delete Old Runtime

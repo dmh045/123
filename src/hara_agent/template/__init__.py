@@ -1,4 +1,5 @@
 from .compiler import TemplateRoleCompiler, TemplateRoleManifestStore
+from .method_compiler import FullTemplateCompiler
 from .errors import (
     TemplateRoleAmbiguityError, TemplateRoleDiscoveryError, TemplateRoleMissingError,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "CellSnapshot", "HeaderCandidate", "NamedRangeSnapshot", "RoleClassification",
     "SheetSnapshot", "TableSnapshot", "TemplateRoleAmbiguityError",
     "TemplateRoleClassifier", "TemplateRoleCompiler", "TemplateRoleDiscoveryError",
-    "TemplateRoleManifestStore", "TemplateRoleMissingError", "TemplateRoleResolver",
+    "FullTemplateCompiler", "TemplateRoleManifestStore",
+    "TemplateRoleMissingError", "TemplateRoleResolver",
     "TemplateWorkbookScanner", "WorkbookSnapshot", "normalize_template_text",
 ]
