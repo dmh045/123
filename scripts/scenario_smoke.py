@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     safety_goal_catalog = SafetyGoalCatalogService(profile)
-    DownstreamPreflightService(safety_goal_catalog).validate(state)
+    DownstreamPreflightService().validate(state)
     assess_scenarios(state, agent, selected_malfunctions, selected_scenarios, max_workers=1)
     score_structured_scenarios(
         state, DomainScoringService(policy, template_inputs.scoring_standards),

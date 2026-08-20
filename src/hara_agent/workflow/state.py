@@ -38,6 +38,7 @@ class HARAState:
     stage: WorkflowStage = WorkflowStage.INITIALIZE
     domain: str = ""
     profile_version: str = ""
+    method_contract: dict[str, Any] = field(default_factory=dict)
     item_definition: dict[str, Any] = field(default_factory=dict)
     functions: list[dict[str, Any]] = field(default_factory=list)
     malfunctions: list[dict[str, Any]] = field(default_factory=list)
@@ -78,6 +79,7 @@ class HARAState:
             stage=WorkflowStage(value.get("stage", WorkflowStage.INITIALIZE.value)),
             domain=str(value.get("domain", "")),
             profile_version=str(value.get("profile_version", "")),
+            method_contract=dict(value.get("method_contract", {})),
             item_definition=dict(value.get("item_definition", {})),
             functions=list(value.get("functions", [])),
             malfunctions=list(value.get("malfunctions", [])),

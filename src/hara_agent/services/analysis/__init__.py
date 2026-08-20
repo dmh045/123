@@ -1,4 +1,4 @@
-from .asil_service import TemplateASILService
+from .asil_service import MethodContractASILService, TemplateASILService
 from .ftti_service import FTTIService, FTTI_FINALIZED, FTTI_NEEDS_REVIEW, FTTI_NOT_REQUIRED
 from .risk_aggregation_service import RiskAggregationService
 from .scoring_service import DomainScoringService
@@ -13,11 +13,13 @@ from .project_fact_resolver import (
     UnresolvedProjectContextError,
     canonical_operating_mode,
 )
+from .protocols import ASILLookupService, SafetyGoalService, ScenarioScoringService
 
 __all__ = [
     "DomainScoringService", "FTTIService", "FTTI_FINALIZED", "FTTI_NEEDS_REVIEW",
     "FTTI_NOT_REQUIRED", "RiskAggregationService", "SafetyGoalCatalogService",
-    "TemplateASILService",
+    "MethodContractASILService", "TemplateASILService",
+    "ASILLookupService", "SafetyGoalService", "ScenarioScoringService",
     "AVPScenarioCandidateService",
     "DomainScenarioCandidateService",
     "ProjectContextResolutionStatus", "ProjectFactContextResolver",

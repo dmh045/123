@@ -6,8 +6,11 @@ P0-2 now compiles the hash-bound `TemplateRoleContract` into a typed,
 source-traceable `MethodContract`. The current template compiles offline as
 `READY_WITH_WARNINGS`: executable rules are structurally complete, while
 unresolved workbook semantics remain explicit and fail closed. The legacy
-Domain/runtime path is unchanged and remains `MIGRATION_ONLY`; no production
-cutover is part of P0-2. See
+Domain/runtime path remains `MIGRATION_ONLY`. P0-3a now compiles one contract
+per Application run and uses it for Guidewords, scenario metadata, scoring
+scale evidence, ASIL lookup, doctor output, and checkpoint identity. Remaining
+Domain candidate/scoring/Safety Goal dependencies are explicit release
+blockers; no second computation chain was added. See
 [`FULL_TEMPLATE_COMPILER.md`](docs/architecture/FULL_TEMPLATE_COMPILER.md).
 
 HARA V13 已确定 Template-Driven 目标架构：

@@ -33,6 +33,10 @@ class SafetyGoalCatalogService:
                 return sg_id
         return None
 
+    @property
+    def is_approved(self) -> bool:
+        return self.profile.is_approved
+
     def register(self, sg_id: str, function_name: str, malfunction: str,
                  guideword: str, scenario_id: str, hazard_event: str,
                  asil: str, ftti_result: Optional[dict[str, Any]] = None) -> dict[str, str]:
@@ -97,4 +101,3 @@ class SafetyGoalCatalogService:
             "ftti_status": status,
             "ftti_basis": basis,
         }
-

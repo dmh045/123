@@ -452,38 +452,63 @@ class MethodContract:
         return result
 
     def audit_snapshot(self) -> dict[str, Any]:
-        """Return a compact, mutation-sensitive regression representation.
+        """Return a small, mutation-sensitive regression manifest."""
 
-        The full contract remains available through :meth:`to_dict` for audit
-        export.  Regression fixtures do not need to duplicate every cell's raw
-        text and workbook metadata at each provenance edge; the source hash,
-        sheet and range are sufficient to detect a source or parser change.
-        """
-
-        def compact(value: Any) -> Any:
-            if isinstance(value, dict):
-                if {"source_hash", "sheet", "range"} <= value.keys():
-                    return {
-                        "sheet": value["sheet"],
-                        "range": value["range"],
-                        "source_hash": value["source_hash"],
-                    }
-                return {
-                    key: compact(item)
-                    for key, item in value.items()
-                    if key not in {"blocking_diagnostics", "warnings", "raw_text"}
-                }
-            if isinstance(value, list):
-                return [compact(item) for item in value]
-            return value
-
-        snapshot = compact(self.to_dict())
-        sources = snapshot.pop("sources", [])
-        snapshot["source_hashes"] = sorted(
-            {item["source_hash"] for item in sources}
+        full = self.to_dict()
+        sections = (
+            "workflow", "guidewords", "scenario_model", "severity", "exposure",
+            "controllability", "asil", "safety_goal_method", "safe_state_method",
+            "report_contract", "required_fact_specs",
         )
-        snapshot["snapshot_schema"] = "method-contract-audit-v1"
-        return snapshot
+
+        def digest(value: Any) -> str:
+            payload = json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+        source_hashes = sorted({item.source_hash for item in self.sources})
+        return {
+            "snapshot_schema": "method-contract-audit-v2",
+            "metadata": self.metadata,
+            "contract_version": self.contract_version,
+            "compiler_version": self.compiler_version,
+            "compile_status": self.compile_status.value,
+            "engineering_rules_compiled": self.engineering_rules_compiled,
+            "counts": {
+                "workflow_steps": len(self.workflow.steps),
+                "guidewords": len(self.guidewords.guidewords),
+                "scenario_dimensions": len(self.scenario_model.dimensions),
+                "severity_rules": len(self.severity.rules),
+                "exposure_duration_rules": len(self.exposure.duration_rules),
+                "exposure_frequency_rules": len(self.exposure.frequency_rules),
+                "exposure_examples": len(self.exposure.examples),
+                "exposure_situation_mappings": len(self.exposure.situation_mappings),
+                "controllability_criteria": len(self.controllability.criteria),
+                "controllability_examples": len(self.controllability.examples),
+                "asil_mappings": len(self.asil.mappings),
+                "hara_report_fields": len(self.report_contract.hara_fields),
+                "safety_goal_report_fields": len(
+                    self.report_contract.safety_goal_fields
+                ),
+                "required_fact_specs": len(self.required_fact_specs),
+                "diagnostics": len(self.diagnostics),
+                "unique_sources": len(source_hashes),
+            },
+            "section_hashes": {
+                name: digest(full[name]) for name in sections
+            },
+            "source_hash_digest": digest(source_hashes),
+            "diagnostics": [
+                {
+                    "severity": item.severity.value,
+                    "code": item.code.value,
+                    "blocking": item.blocking,
+                    "role": item.role.value if item.role else None,
+                }
+                for item in self.diagnostics
+            ],
+        }
 
     def write_json(self, path: str | Path) -> Path:
         target = Path(path)
@@ -494,6 +519,7 @@ class MethodContract:
         )
         temporary.replace(target)
         return target
+
 
 def unique_sources(items: list[SourceRef]) -> tuple[SourceRef, ...]:
     unique: dict[tuple[str, str, str], SourceRef] = {}

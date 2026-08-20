@@ -68,6 +68,30 @@ severity results, exposure method selection, workflow coordinate mismatches,
 and NA versus QM). None is silently repaired from the migration-only Domain
 runtime.
 
+## P0-3a Existing-Chain MethodContract Injection
+
+The existing `HARAApplication` and `WorkflowGraph` remain the only Agent
+calculation chain. Application now compiles the active workbook once and
+injects the resulting MethodContract into that chain:
+
+- Guidewords come from `MethodContract.guidewords` rather than a fixed-count
+  workbook reader.
+- Scenario dimension metadata and required fact types are recorded in the run
+  audit from the same contract.
+- Migration scoring receives S/E/C scale evidence adapted from the compiled
+  contract instead of rereading named worksheets.
+- ASIL lookup executes `MethodContract.asil` directly and preserves `NA`.
+- Checkpoints carry the template hash and reject resume against another
+  contract.
+- `agent-doctor` reports MethodContract readiness instead of the legacy fixed
+  template contract.
+
+This is a source-authority cutover, not a claim that generic evaluation is
+finished. Domain scenario candidates, S/E/C decisions, and Safety Goal
+catalogs are still explicit migration dependencies. Application adds a
+`migration_runtime_dependency` pending review so those values can generate a
+Draft for differential testing but can never pass the formal release gate.
+
 Role discovery priority is:
 
 1. explicit metadata / named ranges / structured tables that satisfy the role;

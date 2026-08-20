@@ -62,11 +62,14 @@ class DomainScoringService:
         standard: TemplateScoreLevel,
     ) -> dict[str, Any]:
         return {
+            "engineering_source_type": "domain_profile",
+            "engineering_source": str(self.policy.profile.path),
             "engineering_rule_id": decision["rule_id"],
             "engineering_rule_version": decision["rule_version"],
             "engineering_status": decision["engineering_status"],
             "engineering_basis": decision["basis"],
             "template_standard_source": str(self.standards.source_path),
+            "template_standard_contract_hash": self.standards.method_contract_hash,
             "template_standard_sheet": standard.sheet,
             "template_standard_location": standard.location,
             "template_standard_description": standard.description,

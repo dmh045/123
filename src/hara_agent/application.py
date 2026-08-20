@@ -4,20 +4,24 @@ import sys
 import os
 
 from hara_agent.config import LLMConfig, RunConfig
+from hara_agent.contracts import CompileStatus
 from hara_agent.domains import default_domain_registry
 from hara_agent.infrastructure.llm import LLMClient, create_llm_client
 from hara_agent.services.analysis import (
     DomainScenarioCandidateService,
     DomainScoringService,
     FTTIService,
+    MethodContractASILService,
     SafetyGoalCatalogService,
-    TemplateASILService,
     ProjectFactResolver,
     SpeedResolutionResult,
     UnresolvedProjectContextError,
 )
 from hara_agent.models import ItemDefinitionFacts, SourceRef
-from hara_agent.services.extraction import TemplateInputReader, ValidatedArtifactCache
+from hara_agent.services.extraction import (
+    ValidatedArtifactCache,
+    scoring_standards_from_method_contract,
+)
 from hara_agent.services.reporting import HARAExcelRenderer
 from hara_agent.services.semantic import (
     FunctionExtractionAgent,
@@ -36,6 +40,7 @@ from hara_agent.workflow import (
     WorkflowRunResult,
     build_hara_agent_graph,
 )
+from hara_agent.template import TemplateRoleCompiler
 
 
 class HARAApplication:
@@ -54,6 +59,20 @@ class HARAApplication:
         self.config.validate()
         if not self.config.domain:
             raise ValueError("必须显式提供domain；迁移期禁止仅凭关键词静默选择Domain Profile")
+        method = TemplateRoleCompiler().compile_method(self.config.template_path)
+        if (
+            method.compile_status is CompileStatus.NOT_READY
+            or not method.engineering_rules_compiled
+        ):
+            blockers = [item.message for item in method.blocking_diagnostics]
+            raise ValueError(f"Active template MethodContract is not ready: {blockers}")
+        method_ref = {
+            "template_hash": method.metadata["template_hash"],
+            "contract_version": method.contract_version,
+            "compiler_version": method.compiler_version,
+            "compile_status": method.compile_status.value,
+            "engineering_rules_compiled": method.engineering_rules_compiled,
+        }
         runtime = default_domain_registry().create(
             self.config.domain,
             profile_path=self.config.domain_profile_path,
@@ -61,7 +80,10 @@ class HARAApplication:
         )
         profile = runtime.profile
         policy = runtime.policy
-        template_inputs = TemplateInputReader().read(self.config.template_path)
+        scoring_standards = scoring_standards_from_method_contract(
+            method, self.config.template_path
+        )
+        guidewords = [item.name for item in method.guidewords.guidewords]
         candidate_service = DomainScenarioCandidateService(policy)
 
         def report_batch(name: str, completed: int, total: int) -> None:
@@ -83,23 +105,53 @@ class HARAApplication:
         renderer.contract.validate(self.config.template_path)
         if self.config.resume:
             state = checkpoints.load(self.config.run_id)
+            checkpoint_hash = state.method_contract.get("template_hash")
+            if not checkpoint_hash and state.stage.value != "initialize":
+                raise ValueError(
+                    "Checkpoint predates MethodContract template binding; "
+                    "restart the run instead of reusing unbound derived outputs"
+                )
+            if checkpoint_hash and checkpoint_hash != method_ref["template_hash"]:
+                raise ValueError(
+                    "Checkpoint template hash does not match the active MethodContract: "
+                    f"checkpoint={checkpoint_hash}, active={method_ref['template_hash']}"
+                )
+            state.method_contract = method_ref
         else:
             state = HARAState(
                 run_id=self.config.run_id,
                 domain=profile.name,
                 profile_version=profile.version,
+                method_contract=method_ref,
             )
             state.record(
-                "template_inputs_loaded",
-                template_path=str(template_inputs.source_path),
-                guideword_count=len(template_inputs.guidewords),
-                scenario_dimension_count=len(template_inputs.scenario_dimensions),
-                scoring_standard_counts=template_inputs.scoring_standards.counts,
+                "method_contract_compiled",
+                template_path=str(self.config.template_path),
+                **method_ref,
+                guideword_count=len(guidewords),
+                scenario_dimension_count=len(method.scenario_model.dimensions),
+                scoring_standard_counts=scoring_standards.counts,
+                required_fact_types=[
+                    item.fact_type.value for item in method.required_fact_specs
+                ],
+                warning_codes=sorted({item.code.value for item in method.warnings}),
             )
+        if not any(
+            item.get("issue_type") == "migration_runtime_dependency"
+            for item in state.pending_reviews
+        ):
+            state.pending_reviews.append({
+                "issue_type": "migration_runtime_dependency",
+                "field": "scenario_scoring_and_safety_goal_derivation",
+                "reason": (
+                    "Domain candidate/scoring/Safety Goal services remain migration-only; "
+                    "formal release is blocked until in-place MethodContract execution cutover"
+                ),
+            })
         graph = build_hara_agent_graph(
             SemanticWorkflowInputs(
                 item_path=self.config.item_path,
-                guidewords=template_inputs.guidewords,
+                guidewords=guidewords,
                 scenario_candidate_factory=prepare_candidates,
                 max_workers=self.config.max_workers,
                 progress=report_batch,
@@ -117,8 +169,8 @@ class HARAApplication:
                 scenarios=ScenarioFeasibilityAgent(self.llm_client),
             ),
             RiskWorkflowServices(
-                scoring=DomainScoringService(policy, template_inputs.scoring_standards),
-                asil_table=TemplateASILService(str(self.config.template_path)),
+                scoring=DomainScoringService(policy, scoring_standards),
+                asil_table=MethodContractASILService(method),
                 ftti=FTTIService(),
                 safety_goals=SafetyGoalCatalogService(profile),
             ),

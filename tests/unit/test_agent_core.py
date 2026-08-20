@@ -3117,7 +3117,7 @@ def test_downstream_preflight_rejects_duplicate_malfunction_ids():
         {"malfunction_id": "MF_01", "function_id": "F02"},
     ]
     with pytest.raises(ValueError, match="Malfunction ID不唯一"):
-        DownstreamPreflightService(SafetyGoalCatalogService(profile)).validate(state)
+        DownstreamPreflightService().validate(state)
 
 
 def test_pending_guideword_flows_to_pending_reviews_and_blocks_release():
@@ -3556,10 +3556,23 @@ def test_application_generates_audited_draft_at_pending_quality_gate():
     assert result.interrupted
     assert result.reason == "draft_report_generated_pending_review"
     assert result.state.stage is WorkflowStage.QUALITY_GATE
+    assert result.state.method_contract["engineering_rules_compiled"] is True
+    assert any(
+        item["event"] == "method_contract_compiled"
+        for item in result.state.audit_trail
+    )
+    assert any(
+        item.get("issue_type") == "migration_runtime_dependency"
+        for item in result.state.pending_reviews
+    )
     candidate_event = next(
         item for item in result.state.audit_trail if item["event"] == "scenario_candidates_prepared"
     )
     assert len(result.state.risk_results) == candidate_event["atomic_candidate_count"]
+    assert all(
+        risk.severity.sources[1].source_type == "method_contract"
+        for risk in result.state.risk_results
+    )
     assert len(result.state.safety_goals) > 0
     assert not result.state.can_publish
     assert output.is_file()

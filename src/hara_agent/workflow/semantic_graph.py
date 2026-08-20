@@ -24,10 +24,10 @@ from hara_agent.services.semantic import (
     ScenarioFeasibilityAgent,
 )
 from hara_agent.services.analysis import (
-    DomainScoringService,
+    ASILLookupService,
     FTTIService,
-    SafetyGoalCatalogService,
-    TemplateASILService,
+    SafetyGoalService,
+    ScenarioScoringService,
 )
 from hara_agent.services.reporting import HARAExcelRenderer
 from hara_agent.services.validation import DownstreamPreflightService
@@ -42,7 +42,6 @@ from .nodes import (
     derive_malfunctions,
     extract_item_artifacts,
     extract_functions,
-    extract_typed_item_definition,
     read_item_document,
     render_excel_report,
     pass_quality_gate,
@@ -74,10 +73,10 @@ class SemanticWorkflowAgents:
 
 @dataclass(frozen=True)
 class RiskWorkflowServices:
-    scoring: DomainScoringService
-    asil_table: TemplateASILService
+    scoring: ScenarioScoringService
+    asil_table: ASILLookupService
     ftti: FTTIService
-    safety_goals: SafetyGoalCatalogService
+    safety_goals: SafetyGoalService
 
 
 @dataclass(frozen=True)
@@ -207,7 +206,7 @@ def build_hara_agent_graph(
     """Compose the migrated Agent path through the engineering quality gate."""
     graph = build_semantic_frontend_graph(inputs, agents, checkpoint_repository)
     scenario_node = graph.nodes[WorkflowStage.MALFUNCTIONS]
-    downstream_preflight = DownstreamPreflightService(risk_services.safety_goals)
+    downstream_preflight = DownstreamPreflightService()
     graph.nodes[WorkflowStage.MALFUNCTIONS] = lambda state: (
         downstream_preflight.validate(state), scenario_node(state)
     )[1]

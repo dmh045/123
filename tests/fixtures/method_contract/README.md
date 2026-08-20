@@ -1,6 +1,6 @@
 # MethodContract golden fixture
 
-The JSON file in this directory is a generated regression snapshot for the
+The JSON file in this directory is a generated fingerprint manifest for the
 current workbook hash. It is not a production truth source and is not a third
 customer-maintained input.
 

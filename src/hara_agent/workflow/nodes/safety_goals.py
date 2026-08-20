@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from hara_agent.models import ReviewStatus, SafetyGoal
-from hara_agent.services.analysis import SafetyGoalCatalogService
+from hara_agent.services.analysis import SafetyGoalService
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 
 def aggregate_safety_goals(
     state: HARAState,
-    catalog: SafetyGoalCatalogService,
+    catalog: SafetyGoalService,
 ) -> HARAState:
     """Map non-QM risks to approved-domain SG definitions and aggregate them."""
     malfunctions = {
@@ -20,7 +20,7 @@ def aggregate_safety_goals(
     risk_status_by_goal: dict[str, list[ReviewStatus]] = {}
 
     for risk in state.risk_results:
-        if risk.asil.value == "QM":
+        if risk.asil.value in {"QM", "NA", "N/A", ""}:
             continue
         malfunction = malfunctions.get(risk.malfunction_id)
         if malfunction is None:
@@ -62,7 +62,7 @@ def aggregate_safety_goals(
     goals = []
     for sg_id, value in catalog.to_dict().items():
         statuses = risk_status_by_goal[sg_id]
-        finalized = catalog.profile.is_approved and all(
+        finalized = catalog.is_approved and all(
             status in {ReviewStatus.FINALIZED, ReviewStatus.NOT_APPLICABLE}
             for status in statuses
         )
@@ -87,7 +87,10 @@ def aggregate_safety_goals(
     state.stage = WorkflowStage.QUALITY_GATE
     state.record(
         "safety_goals_aggregated",
-        non_qm_risk_count=sum(risk.asil.value != "QM" for risk in state.risk_results),
+        non_qm_risk_count=sum(
+            risk.asil.value not in {"QM", "NA", "N/A", ""}
+            for risk in state.risk_results
+        ),
         safety_goal_count=len(goals),
     )
     return state

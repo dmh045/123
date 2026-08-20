@@ -7,9 +7,9 @@ from pathlib import Path
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
 from hara_agent.config import LLMConfig
+from hara_agent.contracts import CompileStatus
 from hara_agent.domains import default_domain_registry
-from hara_agent.services.extraction import TemplateInputReader
-from hara_agent.services.reporting import HARATemplateContract
+from hara_agent.template import TemplateRoleCompiler
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,26 +53,42 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             checks["domain_profile"] = {"ok": False, "error": str(exc)}
         try:
-            HARATemplateContract().validate(args.template)
-            template_inputs = TemplateInputReader().read(args.template)
-            checks["template"] = {
-                "ok": True,
-                "guideword_count": len(template_inputs.guidewords),
-                "scenario_dimension_count": len(template_inputs.scenario_dimensions),
-                "scoring_standard_counts": template_inputs.scoring_standards.counts,
+            method = TemplateRoleCompiler().compile_method(args.template)
+            method_ok = (
+                method.compile_status is not CompileStatus.NOT_READY
+                and method.engineering_rules_compiled
+            )
+            checks["method_contract"] = {
+                "ok": method_ok,
+                "template_hash": method.metadata["template_hash"],
+                "contract_version": method.contract_version,
+                "compiler_version": method.compiler_version,
+                "compile_status": method.compile_status.value,
+                "guideword_count": len(method.guidewords.guidewords),
+                "scenario_dimension_count": len(method.scenario_model.dimensions),
+                "required_fact_count": len(method.required_fact_specs),
+                "warning_codes": sorted({
+                    item.code.value for item in method.warnings
+                }),
+                "blocking_diagnostics": [
+                    item.message for item in method.blocking_diagnostics
+                ],
             }
         except Exception as exc:
-            checks["template"] = {"ok": False, "error": str(exc)}
+            checks["method_contract"] = {"ok": False, "error": str(exc)}
         try:
             LLMConfig.from_env().validate()
             checks["llm"] = {"ok": True}
         except Exception as exc:
             checks["llm"] = {"ok": False, "error": str(exc)}
         ready_for_draft = all(value.get("ok") for value in checks.values())
-        ready_for_release = ready_for_draft and checks["domain_profile"].get("approved", False)
+        ready_for_release = False
         print(json.dumps({
             "ready_for_draft": ready_for_draft,
             "ready_for_release": ready_for_release,
+            "release_blockers": [
+                "Domain candidate/scoring/Safety Goal services remain migration-only"
+            ],
             "checks": checks,
         }, ensure_ascii=False, indent=2))
         return 0 if ready_for_draft else 2

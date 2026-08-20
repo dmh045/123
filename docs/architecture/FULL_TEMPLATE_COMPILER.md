@@ -54,6 +54,7 @@ contract with the existing workflow. A persistent deserialization cache is
 deliberately deferred until runtime measurements show that it is needed; this
 avoids creating a second contract-loading path before production cutover.
 
-The compact generated snapshot under `tests/fixtures/method_contract/` is
-regression evidence only. It retains rule structure and provenance hashes but
-does not duplicate all workbook cell text.
+The compact generated manifest under `tests/fixtures/method_contract/` is
+regression evidence only. It retains section fingerprints, cardinalities,
+diagnostic summaries, and a provenance-set fingerprint without duplicating the
+compiled workbook content.

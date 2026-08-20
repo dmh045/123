@@ -41,6 +41,7 @@ The Domain runtime and three-phase/17-step scripts remain `MIGRATION_ONLY` for
 baseline comparison until Template-Driven cutover. Do not add new business
 rules to them and do not treat them as future authority. P0 Template Role
 discovery and P0-2 full MethodContract compilation live under
-`src/hara_agent/template/`. Subsequent phases build the generic rule engine and
-ProjectFacts planning, cut over Application, and then delete the old runtime
-without a replacement compatibility path.
+`src/hara_agent/template/`. P0-3a compiles and injects one MethodContract into
+the existing Application/WorkflowGraph; it does not create a second workflow.
+The remaining Domain candidate/scoring/Safety Goal dependencies are explicit
+release blockers until their in-place generic replacements are complete.

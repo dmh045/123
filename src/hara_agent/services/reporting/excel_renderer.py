@@ -83,7 +83,9 @@ class HARAExcelRenderer:
                 raise ValueError(f"Renderer Function外键缺失: {function_id!r}")
             function = functions[function_id]
             goal = goals.get(risk.safety_goal_id)
-            if risk.asil.value != "QM" and (not risk.safety_goal_id or goal is None):
+            if risk.asil.value in {"A", "B", "C", "D"} and (
+                not risk.safety_goal_id or goal is None
+            ):
                 raise ValueError(
                     f"Renderer非QM Risk缺少Safety Goal外键: risk={risk.assessment_id!r}, "
                     f"safety_goal_id={risk.safety_goal_id!r}"

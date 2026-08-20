@@ -17,8 +17,11 @@ filled from a Domain Profile, legacy engine, keyword default, or copied matrix.
 
 P0-2 Full Template Compiler is available under `src/hara_agent/template/` and
 compiles the current workbook to a typed, source-traceable `MethodContract`.
-Production Application cutover has not occurred; old runtime behavior remains
-comparison-only.
+P0-3a injects that contract into the existing `HARAApplication` and
+`WorkflowGraph`: Guidewords, scenario ontology metadata, S/E/C scale evidence,
+ASIL lookup, doctor output, and checkpoint template identity now share one
+compiled source. Domain scenario candidates, S/E/C decisions, and Safety Goal
+catalogs still remain migration-only and therefore block formal release.
 
 The existing Domain runtime and legacy scripts remain operational only as
 `MIGRATION_ONLY` regression baselines until Template-Driven cutover. Do not add

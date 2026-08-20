@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from hara_agent.models import EvidenceValue, ReviewStatus, RiskAssessment, SourceRef
-from hara_agent.services.analysis import DomainScoringService, FTTIService, TemplateASILService
+from hara_agent.services.analysis import ASILLookupService, FTTIService, ScenarioScoringService
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 
@@ -23,18 +23,19 @@ def _review_status(value: str) -> ReviewStatus:
     return ReviewStatus.FINALIZED if str(value).upper() in {"FINALIZED", "APPROVED"} else ReviewStatus.PENDING
 
 
-def _domain_evidence(result: dict[str, Any], value_key: str, profile_source: str) -> EvidenceValue[str]:
+def _scoring_evidence(result: dict[str, Any], value_key: str) -> EvidenceValue[str]:
     status = _review_status(result.get("engineering_status", "PENDING"))
     sources = [SourceRef(
-        "domain_profile",
-        profile_source,
+        str(result.get("engineering_source_type", "scoring_service")),
+        str(result.get("engineering_source", "migration-only-domain-policy")),
         str(result.get("engineering_rule_id", "")),
         str(result.get("engineering_basis", "")),
     )]
     if result.get("template_standard_source"):
+        contract_hash = str(result.get("template_standard_contract_hash", ""))
         sources.append(SourceRef(
-            "input_template",
-            str(result["template_standard_source"]),
+            "method_contract" if contract_hash else "input_template",
+            contract_hash or str(result["template_standard_source"]),
             f"{result.get('template_standard_sheet', '')}!{result.get('template_standard_location', '')}",
             "；".join(value for value in (
                 str(result.get("template_standard_description", "")),
@@ -52,8 +53,8 @@ def _domain_evidence(result: dict[str, Any], value_key: str, profile_source: str
 
 def score_structured_scenarios(
     state: HARAState,
-    scoring: DomainScoringService,
-    asil_table: TemplateASILService,
+    scoring: ScenarioScoringService,
+    asil_table: ASILLookupService,
     ftti: FTTIService,
 ) -> HARAState:
     """Score each retained malfunction-scenario association without prose heuristics."""
@@ -79,7 +80,6 @@ def score_structured_scenarios(
                 f"场景评分外键缺失: scenario_id={scenario_id!r}, malfunction_id={malfunction_id!r}"
             )
         candidate = scenario_by_id[scenario_id]
-        malfunction = malfunction_by_id[malfunction_id]
         scenario = {"scenario_id": scenario_id, **candidate.facts}
         scenario.setdefault("situational_description", candidate.situational_description)
         scenario.setdefault("situational_detailing", candidate.situational_detailing)
@@ -91,26 +91,28 @@ def score_structured_scenarios(
             )
 
         scored = scoring.score(scenario, hazard_event)
-        severity = _domain_evidence(
-            scored["severity"], "severity_score", str(scoring.policy.profile.path)
-        )
-        exposure = _domain_evidence(
-            scored["exposure"], "exposure_score", str(scoring.policy.profile.path)
-        )
-        controllability = _domain_evidence(
-            scored["controllability"], "controllability_score", str(scoring.policy.profile.path)
+        severity = _scoring_evidence(scored["severity"], "severity_score")
+        exposure = _scoring_evidence(scored["exposure"], "exposure_score")
+        controllability = _scoring_evidence(
+            scored["controllability"], "controllability_score"
         )
         exposure_method = str(scored["exposure"].get("exposure_method", "")).upper()
         asil_value = asil_table.determine(severity.value, exposure.value, controllability.value)
         asil_status = (
             ReviewStatus.FINALIZED
-            if all(item.status is ReviewStatus.FINALIZED for item in (severity, exposure, controllability))
+            if asil_value not in {"NA", "N/A"}
+            and all(
+                item.status is ReviewStatus.FINALIZED
+                for item in (severity, exposure, controllability)
+            )
             else ReviewStatus.PENDING
         )
         asil = EvidenceValue(
             value=asil_value,
             status=asil_status,
-            sources=[SourceRef("input_template", str(asil_table.template_path), asil_table.SHEET_NAME)],
+            sources=[asil_table.evidence_source(
+                severity.value, exposure.value, controllability.value
+            )],
             review_reason="" if asil_status is ReviewStatus.FINALIZED else "ASIL查表输入S/E/C尚未全部批准",
         )
         ftti_result = ftti.evaluate(scenario, hazard_event, asil_value)

@@ -3,17 +3,12 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Any
 
-from hara_agent.services.analysis import SafetyGoalCatalogService
-
 if TYPE_CHECKING:
     from hara_agent.workflow.state import HARAState
 
 
 class DownstreamPreflightService:
     """Read-only checks that must finish before expensive Scenario LLM work."""
-
-    def __init__(self, safety_goals: SafetyGoalCatalogService):
-        self.safety_goals = safety_goals
 
     @staticmethod
     def _unique(values: list[Any], key, label: str) -> None:
@@ -45,23 +40,15 @@ class DownstreamPreflightService:
             raise ValueError(
                 f"Downstream preflight: Malfunction引用未知Function: {missing_function_fks}"
             )
-        unmapped_functions = sorted({
-            str(item.get("name", ""))
-            for item in state.functions
-            if not self.safety_goals.classify(str(item.get("name", "")))
-        })
         result = {
             "identity": "OK",
             "function_count": len(state.functions),
             "malfunction_count": len(state.malfunctions),
-            "safety_goal_mapping": "WARNING" if unmapped_functions else "OK",
-            "unmapped_functions": unmapped_functions,
         }
         print(
             "[HARA] downstream preflight "
             f"identity=OK functions={len(state.functions)} malfunctions={len(state.malfunctions)} "
-            f"safety_goal_mapping={result['safety_goal_mapping']} "
-            f"unmapped_functions={unmapped_functions}",
+            "foreign_keys=OK",
             file=sys.stderr,
             flush=True,
         )

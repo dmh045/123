@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hara_agent.contracts import MethodContract
+
 
 @dataclass(frozen=True)
 class TemplateScoreLevel:
@@ -24,6 +26,7 @@ class TemplateScoringStandards:
     exposure_duration: dict[str, TemplateScoreLevel]
     exposure_frequency: dict[str, TemplateScoreLevel]
     controllability: dict[str, TemplateScoreLevel]
+    method_contract_hash: str = ""
 
     EXPOSURE_METHODS = {"T": "duration", "F": "frequency"}
 
@@ -62,6 +65,58 @@ class TemplateScoringStandards:
             "exposure_frequency": len(self.exposure_frequency),
             "controllability": len(self.controllability),
         }
+
+
+def scoring_standards_from_method_contract(
+    method: MethodContract, source_path: str | Path
+) -> TemplateScoringStandards:
+    """Adapt compiled scales for the migration-only Domain scoring service."""
+
+    path = Path(source_path).expanduser().resolve()
+
+    def scale_table(levels, dimension: str) -> dict[str, TemplateScoreLevel]:
+        return {
+            item.level: TemplateScoreLevel(
+                dimension=dimension,
+                level=item.level,
+                description=item.description,
+                criterion=item.criterion,
+                sheet=item.source_ref.sheet,
+                location=item.source_ref.range,
+            )
+            for item in levels
+        }
+
+    severity = scale_table(method.severity.scale.levels, "severity")
+    controllability = scale_table(method.controllability.scale, "controllability")
+    exposure_scale = scale_table(method.exposure.scale, "exposure")
+
+    def exposure_table(rules) -> dict[str, TemplateScoreLevel]:
+        result: dict[str, TemplateScoreLevel] = {}
+        for level, base in exposure_scale.items():
+            matching = [rule for rule in rules if rule.result == level]
+            if not matching:
+                result[level] = base
+                continue
+            sources = [source for rule in matching for source in rule.source_refs]
+            result[level] = TemplateScoreLevel(
+                dimension="exposure",
+                level=level,
+                description=base.description,
+                criterion="\n".join(rule.raw_text for rule in matching),
+                sheet=sources[0].sheet,
+                location=",".join(source.range for source in sources),
+            )
+        return result
+
+    return TemplateScoringStandards(
+        source_path=path,
+        severity=severity,
+        exposure_duration=exposure_table(method.exposure.duration_rules),
+        exposure_frequency=exposure_table(method.exposure.frequency_rules),
+        controllability=controllability,
+        method_contract_hash=str(method.metadata["template_hash"]),
+    )
 
 
 class TemplateScoringStandardReader:
