@@ -23,5 +23,4 @@ description: Extract and validate a typed, traceable HARA Item Definition from D
 
 ## Required output
 
-Return typed values plus source evidence and an extraction audit. The output must distinguish document facts from Domain Profile defaults and engineering assumptions.
-
+Return typed values plus source evidence and an extraction audit. The output must distinguish grounded ProjectFacts from template examples, MethodContract rules, LLM inference, and engineering assumptions. Missing facts remain `PENDING`; do not fill them from the migration-only Domain runtime.

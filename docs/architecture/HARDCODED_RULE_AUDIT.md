@@ -1,4 +1,8 @@
-# HARA V13 硬编码与可扩展性审计
+# HARA V13 硬编码与可扩展性审计（Historical Findings）
+
+> 将规则迁入 Domain Profile 的旧整改方向已被
+> `TEMPLATE_DRIVEN_GOVERNANCE_MIGRATION.md` 取代。问题证据仍有效；未来方法规则
+> 只能来自 active Template/MethodContract。
 
 ## 1. 结论
 

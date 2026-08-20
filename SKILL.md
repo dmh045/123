@@ -1,6 +1,6 @@
 ---
 name: hara-v13
-description: Project-level entry point for running, reviewing, or rendering HARA analyses in this repository. Use for complete HARA requests and route each stage to the corresponding project Skill while keeping project facts, domain rules, and deterministic calculations separate.
+description: Project-level entry point for running, reviewing, compiling, or rendering HARA analyses in this repository. Route work to the corresponding project Skill while keeping template method rules, grounded project facts, and deterministic execution separate.
 ---
 
 # HARA V13 Agent Entry
@@ -19,14 +19,27 @@ Read only the stage Skill needed for the current request. For an end-to-end run,
 
 ## Authority order
 
-1. Current project source documents supply project facts.
-2. The supplied Excel template supplies the report contract and the only authoritative `ASIL_Table`.
-3. The selected, versioned, approved Domain Profile supplies domain rules and defaults.
-4. Deterministic services perform validation, IDs, ASIL lookup, aggregation, quality gates, and workbook rendering.
-5. Skills define agent workflow and review behavior; they do not override the sources above.
+1. The approved HARA template, compiled into a `MethodContract`, supplies the
+   method, S/E/C rules, ASIL matrix, Safety Goal/Safe State method, and report
+   contract.
+2. Current project source documents, compiled into grounded `ProjectFacts`,
+   supply project facts.
+3. Deterministic generic services execute rules, validation, IDs, aggregation,
+   quality gates, and workbook rendering.
+4. The LLM performs bounded, source-linked semantic interpretation only.
+5. Human approval resolves explicit ambiguity and engineering review gates.
 
-Mark unsupported facts and judgments `PENDING`. Block formal reports when required evidence is unresolved, the Domain Profile is unapproved, or the template ASIL matrix is missing or invalid.
+Mark unsupported facts and judgments `PENDING`. Block formal reports when
+required evidence is unresolved or the compiled method is missing, ambiguous,
+conflicting, or invalid. A generated Template Role manifest binds role
+locations to `template_hash`; it is not a third customer-maintained business
+input and contains no copied engineering rules.
 
 ## Current implementation status
 
-The typed Agent core and AVP Domain Profile are under `src/hara_agent/` and `config/domains/avp/`. The current production-compatible execution still uses the three-phase controller while service extraction and graph orchestration are being migrated. Treat `scripts/hara_engine.py` as a legacy compatibility path, not the target architecture.
+The Domain runtime and three-phase/17-step scripts remain `MIGRATION_ONLY` for
+baseline comparison until Template-Driven cutover. Do not add new business
+rules to them and do not treat them as future authority. P0 Template Role
+discovery lives under `src/hara_agent/template/`; subsequent phases compile the
+full MethodContract, cut over Application, and then delete the old runtime
+without a replacement compatibility path.

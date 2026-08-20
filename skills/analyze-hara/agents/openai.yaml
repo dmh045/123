@@ -1,4 +1,4 @@
 interface:
   display_name: "Analyze HARA"
   short_description: "Analyze malfunctions, hazards, scenarios, and risk"
-  default_prompt: "Generate and assess traceable HARA candidates using the active domain profile."
+  default_prompt: "Generate traceable semantic HARA candidates, then assess them only through the active MethodContract and grounded ProjectFacts."

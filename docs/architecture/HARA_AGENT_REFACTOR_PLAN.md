@@ -1,4 +1,9 @@
-# HARA Agent 架构重构方案
+# HARA Agent 架构重构方案（Historical Migration Baseline）
+
+> 本文记录 Template-Driven 决策之前的迁移方案，不再定义未来工程真值源。
+> 当前决策与 Governance 冲突清单见
+> `TEMPLATE_DRIVEN_GOVERNANCE_MIGRATION.md`。下文 Domain Profile、Legacy 与
+> Fallback 内容只描述保留用于对照的 `MIGRATION_ONLY` Runtime，不得新增规则。
 
 > 文档状态：目标架构 + 迁移记录。当前可执行事实、环境检查、测试命令、哈希和阻断以
 > [HARA V13 开发交接与可复现基线（2026-08-14）](HARA_V13_HANDOFF_BASELINE_2026-08-14.md)

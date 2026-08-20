@@ -1,24 +1,27 @@
 # HARA V13
 
-HARA V13 正在从“脚本流水线 + JSON 中间文件”迁移为：
+HARA V13 已确定 Template-Driven 目标架构：
 
 ```text
-Agent语义分析
-  → 强类型HARAState
-  → Domain Policy确定性评分
-  → 输入模板ASIL_Table查表
+HARA Template → Template Role Discovery → MethodContract
+Project Input → grounded ProjectFacts
+MethodContract + ProjectFacts → deterministic HARA evaluation
   → 工程质量门
-  → 模板保真Excel渲染
+  → Report Role Contract驱动的模板保真Excel渲染
 ```
 
-当前存在三条明确分离的运行路径，不能把目标架构误写成已经切换的生产主链：
+Template Role Contract 是系统按 `template_hash` 自动发现和缓存的派生产物，
+只保存角色位置，不复制工程规则，也不是客户需要维护的第三份业务输入。
+只有角色存在歧义时才需要一次人工确认；Workbook hash 改变后必须重新验证。
+
+当前旧路径保留为 `MIGRATION_ONLY` 基线，不能把它们误写成目标生产架构：
 
 | 路径 | 入口 | 当前定位 | 默认生产路由 |
 |---|---|---|---|
-| 三阶段 Controller | `main_executor.py analyze` | 当前生产兼容主链 | 是 |
-| Typed Agent / `WorkflowGraph` | `main_executor.py agent` | 迁移验证与 Draft 主链 | 否 |
-| 17-step Engine | `main_executor.py fallback` | 显式 Legacy Fallback | 否 |
-| LangGraph | 尚无入口 | 目标编排架构 | 否 |
+| 三阶段 Controller | `main_executor.py analyze` | MIGRATION_ONLY基线 | 是（切换前） |
+| Typed Agent / `WorkflowGraph` | `main_executor.py agent` | MIGRATION_ONLY验证/Draft | 否 |
+| 17-step Engine | `main_executor.py fallback` | MIGRATION_ONLY回归 | 否 |
+| Template-Driven Runtime | P0 Role Contract基础已建立 | 目标架构 | 切换后唯一 |
 
 `WorkflowGraph` 是项目自实现的同步 runner，不是 LangGraph。当前事实、可复现命令、
 已知阻断和下一阶段依赖关系见
@@ -29,9 +32,9 @@ Agent语义分析
 - Python：`>=3.12`，当前验证版本为 `3.12.10`。
 - 安装依赖以 `requirements.txt` / `setup.py` 为准；核心运行不依赖 pandas。
 - 新 Agent 需要配置 `HARA_LLM_BASE_URL`、`HARA_LLM_MODEL`、`HARA_LLM_API_KEY`。
-- AVP Domain Profile 当前为 `migration_baseline`，因此只能生成 Draft，不能正式发布。
+- AVP Domain Profile 当前为 `migration_baseline`，只服务旧 Runtime 对照；不得新增工程规则，也不是目标架构的发布权威。
 
-## 新 Agent 入口（迁移期显式使用）
+## 当前 Agent 入口（MIGRATION_ONLY）
 
 通过旧总入口调用新链路，无需配置 `PYTHONPATH`：
 
@@ -79,8 +82,8 @@ Item/Function Artifact；不保存原始LLM响应，也不包含API Key。使用
 
 该命令分别报告 Draft 与正式发布 readiness，不调用模型，也不生成报告。
 只有 `ready_for_draft=true` 才说明当前环境具备运行新 Agent 的最低条件；
-只有 `ready_for_release=true` 才说明 Domain Profile 也已获批准。Harness 的 `READY`
-不等价于 Agent、环境或正式发布 READY。
+该 Doctor 仍报告旧 Runtime 的 Profile 状态；它不代表未来 MethodContract 的
+release readiness。Harness 的 `READY` 不等价于环境或正式发布 READY。
 
 如果项目提供了经确认的自车速度，可增加：
 
@@ -95,16 +98,16 @@ $env:PYTHONPATH="src"
 .\.venv\Scripts\python.exe -m hara_agent analyze --help
 ```
 
-## 发布状态
+## 当前迁移 Runtime 发布状态
 
-- 当前 AVP Domain Profile 为 `migration_baseline`，不是工程批准版本。
+- 当前 AVP Domain Profile 为 `migration_baseline`，不是工程批准版本，也不是未来工程真值源。
 - 正式模式默认 Fail-Closed；存在 `PENDING` 时不会生成正式报告。
 - `--allow-draft` 只生成带可见水印的评审稿，不会把待评审项改成已批准。
 - ASIL 仅从本次输入模板的 `ASIL_Table` 查表，禁止默认矩阵和数值求和。
-- S/E/C等级定义从本次输入模板的`Severity`、`Exposure`和`Controllability`读取；Domain Profile只保存AVP映射候选。
+- 当前旧链仍由 Domain Profile 给出 S/E/C 映射候选；目标链必须直接执行从 Template 编译的规则，缺失或歧义时保持 `PENDING`。
 - Exposure的`T/F`分别表示平均运行时间占比/场景发生频率，禁止由E等级机械推导。
 
-## 旧兼容入口
+## MIGRATION_ONLY 旧入口
 
 旧三阶段链路仍保留，尚未切换默认生产路由：
 

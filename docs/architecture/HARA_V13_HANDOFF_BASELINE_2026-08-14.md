@@ -1,4 +1,7 @@
-# HARA V13 开发交接与可复现基线（2026-08-14）
+# HARA V13 开发交接与可复现基线（2026-08-14，Historical）
+
+> 这是 Template-Driven 决策前的历史可复现基线，只用于回归对照。
+> 当前目标架构见 `TEMPLATE_DRIVEN_GOVERNANCE_MIGRATION.md`。
 
 ## 1. 文档定位
 

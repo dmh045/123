@@ -1,4 +1,4 @@
 interface:
   display_name: "Render HARA Report"
   short_description: "Render a validated HARA workbook"
-  default_prompt: "Render the validated HARA state into the supplied Excel template without recalculating engineering judgments."
+  default_prompt: "Render the validated HARA state through the compiled Report Role Contract without recalculating engineering judgments."

@@ -6,6 +6,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest-tmp-*/
+tests/.template-role-tmp/
 
 # Generated runtime and report artifacts
 runtime/

@@ -1,4 +1,8 @@
-# V13旧路径与清理清单
+# V13旧路径与清理清单（MIGRATION_ONLY Deletion Input）
+
+> 本文列出的 Runtime 只保留到 Application Cutover，用于基线对照。不得新增规则，
+> 也不得建立新的兼容层。当前删除计划见
+> `TEMPLATE_DRIVEN_GOVERNANCE_MIGRATION.md`。
 
 ## 状态定义
 

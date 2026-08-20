@@ -11,6 +11,12 @@ from .scenario_evidence_v2 import (
     ScenarioEvidenceV2ContractError, ScenarioEvidenceV2ErrorCode,
     validate_causal_supports, validate_scenario_evidence_v2,
 )
+from .method import (
+    METHOD_CONTRACT_VERSION, REQUIRED_TEMPLATE_ROLES, TEMPLATE_ROLE_CONTRACT_VERSION,
+    MethodContract, MethodSection, RoleBinding, TemplateDiagnostic,
+    TemplateDiagnosticCode, TemplateDiagnosticSeverity, TemplateRole,
+    TemplateRoleConfirmation, TemplateRoleContract,
+)
 
 __all__ = [
     "CausalBreakpointV2", "CausalEdgeId", "CausalEdgeV2",
@@ -22,6 +28,11 @@ __all__ = [
     "SCENARIO_EVIDENCE_V2_CONTRACT_VERSION",
     "ScenarioEvidenceV2", "ScenarioEvidenceV2ContractError",
     "ScenarioEvidenceV2ErrorCode", "ValidationPolicy",
+    "METHOD_CONTRACT_VERSION", "REQUIRED_TEMPLATE_ROLES",
+    "TEMPLATE_ROLE_CONTRACT_VERSION", "MethodContract", "MethodSection",
+    "RoleBinding", "TemplateDiagnostic", "TemplateDiagnosticCode",
+    "TemplateDiagnosticSeverity", "TemplateRole", "TemplateRoleConfirmation",
+    "TemplateRoleContract",
     "validate_causal_supports", "validate_evidence_authority",
     "validate_scenario_evidence_v2",
 ]

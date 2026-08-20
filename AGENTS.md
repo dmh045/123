@@ -1,10 +1,32 @@
-# HARA Auto-Fill Agent Instructions (v13.0)
+# HARA Auto-Fill Agent Instructions (v13.0 Template-Driven Migration)
 
-## Entry Points
+## Target Authority Order
+
+The repository is migrating to the following authoritative architecture:
+
+1. The approved HARA template, compiled into a `MethodContract`, supplies the
+   HARA method and calculation rules.
+2. Project inputs, compiled into grounded `ProjectFacts`, supply project facts.
+3. Deterministic generic code executes compiled rules, IDs, validation,
+   aggregation, quality gates, and rendering.
+4. The LLM performs bounded, source-linked semantic interpretation only.
+5. Human approval resolves explicit ambiguity and engineering review gates.
+
+Missing method rules or project facts remain `PENDING`; they must never be
+filled from a Domain Profile, legacy engine, keyword default, or copied matrix.
+
+The existing Domain runtime and legacy scripts remain operational only as
+`MIGRATION_ONLY` regression baselines until Template-Driven cutover. Do not add
+new business rules to `config/domains/`, `AVPDomainPolicy`,
+`DomainScenarioCandidateService`, `DomainScoringService`, or
+`SafetyGoalCatalogService`. They will be deleted after cutover, without a new
+legacy/deprecated runtime.
+
+## Current Migration-Only Entry Points
 
 | Command | Purpose |
 |---------|---------|
-| `python scripts/main_executor.py agent --domain avp --item FILE --template FILE --output FILE --max-workers 4 --allow-draft` | **New Agent path** - typed state, controlled LLM concurrency, checkpoint, quality gate and template-preserving Draft report |
+| `python scripts/main_executor.py agent --domain avp --item FILE --template FILE --output FILE --max-workers 4 --allow-draft` | **Migration-only Agent path** - typed state, controlled LLM concurrency, checkpoint, quality gate and template-preserving Draft report |
 | `python scripts/main_executor.py agent-doctor --domain avp --template FILE` | Read-only readiness check for template, Domain Profile and LLM configuration |
 | `python scripts/main_executor.py analyze --system NAME --item FILE --template FILE` | **Smart analysis** - auto-detect experience library, else use 3-phase engine |
 | `python scripts/main_executor.py analyze --function NAME --item FILE --template FILE` | Analyze by function name |
@@ -17,7 +39,7 @@
 | `python test_skill.py` | Run test suite |
 | `python scripts/example.py` | Run usage examples |
 
-## V12 Architecture (Three-Phase + Fallback)
+## Current Migration Runtime (Not the Target Architecture)
 
 ```
 main_executor.analyze() → match_input() →
@@ -32,18 +54,24 @@ main_executor.analyze() → match_input() →
 
 ## ASIL Calculation
 
-Use the **`ASIL_Table` matrix in the input Excel template** as the only
-authoritative S/E/C-to-ASIL mapping. Do not calculate ASIL from a numerical
-sum. Missing sheets, incomplete matrices, and invalid S/E/C values are hard
-errors. Template `NA` entries on the S0/E0/C0 axes are exported as `QM`.
+Use only the ASIL matrix discovered in the active input template and compiled
+into `MethodContract.asil`. Do not calculate ASIL from a numerical sum or copy
+the matrix into code/configuration. Missing, incomplete, conflicting, or
+ambiguous matrices and invalid S/E/C values are hard errors. Template `NA`
+entries on the S0/E0/C0 axes are exported as `QM`.
 
-## Fallback Conditions
+## Fallback Governance
 
-Fallback to original `hara_engine.py` triggers when **either**:
-1. A single checker retries the same problem **more than 20 times**
-2. A single problem fix takes **more than 10 minutes (600s)**
+Technical recovery is allowed for provider retry, structured-output retry,
+artifact cache recovery, and checkpoint recovery. Engineering-truth fallback
+is forbidden: a missing Project Fact cannot use an old domain value; a missing
+template rule cannot use a legacy rule; ambiguous S/E/C cannot use a default;
+and a missing mode-specific speed cannot use a global speed. These cases remain
+`PENDING` and block formal release.
 
-Monitored by `FallbackMonitor` class in `main_executor.py`.
+The current `FallbackMonitor` and 17-step engine remain `MIGRATION_ONLY` for
+baseline comparison. They are not future authority and must receive no new
+engineering rules.
 
 ## JSON Outputs
 
@@ -56,19 +84,29 @@ Monitored by `FallbackMonitor` class in `main_executor.py`.
 
 ## Completeness Checks
 
-### 14 HAZOP Guidewords
-All must be used. Check with `MalfunctionChecker.check_guideword_completeness()`.
+### Template-Defined HAZOP Guidewords
+The runtime Guideword set is defined by the active `MethodContract`. The
+current template compiles to 14 entries, but 14 is template data rather than a
+global Python invariant. If a template explicitly declares a cardinality, the
+compiler may preserve it as a template-scoped `MethodInvariant`.
 
-### 14 Main Scenarios
-All must be used. Check with `ScenarioChecker.check_scenario_completeness()`.
+### Template-Defined Main Scenarios
+Scenario dimensions and values come from the active `MethodContract`; do not
+enforce a global scenario count.
 
-### Full Function-Guideword Combinations
-Each function must combine with all 14 guidewords. Check with `check_full_combination_completeness()`. If incomplete, must return to HARA engine to supplement.
+### Function-Guideword Coverage
+Record applicability for every Guideword compiled from the active template.
+Generate malfunction rows only for applicable combinations; do not fabricate a
+fixed Cartesian product or return to a legacy engine for supplementation.
 
 ### Scoring Checker (v12 new)
 Non-S0/non-E0/non-C0 items must have values (not "empty" or "N/A"), unless the guideword is marked as not applicable or S=S0.
 
-## Post-Processing Steps (Frequently Missed)
+## Current Template Post-Processing Baseline
+
+The coordinates below document the current template and migration runtime.
+Future production rendering must use the compiled Report Role Contract rather
+than treating these positions as global constants.
 
 After generating HARA data, these steps are **mandatory**:
 
@@ -81,7 +119,7 @@ After generating HARA data, these steps are **mandatory**:
 5. **Apply color scheme (3.2)**: Color by function type. **Data rows (row 7+) must have NO fill color** - only header rows
 6. **Fill 06_Safety Goal (3.3)**: Only non-QM records. Calculate Max.ASIL per SG-ID (highest rank)
 
-## Data Structure
+## Current Template Data Structure
 
 - Data starts at **row 6** (row 5 is header)
 - Excel template must be copied with `shutil.copy2()`, not created blank
@@ -95,7 +133,12 @@ After generating HARA data, these steps are **mandatory**:
 
 ## Authoritative Documentation
 
-Root `SKILL.md` is the compatibility router. Stage-specific Agent procedures live under `skills/*/SKILL.md`; runtime engineering rules live in the input documents, input template, approved Domain Profile, and deterministic services. Historical V12 lessons below are migration evidence and must not override the current architecture or the template-only ASIL rule.
+Root `SKILL.md` is the project router. Stage-specific Agent procedures live
+under `skills/*/SKILL.md`. Future runtime engineering rules originate only from
+the approved input template/compiled `MethodContract`; project facts originate
+only from grounded project inputs/compiled `ProjectFacts`. Deterministic
+services execute those contracts. Historical V12 lessons below are migration
+evidence only and must not override this authority order.
 
 ## Experience Library Paths
 

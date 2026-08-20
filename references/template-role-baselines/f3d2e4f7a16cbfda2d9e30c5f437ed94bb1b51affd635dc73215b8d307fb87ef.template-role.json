@@ -1,0 +1,484 @@
+{
+  "template_id": "HARA_Template_AI_20260327",
+  "template_hash": "f3d2e4f7a16cbfda2d9e30c5f437ed94bb1b51affd635dc73215b8d307fb87ef",
+  "role_bindings": [
+    {
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "A1:G20",
+      "detection_method": "header_semantic_signature",
+      "structural_signature": [
+        "header_row=3",
+        "matched_groups=5"
+      ],
+      "semantic_signature": [
+        "序号",
+        "输入",
+        "活动",
+        "过程描述",
+        "输出"
+      ],
+      "confidence": 0.945,
+      "source_hash": "0536677e30f52eaf87a7652a6bcf08f4508b926a292d6acaa898822d399c1fe7",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "GUIDEWORD_TABLE",
+      "sheet": "04_HAZOP",
+      "region": "A2:B16",
+      "detection_method": "structural_and_header_signature",
+      "structural_signature": [
+        "guideword_column",
+        "description_column",
+        "data_rows=14"
+      ],
+      "semantic_signature": [
+        "guide word",
+        "description"
+      ],
+      "confidence": 0.965,
+      "source_hash": "e15908aee1dad036a2505baf94d2b9f21423c4cff33ca296d50d5bfa90197458",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SCENARIO_MODEL",
+      "sheet": "Scenarios_Library",
+      "region": "B2:F18",
+      "detection_method": "structural_dimension_signature",
+      "structural_signature": [
+        "dimension_count=5",
+        "header_row=2"
+      ],
+      "semantic_signature": [
+        "operating_scenario",
+        "road_surface",
+        "vehicle_speed",
+        "vehicle_state",
+        "weather"
+      ],
+      "confidence": 0.965,
+      "source_hash": "8c110b327e0121e357410343023fbcfaef2347b4a15c79f3f5674898aac89762",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SEVERITY_LEVELS",
+      "sheet": "Severity",
+      "region": "B7:F10",
+      "detection_method": "structural_level_signature",
+      "structural_signature": [
+        "complete_S0_S3",
+        "code_row=7"
+      ],
+      "semantic_signature": [
+        "class of severity",
+        "severity"
+      ],
+      "confidence": 0.965,
+      "source_hash": "3c76a8d2d72a6f27e59437d27105efa07ced9cd28f4e6a82f4d6a2052c0e63cb",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SEVERITY_RULES",
+      "sheet": "Severity",
+      "region": "I3:I26",
+      "detection_method": "structural_rule_signature",
+      "structural_signature": [
+        "collision_category",
+        "speed_condition",
+        "severity_result",
+        "rules=24"
+      ],
+      "semantic_signature": [
+        "collision",
+        "speed",
+        "S0-S3"
+      ],
+      "confidence": 0.975,
+      "source_hash": "a2de80a59b43fcbb2747e7ff6fc70367977fbf7132ab731aaf8b136fece41fc3",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "EXPOSURE_DURATION_RULES",
+      "sheet": "Exposure",
+      "region": "B5:F58",
+      "detection_method": "structural_exposure_signature",
+      "structural_signature": [
+        "complete_E1_E4",
+        "method=duration",
+        "tables=2"
+      ],
+      "semantic_signature": [
+        "duration",
+        "exposure"
+      ],
+      "confidence": 0.955,
+      "source_hash": "789569b5ed1abf2eae4a8797b3a893d4dc30dd0dddbfdb0acb265a9597ecc218",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "EXPOSURE_FREQUENCY_RULES",
+      "sheet": "Exposure",
+      "region": "B23:F74",
+      "detection_method": "structural_exposure_signature",
+      "structural_signature": [
+        "complete_E1_E4",
+        "method=frequency",
+        "tables=2"
+      ],
+      "semantic_signature": [
+        "frequency",
+        "exposure"
+      ],
+      "confidence": 0.955,
+      "source_hash": "87fe674928d9b534b69b05e5ae5c8bb3f171f4d7e5c1ec292059f214c0e94a77",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "EXPOSURE_EXAMPLES",
+      "sheet": "Exposure",
+      "region": "B2:F81",
+      "detection_method": "semantic_example_signature",
+      "structural_signature": [
+        "E1-E4",
+        "example_rows"
+      ],
+      "semantic_signature": [
+        "examples",
+        "probability of exposure"
+      ],
+      "confidence": 0.885,
+      "source_hash": "b19c83ce42f6d4b7b2749f451f7b611eb56b4f8ff0a1ccdb765c809498ed18e2",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "VDA702_SUMMARY",
+      "sheet": "VDA702 Summary",
+      "region": "C1:G144",
+      "detection_method": "catalog_header_signature",
+      "structural_signature": [
+        "category",
+        "description",
+        "dual_e_rating"
+      ],
+      "semantic_signature": [
+        "basic situation catalog",
+        "summary"
+      ],
+      "confidence": 0.945,
+      "source_hash": "c1d42f905b643af96f93dc6009533090bacb7a616703098f198985c651bf1609",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "VDA702_FULL",
+      "sheet": "VDA702 Full",
+      "region": "C2:K201",
+      "detection_method": "catalog_header_signature",
+      "structural_signature": [
+        "situation_id",
+        "time_rating",
+        "frequency_rating"
+      ],
+      "semantic_signature": [
+        "basic situation catalog",
+        "full"
+      ],
+      "confidence": 0.955,
+      "source_hash": "ee71f4444ec4fc299ff74404835cb2bab3e89e9605f254bf1cd1e14a7f2c2ee8",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SITUATION_CATALOG",
+      "sheet": "10_SitKat_alt",
+      "region": "B2:F106",
+      "detection_method": "catalog_header_signature",
+      "structural_signature": [
+        "location",
+        "time_domain",
+        "frequency_domain"
+      ],
+      "semantic_signature": [
+        "situation catalog",
+        "traffic location"
+      ],
+      "confidence": 0.945,
+      "source_hash": "b116904795d2e6cf82c3b3465922544e9d055f2a9f52f69d7b72ffd4581c5d5b",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "CONTROLLABILITY_LEVELS",
+      "sheet": "Controllability",
+      "region": "B7:F10",
+      "detection_method": "structural_level_signature",
+      "structural_signature": [
+        "complete_C0_C3",
+        "code_row=7"
+      ],
+      "semantic_signature": [
+        "class of controllability",
+        "controllability"
+      ],
+      "confidence": 0.965,
+      "source_hash": "408e41955144947f4b1b76e23baaa57dc160e82584dd027ee8662eab7d6fedf9",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "CONTROLLABILITY_RULES",
+      "sheet": "Controllability",
+      "region": "B2:F24",
+      "detection_method": "structural_rule_signature",
+      "structural_signature": [
+        "C0-C3",
+        "quantitative_avoidability",
+        "examples"
+      ],
+      "semantic_signature": [
+        "controllability",
+        "avoid harm"
+      ],
+      "confidence": 0.945,
+      "source_hash": "aef27648ae763338dc2016abe4f2b333aff2b9852b7f3d26b408ead901896786",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "ASIL_MATRIX",
+      "sheet": "ASIL_Table",
+      "region": "B4:H24",
+      "detection_method": "structural_matrix_signature",
+      "structural_signature": [
+        "S0-S3",
+        "E0-E4",
+        "C0-C3",
+        "result_cells=80"
+      ],
+      "semantic_signature": [
+        "asil",
+        "matrix"
+      ],
+      "confidence": 0.995,
+      "source_hash": "223cf5e4735c05e5963e0769d62a0d931e738ce20cbac024de2d22ba1005335d",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "HARA_OUTPUT_TABLE",
+      "sheet": "05_HARA",
+      "region": "A4:U5",
+      "detection_method": "canonical_header_signature",
+      "structural_signature": [
+        "canonical_fields=21",
+        "two_row_header"
+      ],
+      "semantic_signature": [
+        "asil",
+        "controllability",
+        "controllability_rationale",
+        "exposure",
+        "exposure_method",
+        "exposure_rationale",
+        "function",
+        "guideword",
+        "hara_id",
+        "hazard",
+        "hazardous_event",
+        "malfunction",
+        "output",
+        "remark",
+        "safe_state",
+        "safety_goal",
+        "severity",
+        "severity_rationale",
+        "sg_id",
+        "situational_description",
+        "situational_detailing"
+      ],
+      "confidence": 0.985,
+      "source_hash": "7c345755d744bcb0882979597c341775cdcc6355c8b8db64130570351bf56fdd",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SAFETY_GOAL_OUTPUT_TABLE",
+      "sheet": "06_Safety Goal",
+      "region": "A3:F3",
+      "detection_method": "canonical_header_signature",
+      "structural_signature": [
+        "canonical_fields=6",
+        "safety_goal_header"
+      ],
+      "semantic_signature": [
+        "asil",
+        "hazard",
+        "hazard_id",
+        "safe_state",
+        "safety_goal",
+        "sg_id"
+      ],
+      "confidence": 0.975,
+      "source_hash": "a23597ba2db63d02e484b420fb87f8eb0100871484074e87f302c16f65d985c1",
+      "diagnostics": [
+        "sheet_name_hint"
+      ]
+    },
+    {
+      "role": "SAFETY_GOAL_METHOD",
+      "sheet": "AI-process",
+      "region": "A19:G19",
+      "detection_method": "workflow_method_signature",
+      "structural_signature": [
+        "workflow_row=19"
+      ],
+      "semantic_signature": [
+        "safety goal",
+        "avoidance intent"
+      ],
+      "confidence": 0.94,
+      "source_hash": "5ea1119c1489f27ac1aece569aa26eef3a3590bc3e83869fbe005d331a39dc48",
+      "diagnostics": []
+    },
+    {
+      "role": "SAFE_STATE_METHOD",
+      "sheet": "AI-process",
+      "region": "A20:G20",
+      "detection_method": "workflow_method_signature",
+      "structural_signature": [
+        "workflow_row=20"
+      ],
+      "semantic_signature": [
+        "safe state",
+        "derivation"
+      ],
+      "confidence": 0.94,
+      "source_hash": "6b8b60bbdee4447b7756f133c2eb538023a43719af9e2369836b7e0320552e29",
+      "diagnostics": []
+    }
+  ],
+  "discovery_evidence": [
+    "WORKFLOW=AI-process!A1:G20 via header_semantic_signature",
+    "GUIDEWORD_TABLE=04_HAZOP!A2:B16 via structural_and_header_signature",
+    "SCENARIO_MODEL=Scenarios_Library!B2:F18 via structural_dimension_signature",
+    "SEVERITY_LEVELS=Severity!B7:F10 via structural_level_signature",
+    "SEVERITY_RULES=Severity!I3:I26 via structural_rule_signature",
+    "EXPOSURE_DURATION_RULES=Exposure!B5:F58 via structural_exposure_signature",
+    "EXPOSURE_FREQUENCY_RULES=Exposure!B23:F74 via structural_exposure_signature",
+    "EXPOSURE_EXAMPLES=Exposure!B2:F81 via semantic_example_signature",
+    "VDA702_SUMMARY=VDA702 Summary!C1:G144 via catalog_header_signature",
+    "VDA702_FULL=VDA702 Full!C2:K201 via catalog_header_signature",
+    "SITUATION_CATALOG=10_SitKat_alt!B2:F106 via catalog_header_signature",
+    "CONTROLLABILITY_LEVELS=Controllability!B7:F10 via structural_level_signature",
+    "CONTROLLABILITY_RULES=Controllability!B2:F24 via structural_rule_signature",
+    "ASIL_MATRIX=ASIL_Table!B4:H24 via structural_matrix_signature",
+    "HARA_OUTPUT_TABLE=05_HARA!A4:U5 via canonical_header_signature",
+    "SAFETY_GOAL_OUTPUT_TABLE=06_Safety Goal!A3:F3 via canonical_header_signature",
+    "SAFETY_GOAL_METHOD=AI-process!A19:G19 via workflow_method_signature",
+    "SAFE_STATE_METHOD=AI-process!A20:G20 via workflow_method_signature"
+  ],
+  "diagnostics": [
+    {
+      "severity": "INFO",
+      "code": "STRUCTURE_METADATA_MISSING",
+      "message": "Workbook has no structured tables; roles were compiled from structural and semantic signatures.",
+      "role": null,
+      "sheet": "",
+      "region": "",
+      "details": {}
+    },
+    {
+      "severity": "WARNING",
+      "code": "WORKFLOW_COORDINATE_MISMATCH",
+      "message": "Workflow row 10 declares column I for situational_detailing, but the report header binds it to H.",
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "A10:G10",
+      "details": {
+        "field": "situational_detailing",
+        "declared_column": "I",
+        "report_column": "H",
+        "workflow_row": 10
+      }
+    },
+    {
+      "severity": "WARNING",
+      "code": "WORKFLOW_COORDINATE_MISMATCH",
+      "message": "Workflow row 11 declares column H for hazardous_event, but the report header binds it to I.",
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "A11:G11",
+      "details": {
+        "field": "hazardous_event",
+        "declared_column": "H",
+        "report_column": "I",
+        "workflow_row": 11
+      }
+    },
+    {
+      "severity": "WARNING",
+      "code": "WORKFLOW_COORDINATE_MISMATCH",
+      "message": "Workflow row 19 declares column T for safety_goal, but the report header binds it to S.",
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "A19:G19",
+      "details": {
+        "field": "safety_goal",
+        "declared_column": "T",
+        "report_column": "S",
+        "workflow_row": 19
+      }
+    },
+    {
+      "severity": "WARNING",
+      "code": "WORKFLOW_COORDINATE_MISMATCH",
+      "message": "Workflow row 20 declares column U for safe_state, but the report header binds it to T.",
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "A20:G20",
+      "details": {
+        "field": "safe_state",
+        "declared_column": "U",
+        "report_column": "T",
+        "workflow_row": 20
+      }
+    },
+    {
+      "severity": "WARNING",
+      "code": "STRUCTURE_INCOMPLETE",
+      "message": "Workflow contains malformed controllability level text 'C0,11,C2'.",
+      "role": "WORKFLOW",
+      "sheet": "AI-process",
+      "region": "F17",
+      "details": {
+        "raw_text": "1.读取Sheet “05_HARA”中的P列单元格内容并输出可控度等级C0,11,C2或C3；\n2.填写可控度等级C0,C1,C2或C3到：Sheet “05_HARA”中的O列单元格；"
+      }
+    }
+  ],
+  "contract_version": "template-role-v1",
+  "confirmation": null,
+  "ready": true
+}
