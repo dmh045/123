@@ -1,0 +1,23 @@
+# HARA自动化填写技能依赖
+
+# 核心依赖
+openpyxl>=3.0.0
+
+# 文档处理
+PyPDF2>=2.0.0
+pdfplumber>=0.9.0
+python-docx>=0.8.11
+
+# 数据处理和可视化
+numpy>=1.24.0
+matplotlib>=3.7.0
+
+# 开发和测试
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+flake8>=6.0.0
+
+# 其他工具
+python-dateutil>=2.8.0
+tqdm>=4.65.0

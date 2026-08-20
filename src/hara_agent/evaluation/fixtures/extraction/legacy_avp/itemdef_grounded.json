@@ -1,0 +1,165 @@
+{
+  "fixture_id": "legacy-avp-itemdef-grounded-v1",
+  "classification": "LEGACY_REGRESSION_FIXTURE",
+  "source_path": "input/ItemDef.docx",
+  "facts": [
+    {
+      "fact_id": "speed.search",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 30},
+      "unit": "km/h",
+      "context": {"operating_mode": "search"},
+      "match_terms": ["搜索车位", "0-30kph"],
+      "route_task": "odd_repair",
+      "source_block_ids": ["T-014-R-0015"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[14].row[15]",
+        "excerpt": "车速 | 搜索车位0-30kph，控车范围0-7kph"
+      }
+    },
+    {
+      "fact_id": "speed.control",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 7},
+      "unit": "km/h",
+      "context": {"operating_mode": "control"},
+      "match_terms": ["控车范围", "0-7kph"],
+      "route_task": "odd_repair",
+      "source_block_ids": ["T-014-R-0015"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[14].row[15]",
+        "excerpt": "车速 | 搜索车位0-30kph，控车范围0-7kph"
+      }
+    },
+    {
+      "fact_id": "speed.parking",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 5},
+      "unit": "km/h",
+      "context": {"operating_mode": "parking"},
+      "match_terms": ["泊车时的最大车速", "≤5km/h"],
+      "route_task": "odd_repair",
+      "source_block_ids": ["T-012-R-0003"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[12].row[3]",
+        "excerpt": "2 | 泊车时的最大车速 | ≤5km/h | 标定值"
+      }
+    },
+    {
+      "fact_id": "performance.normal_braking",
+      "field": "numeric_constraints",
+      "value": {"fact_type": "performance.normal_braking", "parameter": "normal_braking_deceleration", "operator": "LE", "value": 3},
+      "unit": "m/s²",
+      "context": {"condition": "normal_cruise"},
+      "match_terms": ["正常巡航", "≤3m/s2"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-011-R-0007"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[11].row[7]",
+        "excerpt": "减速度 | 本车正常巡航时纵向减速度约束 | ≤3m/s2 | 标定值\n与乘坐舒适性相关的指标均为弱约束，主要看巡航过程中的是否满足人体舒适性"
+      }
+    },
+    {
+      "fact_id": "performance.emergency_braking",
+      "field": "numeric_constraints",
+      "value": {"fact_type": "performance.emergency_braking", "parameter": "emergency_braking_deceleration", "operator": "GT", "value": 5},
+      "unit": "m/s²",
+      "context": {"condition": "emergency_braking"},
+      "match_terms": ["紧急制动", "＞5m/s2"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-011-R-0008"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[11].row[8]",
+        "excerpt": "减速度 | 本车行驶过程紧急制动时最大减速度 | ＞5m/s2 | 标定值\n与乘坐舒适性相关的指标均为弱约束，主要看巡航过程中的是否满足人体舒适性"
+      }
+    },
+    {
+      "fact_id": "performance.brake_response",
+      "field": "numeric_constraints",
+      "value": {"fact_type": "performance.brake_response", "parameter": "brake_response_time", "operator": "LE", "value": 50},
+      "unit": "ms",
+      "context": {"condition": "parking_brake_control"},
+      "match_terms": ["泊车制动", "响应时间≤50ms"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-013-R-0007"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[13].row[7]",
+        "excerpt": "泊车制动 | 响应时间≤50ms"
+      }
+    },
+    {
+      "fact_id": "performance.steering_error",
+      "field": "numeric_constraints",
+      "value": {"fact_type": "performance.steering_error", "parameter": "steering_steady_state_error", "operator": "LE", "value": 0.1},
+      "unit": "deg",
+      "context": {"condition": "steering_control"},
+      "match_terms": ["转向控制", "角度稳态误差"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-013-R-0020"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[13].row[20]",
+        "excerpt": "转向控制 | 角度稳态误差≦0.1deg"
+      }
+    },
+    {
+      "fact_id": "performance.steering_response",
+      "field": "numeric_constraints",
+      "value": {"fact_type": "performance.steering_response", "parameter": "steering_response_time", "operator": "LE", "value": 150},
+      "unit": "ms",
+      "context": {"condition": "steering_control", "qualification": "TBD"},
+      "match_terms": ["转向控制", "角度响应时间"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-013-R-0023"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[13].row[23]",
+        "excerpt": "转向控制 | 角度响应时间 T1≦150ms（TBD）"
+      }
+    },
+    {
+      "fact_id": "driver.inside",
+      "field": "driver_context_facts",
+      "value": {"fact_type": "driver.inside", "driver_location": "INSIDE"},
+      "context": {},
+      "match_terms": ["在驾驶位"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-014-R-0013"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[14].row[13]",
+        "excerpt": "位姿状态 | 在驾驶位/不在驾驶位"
+      }
+    },
+    {
+      "fact_id": "driver.outside",
+      "field": "driver_context_facts",
+      "value": {"fact_type": "driver.outside", "driver_location": "OUTSIDE"},
+      "context": {},
+      "match_terms": ["不在驾驶位"],
+      "route_task": "project_evidence",
+      "source_block_ids": ["T-014-R-0013"],
+      "source": {
+        "source_type": "item_definition",
+        "source_id": "ItemDef.docx",
+        "location": "table[14].row[13]",
+        "excerpt": "位姿状态 | 在驾驶位/不在驾驶位"
+      }
+    }
+  ]
+}

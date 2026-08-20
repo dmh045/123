@@ -1,0 +1,4 @@
+interface:
+  display_name: "Extract Item Definition"
+  short_description: "Extract typed functions, ODD, and evidence"
+  default_prompt: "Extract an auditable typed Item Definition from the supplied project documents."

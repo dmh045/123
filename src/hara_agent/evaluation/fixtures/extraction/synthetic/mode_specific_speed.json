@@ -1,0 +1,33 @@
+{
+  "fixture_id": "synthetic-mode-specific-speed-v1",
+  "classification": "SYNTHETIC_CONTRACT_FIXTURE",
+  "facts": [
+    {
+      "fact_id": "speed.search",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 30},
+      "unit": "km/h",
+      "context": {"operating_mode": "search"},
+      "source_block_ids": ["S-1"],
+      "source": {"source_type": "synthetic", "source_id": "synthetic", "location": "row[1]", "excerpt": "search 0-30 km/h"}
+    },
+    {
+      "fact_id": "speed.parking",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 5},
+      "unit": "km/h",
+      "context": {"operating_mode": "parking"},
+      "source_block_ids": ["S-2"],
+      "source": {"source_type": "synthetic", "source_id": "synthetic", "location": "row[2]", "excerpt": "parking 0-5 km/h"}
+    },
+    {
+      "fact_id": "speed.control",
+      "field": "speed_envelopes",
+      "value": {"speed_min_kph": 0, "speed_max_kph": 7},
+      "unit": "km/h",
+      "context": {"operating_mode": "control"},
+      "source_block_ids": ["S-3"],
+      "source": {"source_type": "synthetic", "source_id": "synthetic", "location": "row[3]", "excerpt": "control 0-7 km/h"}
+    }
+  ]
+}

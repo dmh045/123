@@ -1,0 +1,4 @@
+interface:
+  display_name: "HARA Workflow Orchestrator"
+  short_description: "Orchestrate an auditable HARA workflow"
+  default_prompt: "Run the HARA workflow with evidence, review gates, and deterministic services."

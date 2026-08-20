@@ -1,0 +1,51 @@
+{
+  "fixture_version": "p0-2c3-captured-failure-v1",
+  "source_run_id": "p0-2c2-synth-neg-20260819-001",
+  "source_attempt_id": "p0-2c2-synth-neg-20260819-001-a01",
+  "raw_provider_body_persisted": false,
+  "capture_limitation": "P0-2c2 retained a parsed assessment summary and typed error, not the complete raw body or the invalid status value.",
+  "attempt": {
+    "provider_assessment": {
+      "breakpoint": "I_TO_H",
+      "risk_dimensions": [],
+      "hazardous_event_nonempty": false,
+      "potential_harm_nonempty": false,
+      "edges": [
+        {
+          "edge_id": "M_TO_B",
+          "from_stage": "MALFUNCTION",
+          "to_stage": "BEHAVIOR",
+          "claim": "Malfunction M produces the fixture-defined direct behavior transition B.",
+          "supports": [
+            {"evidence_ref": "SCN.m_to_b_transition", "support_type": "DIRECT_FACT"}
+          ],
+          "mechanism_application": {
+            "mechanism_id": "TEST-MECH-CLOSED-WORLD-TRUE-EDGE",
+            "version": "1",
+            "bindings": {"transition_contract": "SCN.m_to_b_transition"}
+          }
+        },
+        {
+          "edge_id": "B_TO_I",
+          "from_stage": "BEHAVIOR",
+          "to_stage": "INTERACTION",
+          "claim": "Behavior B interacts with the explicit fixture interaction I.",
+          "supports": [
+            {"evidence_ref": "SCN.b_to_i_transition", "support_type": "DIRECT_FACT"}
+          ],
+          "mechanism_application": {
+            "mechanism_id": "TEST-MECH-CLOSED-WORLD-TRUE-EDGE",
+            "version": "1",
+            "bindings": {"transition_contract": "SCN.b_to_i_transition"}
+          }
+        }
+      ]
+    },
+    "error": {
+      "code": "INVALID_V2_ASSESSMENT_SHAPE",
+      "type": "ScenarioProviderContractError",
+      "reason": "v2 status must be PENDING or FINALIZED"
+    }
+  },
+  "sensitive_customer_content": false
+}

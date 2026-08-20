@@ -1,0 +1,25 @@
+{
+  "fixture_version": "p0-2c3-captured-failure-v1",
+  "source_run_id": "p0-2c2-synth-pos-20260819-001",
+  "source_attempt_id": "p0-2c2-synth-pos-20260819-001-a01",
+  "raw_provider_body_persisted": false,
+  "capture_limitation": "No Provider payload existed because both bounded transport attempts timed out.",
+  "provider_call": {
+    "finish_reason": "error",
+    "transport_attempts": 2,
+    "format_retry_calls": 0,
+    "error": {
+      "type": "LLMTimeoutError",
+      "category": "read_timeout"
+    }
+  },
+  "attempt": {
+    "provider_assessment": {},
+    "error": {
+      "code": "ScenarioAdaptiveBatchError",
+      "type": "ScenarioAdaptiveBatchError",
+      "reason": "Scenario adaptive batch cannot split a single item; failure_type=timeout input_chars=9295 split_depth=0"
+    }
+  },
+  "sensitive_customer_content": false
+}

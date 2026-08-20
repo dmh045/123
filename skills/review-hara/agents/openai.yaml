@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review HARA"
+  short_description: "Review HARA evidence and engineering quality"
+  default_prompt: "Audit the HARA result and identify blockers, pending judgments, and unsafe assumptions."

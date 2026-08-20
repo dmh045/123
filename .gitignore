@@ -1,0 +1,14 @@
+# Local secrets
+.env
+
+# Local environments and Python caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated runtime and report artifacts
+runtime/
+tmp/
+output/
+scripts/output/
