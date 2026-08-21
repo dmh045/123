@@ -37,7 +37,6 @@ def _config(**changes) -> RunConfig:
         template_path=Path("template.xlsx"),
         output_path=Path("output.xlsx"),
         run_dir=Path("runtime"),
-        domain="avp",
         operating_mode="parking",
     )
     return replace(base, **changes)
@@ -62,13 +61,6 @@ def _facts(*, contextual: bool = True, aggregate: bool = True) -> ItemDefinition
             ]
             if contextual else []
         ),
-        driver_contexts=[{
-            "context_id": "remote_driver",
-            "driver_position": "outside",
-            "driver_state": "remote monitoring",
-            "direct_vehicle_control": False,
-            "intervention_channels": ["remote_stop"],
-        }],
         sources=[source],
     )
 
@@ -221,14 +213,6 @@ def test_application_aggregate_fallback_requires_explicit_authorization():
     assert result is not None
     assert result.provenance is FactProvenance.DERIVED
     assert result.fallback_used is True
-
-
-def test_legacy_profile_fallback_flag_cannot_restore_domain_speed_authority():
-    state = _state(_facts(contextual=False, aggregate=False))
-    app = HARAApplication(_config(allow_legacy_speed_fallback=True), object())
-
-    with pytest.raises(UnresolvedProjectContextError):
-        app.prepare_scenario_candidates(state, _service())
 
 
 def test_scenario_context_and_provenance_survive_checkpoint_roundtrip():

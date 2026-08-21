@@ -17,16 +17,10 @@ class FactProvenance(str, Enum):
 
     PROJECT_INPUT = "PROJECT_INPUT"
     METHOD_CONTRACT = "METHOD_CONTRACT"
-    DOMAIN_POLICY = "DOMAIN_POLICY"
-    LEGACY_MIGRATION = "LEGACY_MIGRATION"
+    APPROVED_RULE = "APPROVED_RULE"
     DERIVED = "DERIVED"
     LLM_INFERENCE = "LLM_INFERENCE"
     HUMAN_CONFIRMATION = "HUMAN_CONFIRMATION"
-
-
-# Architecture documents use authority and provenance for the same axis.
-# Expose an alias instead of maintaining two value systems that can drift.
-FactAuthority = FactProvenance
 
 
 @dataclass(frozen=True)

@@ -37,8 +37,8 @@ def test_duplicate_evidence_ref_fails_closed_without_overwrite():
 
 def test_approved_rule_provider_requires_approved_domain_policy_record():
     approved = EvidenceRecord(
-        "DOMAIN_RULE.avp.fixture", "fixture rule", EvidenceKind.APPROVED_RULE,
-        FactProvenance.DOMAIN_POLICY, ReviewStatus.FINALIZED,
+        "APPROVED_RULE.fixture", "fixture rule", EvidenceKind.APPROVED_RULE,
+        FactProvenance.APPROVED_RULE, ReviewStatus.FINALIZED,
     )
     registry = FactRegistry()
     register_evidence_provider(
@@ -47,11 +47,10 @@ def test_approved_rule_provider_requires_approved_domain_policy_record():
     assert registry.resolve_record(approved.evidence_ref) is approved
 
     invalid = EvidenceRecord(
-        "DOMAIN_RULE.avp.pending", "unapproved", EvidenceKind.APPROVED_RULE,
-        FactProvenance.LEGACY_MIGRATION, ReviewStatus.PENDING,
+        "APPROVED_RULE.pending", "unapproved", EvidenceKind.APPROVED_RULE,
+        FactProvenance.LLM_INFERENCE, ReviewStatus.PENDING,
     )
-    with pytest.raises(ValueError, match="DOMAIN_POLICY provenance"):
+    with pytest.raises(ValueError, match="APPROVED_RULE provenance"):
         register_evidence_provider(
             FactRegistry(), StaticApprovedRuleEvidenceProvider((invalid,))
         )
-

@@ -18,10 +18,7 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 def extraction_metrics(evaluations: list[FactEvaluation]) -> dict[str, Any]:
     project_items = [
         item for item in evaluations
-        if item.expected_provenance not in {
-            FactProvenance.METHOD_CONTRACT,
-            FactProvenance.LEGACY_MIGRATION,
-        }
+        if item.expected_provenance is not FactProvenance.METHOD_CONTRACT
     ]
     present = [item for item in project_items if item.classification in PRESENT_CLASSIFICATIONS]
     grounded = [item for item in project_items if item.grounded]

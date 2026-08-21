@@ -147,43 +147,6 @@ class MethodScenarioCandidateService:
             ],
         }
 
-    def _driver_contexts(self, facts: ItemDefinitionFacts) -> list[dict[str, Any]]:
-        contexts: list[dict[str, Any]] = []
-        for item in facts.driver_context_facts:
-            contexts.append({
-                "context_id": item.fact_type,
-                "driver_position": item.driver_location.value,
-                "driver_state": item.condition,
-                "control_mode": item.control_mode,
-                "sources": list(item.sources),
-                "approval": item.approval,
-            })
-        for index, item in enumerate(facts.driver_contexts, start=1):
-            sources = [
-                source if isinstance(source, SourceRef) else SourceRef(**source)
-                for source in item.get("sources", [])
-            ]
-            raw_approval = item.get("status", ReviewStatus.PENDING)
-            approval = (
-                raw_approval
-                if isinstance(raw_approval, ReviewStatus)
-                else ReviewStatus(str(raw_approval))
-            )
-            contexts.append({
-                **item,
-                "context_id": str(item.get("context_id", f"context_{index}")),
-                "sources": sources,
-                "approval": approval,
-            })
-        return contexts or [{
-            "context_id": "unresolved_driver_context",
-            "driver_position": "",
-            "driver_state": "",
-            "control_mode": "",
-            "sources": [],
-            "approval": ReviewStatus.PENDING,
-        }]
-
     def generate(
         self,
         *,
@@ -198,13 +161,12 @@ class MethodScenarioCandidateService:
             )
             for dimension in dimensions
         ]
-        contexts = self._driver_contexts(project_facts)
         candidates: list[ScenarioCandidate] = []
         risk_fact_audits: list[dict[str, Any]] = []
         unresolved_count = 0
         project_sources = list(project_facts.sources)
         speed_sources = list(speed_resolution.source_refs)
-        for dimension_values, context in product(product(*options), contexts):
+        for dimension_values in product(*options):
             bindings = {
                 dimension.canonical_name: value
                 for dimension, value in zip(dimensions, dimension_values)
@@ -218,10 +180,6 @@ class MethodScenarioCandidateService:
                 "method_scenario_dimensions": bindings,
                 "operating_mode": operating_mode,
                 "ego_speed_kph": speed_resolution.resolved_value,
-                "driver_context_id": context["context_id"],
-                "driver_position": str(context.get("driver_position", "")),
-                "driver_state": str(context.get("driver_state", "")),
-                "control_mode": str(context.get("control_mode", "")),
             }
             canonical_keys = {
                 "OPERATING_SCENARIO": "operating_scenario",
@@ -260,21 +218,10 @@ class MethodScenarioCandidateService:
                 speed_resolution.approval,
                 speed_sources,
             )
-            context_sources = list(context.get("sources", []))
-            context_approval = context.get("approval", ReviewStatus.PENDING)
-            for key in (
-                "driver_context_id", "driver_position", "driver_state", "control_mode"
-            ):
-                fact_provenance[key] = self._fact_metadata(
-                    FactProvenance.PROJECT_INPUT,
-                    context_approval,
-                    context_sources,
-                )
             material = {
                 "contract": SCENARIO_CONTRACT_VERSION,
                 "template_hash": self.method.metadata["template_hash"],
                 "bindings": bindings,
-                "driver_context_id": context["context_id"],
             }
             fingerprint = hashlib.sha256(
                 json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -283,7 +230,6 @@ class MethodScenarioCandidateService:
             risk_binding = self.risk_facts.bind(project_facts, {
                 **facts,
                 "scenario_id": scenario_id,
-                "atomic_variant": context["context_id"],
             })
             facts.update(risk_binding.values)
             fact_provenance.update(risk_binding.provenance)
@@ -297,8 +243,6 @@ class MethodScenarioCandidateService:
                 and project_facts.status is ReviewStatus.FINALIZED
                 and speed_resolution.approval is ReviewStatus.FINALIZED
                 and bool(project_sources)
-                and context_approval is ReviewStatus.FINALIZED
-                and bool(context_sources)
             )
             method_sources = [
                 SourceRef(
@@ -313,9 +257,7 @@ class MethodScenarioCandidateService:
                 scenario_id=scenario_id,
                 operating_scenario=facts.get("operating_scenario", operating_mode),
                 situational_description=summary,
-                situational_detailing=(
-                    f"{summary}；驾驶上下文：{facts['driver_state'] or '未解析'}"
-                ),
+                situational_detailing=summary,
                 facts=facts,
                 operating_mode=operating_mode,
                 context_resolution={
@@ -335,7 +277,7 @@ class MethodScenarioCandidateService:
                     else "Project facts or MethodContract dimension bindings require review."
                 ),
                 source_scenario_id="METHOD_SCENARIO_ONTOLOGY",
-                atomic_variant=context["context_id"],
+                atomic_variant="method_dimensions",
                 semantic_fingerprint=fingerprint,
                 scenario_contract_version=SCENARIO_CONTRACT_VERSION,
             ))
@@ -350,7 +292,6 @@ class MethodScenarioCandidateService:
             "operating_mode": operating_mode,
             "speed_source_status": speed_resolution.resolution_status.value,
             "speed_resolution": speed_resolution.to_dict(),
-            "driver_context_count": len(contexts),
             "bound_risk_fact_count": sum(
                 len(item["bound_fact_types"]) for item in risk_fact_audits
             ),

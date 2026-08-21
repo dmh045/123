@@ -17,7 +17,7 @@ def source(location: str) -> SourceRef:
     return SourceRef("item_definition", "ItemDef.docx", location, "grounded")
 
 
-def test_speed_envelopes_preserve_modes_and_build_legacy_aggregate():
+def test_speed_envelopes_preserve_modes_and_build_aggregate_summary():
     facts = ItemDefinitionFacts(
         system_description="AVP",
         item_boundary="vehicle motion control",

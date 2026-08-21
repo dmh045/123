@@ -1,14 +1,47 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
 from hara_agent.config import LLMConfig
-from hara_agent.contracts import CompileStatus
-from hara_agent.template import TemplateRoleCompiler
+from hara_agent.contracts import (
+    CompileStatus, TemplateRole, TemplateRoleConfirmation,
+)
+from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
+
+
+def _role_compiler() -> TemplateRoleCompiler:
+    manifest_root = os.getenv(
+        "HARA_TEMPLATE_ROLE_MANIFEST_DIR",
+        "runtime/agent/template-role-manifests",
+    )
+    return TemplateRoleCompiler(
+        manifest_store=TemplateRoleManifestStore(manifest_root)
+    )
+
+
+def _parse_role_selections(values: list[str]) -> dict[str, dict[str, str]]:
+    selections: dict[str, dict[str, str]] = {}
+    for value in values:
+        role_name, separator, location = value.partition("=")
+        sheet, location_separator, region = location.rpartition("!")
+        if not separator or not location_separator or not sheet or not region:
+            raise ValueError(
+                f"Invalid --select {value!r}; expected ROLE=SHEET!A1:B9"
+            )
+        role = TemplateRole(role_name.strip())
+        if role.value in selections:
+            raise ValueError(f"Duplicate role selection: {role.value}")
+        selections[role.value] = {
+            "sheet": sheet.strip(),
+            "region": region.strip().replace("$", ""),
+        }
+    return selections
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,7 +51,6 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--item", required=True, type=Path)
     analyze.add_argument("--template", required=True, type=Path)
     analyze.add_argument("--output", required=True, type=Path)
-    analyze.add_argument("--domain", help="迁移期标记；不再选择Agent工程规则")
     analyze.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     analyze.add_argument("--run-id", default="hara-run")
     analyze.add_argument("--resume", action="store_true")
@@ -27,20 +59,55 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--ego-speed-source", default="")
     analyze.add_argument("--operating-mode")
     analyze.add_argument("--allow-aggregate-speed-fallback", action="store_true")
-    analyze.add_argument("--allow-legacy-speed-fallback", action="store_true")
     analyze.add_argument("--max-workers", type=int, default=4)
-    doctor = subparsers.add_parser("doctor", help="检查新Agent生产运行条件，不执行分析")
+    doctor = subparsers.add_parser("doctor", help="检查模板和运行配置，不执行分析")
     doctor.add_argument("--template", required=True, type=Path)
-    doctor.add_argument("--domain", help="迁移期兼容参数；doctor不再依赖Domain Profile")
+    confirm = subparsers.add_parser(
+        "confirm-template-role",
+        help="一次性确认有歧义的模板角色，并按模板哈希保存系统清单",
+    )
+    confirm.add_argument("--template", required=True, type=Path)
+    confirm.add_argument(
+        "--select", action="append", required=True,
+        metavar="ROLE=SHEET!A1:B9",
+    )
+    confirm.add_argument("--confirmed-by", required=True)
+    confirm.add_argument("--rationale", default="")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "confirm-template-role":
+        compiler = _role_compiler()
+        snapshot = compiler.scanner.scan(args.template)
+        confirmation = TemplateRoleConfirmation(
+            template_hash=snapshot.source_hash,
+            selected_regions=_parse_role_selections(args.select),
+            confirmed_by=args.confirmed_by,
+            confirmed_at=datetime.now(timezone.utc).isoformat(),
+            rationale=args.rationale,
+        )
+        method = compiler.compile_method(
+            args.template,
+            confirmation=confirmation,
+            use_manifest=False,
+        )
+        print(json.dumps({
+            "template_hash": snapshot.source_hash,
+            "compile_status": method.compile_status.value,
+            "engineering_rules_compiled": method.engineering_rules_compiled,
+            "confirmed_roles": sorted(confirmation.selected_regions),
+            "manifest": str(compiler.manifest_store.path_for(snapshot.source_hash)),
+            "blocking_diagnostics": [
+                item.message for item in method.blocking_diagnostics
+            ],
+        }, ensure_ascii=False, indent=2))
+        return 0 if not method.blocking_diagnostics else 2
     if args.command == "doctor":
         checks = {}
         try:
-            method = TemplateRoleCompiler().compile_method(args.template)
+            method = _role_compiler().compile_method(args.template)
             method_ok = (
                 method.compile_status is not CompileStatus.NOT_READY
                 and method.engineering_rules_compiled
@@ -74,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             "ready_for_draft": ready_for_draft,
             "ready_for_release": ready_for_release,
             "release_blockers": [
-                "Template rule ambiguities and semantic SG/Safe-State derivation require review"
+                "Release requires run-specific fact, risk, SG, and Safe-State approvals"
             ],
             "checks": checks,
         }, ensure_ascii=False, indent=2))
@@ -84,7 +151,6 @@ def main(argv: list[str] | None = None) -> int:
         template_path=args.template,
         output_path=args.output,
         run_dir=args.run_dir,
-        domain=args.domain,
         resume=args.resume,
         allow_draft=args.allow_draft,
         run_id=args.run_id,
@@ -92,7 +158,6 @@ def main(argv: list[str] | None = None) -> int:
         ego_speed_source=args.ego_speed_source,
         operating_mode=args.operating_mode,
         allow_aggregate_speed_fallback=args.allow_aggregate_speed_fallback,
-        allow_legacy_speed_fallback=args.allow_legacy_speed_fallback,
         max_workers=args.max_workers,
     )
     result = HARAApplication.from_env(config).run()

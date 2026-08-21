@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from enum import Enum
+import re
 from typing import Any
 
 from hara_agent.models import (
@@ -20,7 +21,6 @@ class ProjectFactResolutionError(ValueError):
 class ProjectContextResolutionStatus(str, Enum):
     RESOLVED = "RESOLVED"
     RESOLVED_AGGREGATE_FALLBACK = "RESOLVED_AGGREGATE_FALLBACK"
-    RESOLVED_LEGACY_FALLBACK = "RESOLVED_LEGACY_FALLBACK"
     UNRESOLVED_PROJECT_CONTEXT = "UNRESOLVED_PROJECT_CONTEXT"
 
 
@@ -53,7 +53,6 @@ class UnresolvedProjectContextError(ProjectFactResolutionError):
         super().__init__(
             f"UNRESOLVED_PROJECT_CONTEXT operating_mode={operating_mode!r}: {reason}"
         )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "operating_mode": self.operating_mode,
@@ -64,29 +63,16 @@ class UnresolvedProjectContextError(ProjectFactResolutionError):
         }
 
 
-_MODE_ALIASES = {
-    "search": {
-        "search", "parking_search", "space_search", "车位搜索", "搜索车位", "寻库",
-    },
-    "parking": {
-        "parking", "park", "park_in", "parking_maneuver", "泊车", "泊入",
-    },
-    "control": {
-        "control", "vehicle_control", "automated_control", "控车", "控制",
-    },
-}
-
-
 def canonical_operating_mode(value: str) -> str:
-    token = value.strip().casefold().replace("-", "_").replace(" ", "_")
-    for canonical, aliases in _MODE_ALIASES.items():
-        if token in {alias.casefold() for alias in aliases}:
-            return canonical
-    return token
+    """Normalize representation only; semantic aliases belong to input data."""
+
+    return re.sub(
+        r"_+", "_", value.strip().casefold().replace("-", "_").replace(" ", "_")
+    ).strip("_")
 
 
 class ProjectFactResolver:
-    """Resolve mode-specific facts; aggregate compatibility is explicit opt-in."""
+    """Resolve mode-specific facts; aggregate resolution is explicit opt-in."""
 
     def resolve_speed_envelope(
         self,
@@ -129,12 +115,11 @@ class ProjectFactResolver:
             operating_mode=operating_mode,
             speed_min_kph=facts.speed_min_kph,
             speed_max_kph=facts.speed_max_kph,
-            condition="explicit aggregate compatibility fallback",
+            condition="explicit aggregate speed fallback",
             sources=list(facts.sources),
             provenance=FactProvenance.DERIVED,
             status=ReviewStatus.PENDING,
         )
-
     def resolve_speed_kph(
         self,
         facts: ItemDefinitionFacts,
@@ -227,31 +212,3 @@ class ProjectFactResolver:
                 "unit": "km/h",
             },
         )
-
-    @staticmethod
-    def legacy_migration_speed(
-        operating_mode: str,
-        speed_kph: float,
-        source: SourceRef,
-    ) -> SpeedResolutionResult:
-        return SpeedResolutionResult(
-            operating_mode=canonical_operating_mode(operating_mode),
-            requested_fact="ego_speed_kph",
-            resolved_value=float(speed_kph),
-            resolution_source="DomainProfile",
-            provenance=FactProvenance.LEGACY_MIGRATION,
-            source_refs=(source,),
-            approval=ReviewStatus.PENDING,
-            fallback_used=True,
-            resolution_status=ProjectContextResolutionStatus.RESOLVED_LEGACY_FALLBACK,
-            matched_envelope={
-                "operating_mode": operating_mode,
-                "speed_min_kph": None,
-                "speed_max_kph": speed_kph,
-                "condition": "explicit legacy migration fallback",
-                "unit": "km/h",
-            },
-        )
-
-
-ProjectFactContextResolver = ProjectFactResolver

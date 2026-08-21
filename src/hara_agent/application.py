@@ -7,9 +7,9 @@ from hara_agent.config import LLMConfig, RunConfig
 from hara_agent.contracts import CompileStatus
 from hara_agent.infrastructure.llm import LLMClient, create_llm_client
 from hara_agent.services.analysis import (
-    FTTIService,
     MethodContractASILService,
     MethodRuleScoringService,
+    MethodRiskFactBindingService,
     MethodScenarioCandidateService,
     MethodSafetyGoalService,
     ProjectFactResolver,
@@ -20,11 +20,10 @@ from hara_agent.models import ItemDefinitionFacts, SourceRef
 from hara_agent.services.extraction import ValidatedArtifactCache
 from hara_agent.services.reporting import HARAExcelRenderer
 from hara_agent.services.semantic import (
-    FunctionExtractionAgent,
-    ItemDefinitionExtractionAgent,
     GuidewordApplicabilityAgent,
     MalfunctionHazardAgent,
     ScenarioFeasibilityAgent,
+    ScenarioRiskFactAgent,
 )
 from hara_agent.workflow import (
     CheckpointRepository,
@@ -36,11 +35,11 @@ from hara_agent.workflow import (
     WorkflowRunResult,
     build_hara_agent_graph,
 )
-from hara_agent.template import TemplateRoleCompiler
+from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
 
 
 class HARAApplication:
-    """Dependency assembly for the migrated Agent path."""
+    """Dependency assembly for the template-driven HARA runtime."""
 
     def __init__(self, config: RunConfig, llm_client: LLMClient):
         self.config = config
@@ -53,7 +52,13 @@ class HARAApplication:
 
     def run(self) -> WorkflowRunResult:
         self.config.validate()
-        method = TemplateRoleCompiler().compile_method(self.config.template_path)
+        manifest_root = os.getenv(
+            "HARA_TEMPLATE_ROLE_MANIFEST_DIR",
+            "runtime/agent/template-role-manifests",
+        )
+        method = TemplateRoleCompiler(
+            manifest_store=TemplateRoleManifestStore(manifest_root)
+        ).compile_method(self.config.template_path)
         if (
             method.compile_status is CompileStatus.NOT_READY
             or not method.engineering_rules_compiled
@@ -85,8 +90,10 @@ class HARAApplication:
         def prepare_candidates(state: HARAState):
             return self.prepare_scenario_candidates(state, candidate_service)
         checkpoints = CheckpointRepository(self.config.run_dir)
-        renderer = HARAExcelRenderer()
-        renderer.contract.validate(self.config.template_path)
+        renderer = HARAExcelRenderer(
+            method.report_contract,
+            template_hash=str(method.metadata["template_hash"]),
+        )
         if self.config.resume:
             state = checkpoints.load(self.config.run_id)
             checkpoint_hash = state.method_contract.get("template_hash")
@@ -104,10 +111,6 @@ class HARAApplication:
         else:
             state = HARAState(
                 run_id=self.config.run_id,
-                # Retain migration-era state fields for checkpoint compatibility;
-                # they no longer select engineering rules on the Agent path.
-                domain=self.config.domain or "",
-                profile_version="",
                 method_contract=method_ref,
             )
             state.record(
@@ -127,10 +130,6 @@ class HARAApplication:
                 ],
                 warning_codes=sorted({item.code.value for item in method.warnings}),
             )
-        state.pending_reviews = [
-            item for item in state.pending_reviews
-            if item.get("issue_type") != "migration_runtime_dependency"
-        ]
         graph = build_hara_agent_graph(
             SemanticWorkflowInputs(
                 item_path=self.config.item_path,
@@ -143,19 +142,24 @@ class HARAApplication:
                     os.getenv("HARA_ARTIFACT_CACHE_DIR", "runtime/agent/artifact-cache"),
                     os.getenv("HARA_ARTIFACT_CACHE_MODE", "readwrite"),
                 ),
+                required_fact_specs=method.required_fact_specs,
+                requested_operating_modes=(
+                    (str(self.config.operating_mode),)
+                    if self.config.operating_mode else ()
+                ),
             ),
             SemanticWorkflowAgents(
-                item_definition=ItemDefinitionExtractionAgent(self.llm_client),
-                functions=FunctionExtractionAgent(self.llm_client),
+                client=self.llm_client,
                 guidewords=GuidewordApplicabilityAgent(self.llm_client),
                 malfunctions=MalfunctionHazardAgent(self.llm_client),
                 scenarios=ScenarioFeasibilityAgent(self.llm_client),
+                risk_facts=ScenarioRiskFactAgent(self.llm_client),
             ),
             RiskWorkflowServices(
                 scoring=MethodRuleScoringService(method),
                 asil_table=MethodContractASILService(method),
-                ftti=FTTIService(),
                 safety_goals=MethodSafetyGoalService(method),
+                risk_fact_binding=MethodRiskFactBindingService(method),
             ),
             checkpoint_repository=checkpoints,
             reporting=ReportingWorkflowConfig(
@@ -170,7 +174,7 @@ class HARAApplication:
             and result.interrupted
             and result.reason == "pending_engineering_review"
         ):
-            output = HARAExcelRenderer().render(
+            output = renderer.render(
                 result.state,
                 self.config.template_path,
                 self.config.output_path,

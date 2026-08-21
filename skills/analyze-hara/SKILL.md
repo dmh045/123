@@ -26,4 +26,4 @@ description: Perform evidence-linked HARA semantic analysis after Item Definitio
 - Treat quantity ranges as diagnostics only.
 - Keep LLM judgments separate from deterministic calculation results.
 - Keep non-applicable combinations in the applicability audit, not as fabricated HARA rows.
-- The current Domain scoring/candidate/catalog services are migration-only comparison paths; do not add rules to them or use them to fill a new-path gap.
+- There is no alternate engineering runtime. Missing MethodContract rules or ProjectFacts must fail closed.

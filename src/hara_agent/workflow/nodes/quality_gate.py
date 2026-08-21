@@ -8,7 +8,7 @@ def pass_quality_gate(state: HARAState) -> HARAState:
     pending_values = []
     rejected_values = []
     for risk in state.risk_results:
-        for field in ("severity", "exposure", "controllability", "asil", "ftti_seconds"):
+        for field in ("severity", "exposure", "controllability", "asil"):
             status = getattr(risk, field).status
             if status is ReviewStatus.PENDING:
                 pending_values.append(f"{risk.assessment_id}.{field}")

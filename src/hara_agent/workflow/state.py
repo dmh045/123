@@ -19,7 +19,6 @@ from hara_agent.services.semantic.scenario_evidence import SCENARIO_ASSESSMENT_C
 class WorkflowStage(str, Enum):
     INITIALIZE = "initialize"
     EXTRACT = "extract"
-    ITEM_DEFINITION = "item_definition"
     FUNCTIONS = "functions"
     HAZOP = "hazop"
     MALFUNCTIONS = "malfunctions"
@@ -36,8 +35,6 @@ class WorkflowStage(str, Enum):
 class HARAState:
     run_id: str
     stage: WorkflowStage = WorkflowStage.INITIALIZE
-    domain: str = ""
-    profile_version: str = ""
     method_contract: dict[str, Any] = field(default_factory=dict)
     item_definition: dict[str, Any] = field(default_factory=dict)
     functions: list[dict[str, Any]] = field(default_factory=list)
@@ -56,7 +53,7 @@ class HARAState:
         statuses = [
             getattr(risk, field).status
             for risk in self.risk_results
-            for field in ("severity", "exposure", "controllability", "asil", "ftti_seconds")
+            for field in ("severity", "exposure", "controllability", "asil")
         ] + [goal.status for goal in self.safety_goals]
         return (
             not self.pending_reviews
@@ -77,8 +74,6 @@ class HARAState:
         state = cls(
             run_id=str(value["run_id"]),
             stage=WorkflowStage(value.get("stage", WorkflowStage.INITIALIZE.value)),
-            domain=str(value.get("domain", "")),
-            profile_version=str(value.get("profile_version", "")),
             method_contract=dict(value.get("method_contract", {})),
             item_definition=dict(value.get("item_definition", {})),
             functions=list(value.get("functions", [])),
@@ -119,10 +114,10 @@ class HARAState:
             state.stage = WorkflowStage.MALFUNCTIONS
             state.audit_trail.append({
                 "event": "scenario_checkpoint_invalidated",
-                "loaded_scenario_contract_version": loaded_contract or "legacy-unversioned",
+                "loaded_scenario_contract_version": loaded_contract or "unversioned",
                 "required_scenario_contract_version": SCENARIO_CONTRACT_VERSION,
                 "loaded_scenario_assessment_contract_version": (
-                    loaded_assessment_contract or "legacy-unversioned"
+                    loaded_assessment_contract or "unversioned"
                 ),
                 "required_scenario_assessment_contract_version": (
                     SCENARIO_ASSESSMENT_CONTRACT_VERSION
@@ -178,7 +173,6 @@ class HARAState:
             exposure=cls._evidence(value["exposure"]),
             controllability=cls._evidence(value["controllability"]),
             asil=cls._evidence(value["asil"]),
-            ftti_seconds=cls._evidence(value["ftti_seconds"]),
             malfunction_id=str(value.get("malfunction_id", "")),
             hazardous_event=str(value.get("hazardous_event", "")),
             potential_harm=str(value.get("potential_harm", "")),
@@ -193,7 +187,6 @@ class HARAState:
             text=str(value["text"]),
             safe_state=str(value["safe_state"]),
             max_asil=str(value["max_asil"]),
-            ftti_seconds=value.get("ftti_seconds"),
             associated_scenario_ids=list(value.get("associated_scenario_ids", [])),
             status=ReviewStatus(value.get("status", ReviewStatus.PENDING.value)),
         )

@@ -37,15 +37,16 @@ class MethodSafetyGoalService:
         malfunction: str,
         guideword: str,
         scenario_id: str,
+        scenario_description: str,
         hazard_event: str,
         asil: str,
-        ftti_result: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         sg_id = self._intent_id(function_name, guideword, malfunction)
-        safety_goal = f"避免因{guideword}{function_name}而导致{hazard_event}。"
-        safe_state = (
-            f"使{function_name}进入能够防止或缓解“{hazard_event}”的受控状态。"
+        safety_goal = (
+            f"避免发生因{guideword}{function_name}而导致"
+            f"{scenario_description}发生{hazard_event}。"
         )
+        safe_state = "待依据MethodContract与项目能力完成工程推导"
         entry = self.catalog.setdefault(sg_id, {
             "sg_id": sg_id,
             "safety_goal": safety_goal,
@@ -54,6 +55,8 @@ class MethodSafetyGoalService:
             "functions": [],
             "associations": [],
             "method_contract_hash": self.method.metadata["template_hash"],
+            "safety_goal_method_source": self.method.safety_goal_method.derivation_pattern,
+            "safe_state_method_source": self.method.safe_state_method.derivation_pattern,
             "derivation_status": (
                 "FINALIZED" if self.is_approved else "NEEDS_REVIEW"
             ),
@@ -67,11 +70,10 @@ class MethodSafetyGoalService:
             "malfunction": malfunction,
             "guideword": guideword,
             "scenario_id": scenario_id,
+            "scenario_description": scenario_description,
             "hazard_event": hazard_event,
             "asil": asil,
         }
-        if ftti_result:
-            association["ftti"] = dict(ftti_result)
         entry["associations"].append(association)
         return {
             "sg_id": sg_id,
@@ -83,13 +85,5 @@ class MethodSafetyGoalService:
         result: dict[str, dict[str, Any]] = {}
         for sg_id in sorted(self.catalog):
             entry = self.catalog[sg_id]
-            ftti_items = [
-                item["ftti"] for item in entry["associations"] if item.get("ftti")
-            ]
-            values = [
-                float(item["ftti_value_s"])
-                for item in ftti_items if item.get("ftti_value_s") is not None
-            ]
-            entry["ftti_value_s"] = min(values) if values else None
             result[sg_id] = entry
         return result

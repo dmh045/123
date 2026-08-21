@@ -1,3 +1,5 @@
+import pytest
+
 from hara_agent.models import (
     EvidenceKind, FactProvenance, MalfunctionCandidate, ReviewStatus,
     ScenarioCandidate, SourceRef,
@@ -38,7 +40,7 @@ def test_scenario_fact_inherits_project_provenance_approval_and_source():
     assert record.metadata["fallback_used"] is False
 
 
-def test_legacy_candidate_remains_pending_legacy_migration():
+def test_removed_legacy_provenance_is_rejected():
     source = SourceRef("domain_profile", "avp.yaml", "risk_candidates")
     scenario = ScenarioCandidate(
         "SCN-LEGACY", "parking", "parking", "candidate",
@@ -51,13 +53,8 @@ def test_legacy_candidate_remains_pending_legacy_migration():
             },
         },
     )
-    record = build_fact_registry(_malfunction(), scenario).resolve_record(
-        "SCN.relative_distance"
-    )
-    assert record is not None
-    assert record.provenance is FactProvenance.LEGACY_MIGRATION
-    assert record.approval_status is ReviewStatus.PENDING
-    assert record.kind is EvidenceKind.DIRECT_FACT
+    with pytest.raises(ValueError, match="LEGACY_MIGRATION"):
+        build_fact_registry(_malfunction(), scenario)
 
 
 def test_ttc_is_derived_physics_with_canonical_inputs():
@@ -74,4 +71,3 @@ def test_ttc_is_derived_physics_with_canonical_inputs():
         "derivation_type": "TTC",
         "inputs": ["SCN.relative_distance", "SCN.relative_speed_kph"],
     }
-

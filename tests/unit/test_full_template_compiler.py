@@ -8,8 +8,8 @@ import pytest
 from openpyxl import load_workbook
 
 from hara_agent.contracts import (
-    CompileStatus, CompilerDiagnosticCode, FactType, NormativeStrength,
-    ParseStatus, RangePredicate, TemplateRole,
+    CompileStatus, CompilerDiagnosticCode, NormativeStrength,
+    ParseStatus, RangePredicate,
 )
 from hara_agent.template import TemplateRoleCompiler
 

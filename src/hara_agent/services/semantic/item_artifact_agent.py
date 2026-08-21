@@ -10,8 +10,8 @@ from hara_agent.infrastructure.llm import LLMClient, LLMOutputLimitError, LLMReq
 from hara_agent.models import FunctionDefinition, ItemDefinitionFacts, ReviewStatus
 from hara_agent.services.validation import FunctionValidator
 
-from .function_agent import FunctionExtractionAgent
-from .item_definition_agent import ItemDefinitionExtractionAgent
+from .function_agent import FunctionNormalizer
+from .item_definition_agent import ItemDefinitionNormalizer
 from .parsing import CONFIDENCE_PROMPT_CONTRACT
 
 
@@ -86,17 +86,11 @@ class ItemArtifactExtractionAgent:
         if not isinstance(function_raw, list):
             raise ValueError("主抽取缺少functions数组")
 
-        normalized_item = dict(item_raw)
-        # Evidence-heavy fields belong exclusively to the routed local
-        # supplement; provider-added extras must not bypass that contract.
-        normalized_item["performance_parameters"] = []
-        normalized_item["driver_contexts"] = []
-        normalized_item["exposure_inputs"] = []
-        facts, warnings = ItemDefinitionExtractionAgent._parse_with_warnings(
-            normalized_item, source_id
+        facts, warnings = ItemDefinitionNormalizer._parse_with_warnings(
+            item_raw, source_id
         )
-        functions = [FunctionExtractionAgent._parse(item, source_id) for item in function_raw]
-        FunctionExtractionAgent._validate_unique(functions)
+        functions = [FunctionNormalizer._parse(item, source_id) for item in function_raw]
+        FunctionNormalizer._validate_unique(functions)
         self.validator.ensure_valid(functions)
 
         facts.status = ReviewStatus.PENDING

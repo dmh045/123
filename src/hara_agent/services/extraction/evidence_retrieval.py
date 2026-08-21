@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from dataclasses import asdict, dataclass
+from typing import Any, Sequence
 
 from .targeted_verification import block_value, normalize_source_text
 
@@ -30,75 +30,6 @@ class FactRetrievalSpec:
             raise ValueError("FactRetrievalSpec.fact_type must not be empty")
         if not self.aliases:
             raise ValueError("FactRetrievalSpec.aliases must not be empty")
-
-
-PROJECT_EVIDENCE_SPECS: tuple[FactRetrievalSpec, ...] = (
-    FactRetrievalSpec(
-        "performance.normal_braking",
-        ("normal braking", "normal deceleration", "正常制动", "正常巡航"),
-        ("m/s²", "m/s2"),
-        ("longitudinal", "deceleration", "纵向", "减速度"),
-        ("performance", "specification", "性能", "规格"),
-    ),
-    FactRetrievalSpec(
-        "performance.emergency_braking",
-        ("emergency braking", "emergency brake", "紧急制动", "紧急刹车"),
-        ("m/s²", "m/s2"),
-        ("maximum deceleration", "最大减速度", "减速度"),
-        ("performance", "specification", "性能", "规格"),
-    ),
-    FactRetrievalSpec(
-        "performance.brake_response",
-        ("brake response", "braking response", "brake latency", "制动响应", "泊车制动"),
-        ("ms", "s"),
-        ("response", "latency", "time", "响应", "时延", "时间"),
-        ("performance", "control", "性能", "控制"),
-    ),
-    FactRetrievalSpec(
-        "performance.steering_error",
-        ("steering error", "steering accuracy", "转向误差", "角度稳态误差", "转向控制"),
-        ("deg", "°"),
-        ("steady state", "accuracy", "error", "稳态", "精度", "误差"),
-        ("performance", "control", "性能", "控制"),
-    ),
-    FactRetrievalSpec(
-        "performance.steering_response",
-        ("steering response", "steering latency", "转向响应", "角度响应", "转向控制"),
-        ("ms", "s"),
-        ("response", "latency", "time", "响应", "时延", "时间"),
-        ("performance", "control", "性能", "控制"),
-    ),
-    FactRetrievalSpec(
-        "driver.inside",
-        ("driver inside", "driver in vehicle", "驾驶员在车内", "在驾驶位", "车内"),
-        (),
-        ("driver position", "driver location", "驾驶员", "位姿", "位置"),
-        ("operating condition", "environment", "运行条件", "环境"),
-    ),
-    FactRetrievalSpec(
-        "driver.outside",
-        ("driver outside", "driver out of vehicle", "驾驶员在车外", "不在驾驶位", "车外"),
-        (),
-        ("driver position", "driver location", "驾驶员", "位姿", "位置"),
-        ("operating condition", "environment", "运行条件", "环境"),
-    ),
-    FactRetrievalSpec(
-        "performance.generic",
-        ("performance", "性能"),
-        ("ms", "s", "km/h", "m/s²", "m/s2", "deg", "°", "hz"),
-        ("response", "latency", "accuracy", "error", "响应", "延迟", "精度", "误差"),
-        ("performance", "specification", "性能", "规格"),
-        required=False,
-    ),
-    FactRetrievalSpec(
-        "exposure.time_or_frequency",
-        ("exposure", "frequency", "duration", "probability", "暴露", "频率", "时长", "概率", "占比"),
-        ("%", "hz", "s", "min", "h"),
-        ("time", "frequency", "duration", "时间", "频次", "发生"),
-        ("operating condition", "运行条件", "场景"),
-        required=False,
-    ),
-)
 
 
 @dataclass(frozen=True)

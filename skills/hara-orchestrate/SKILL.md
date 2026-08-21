@@ -22,7 +22,7 @@ description: Orchestrate an end-to-end, auditable HARA run across item extractio
 - Allow draft output when explicitly requested, but retain pending markers and warnings.
 - Block formal output if required evidence is pending or the compiled template method is missing, ambiguous, conflicting, or invalid.
 - Never use record-count targets as deletion rules.
-- Never fill missing engineering truth from a Domain Profile, default, or legacy engine. The current Domain/17-step runtime is migration-only regression infrastructure until cutover.
+- Never fill missing engineering truth from defaults or historical assumptions. The repository has one MethodContract-driven runtime.
 
 ## Responsibility boundary
 

@@ -276,17 +276,8 @@ class ExtractionEvaluationHarness:
         if expected.provenance is FactProvenance.METHOD_CONTRACT:
             classification = GapClassification.METHOD_DEFINED
             reason = "fact belongs to the HARA method contract, not project input"
-        elif expected.provenance is FactProvenance.LEGACY_MIGRATION:
-            classification = GapClassification.LEGACY_ASSUMPTION
-            reason = "fact is an explicitly labelled migration assumption"
         elif normalization_ok:
-            candidate_provenance = FactProvenance(
-                candidate.get("provenance", FactProvenance.PROJECT_INPUT.value)
-            )
-            if candidate_provenance is FactProvenance.LEGACY_MIGRATION:
-                classification = GapClassification.LEGACY_ASSUMPTION
-                reason = "matched value is supplied only by a migration fixture/profile"
-            elif expected.derivable:
+            if expected.derivable:
                 classification = GapClassification.PRESENT_DERIVABLE
                 reason = "grounded source fact is present through deterministic derivation"
             else:
@@ -375,13 +366,7 @@ class ExtractionEvaluationHarness:
     def _candidates(
         expected: ExpectedProjectFact, project: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        field_aliases = {
-            "performance_parameters": "numeric_constraints",
-            "driver_contexts": "driver_context_facts",
-        }
         values = project.get(expected.field, [])
-        if not values and field_aliases.get(expected.field):
-            values = project.get(field_aliases[expected.field], [])
         if not isinstance(values, list):
             return []
         candidates = [item for item in values if isinstance(item, dict)]

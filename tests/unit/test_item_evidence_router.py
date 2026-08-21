@@ -9,8 +9,7 @@ from hara_agent.services.extraction import (
     DeterministicEvidenceRetriever,
     FactRetrievalSpec,
 )
-from hara_agent.services.semantic import ItemEvidenceRouter, ItemSupplementAgent
-from hara_agent.services.semantic.item_supplement_agent import RoutedDocumentBlocks
+from hara_agent.services.semantic import ItemEvidenceRouter
 
 
 def block(block_id: str, text: str, *, location: str = "paragraph[1]", kind: str = "paragraph"):
@@ -85,36 +84,3 @@ def test_retrieval_schema_cannot_contain_gold_value_or_locator():
 
 def test_project_evidence_budget_constant_remains_5000():
     assert DEFAULT_CONTEXT_CHARACTER_BUDGET == 5000
-
-
-def test_supplement_locator_resolves_to_structured_source_ref():
-    routed = RoutedDocumentBlocks(
-        task="project_evidence",
-        block_ids=["T-1-R-2"],
-        text="[T-1-R-2] table[1].row[2]: brake response time",
-        source_blocks=[{
-            "block_id": "T-1-R-2",
-            "kind": "table_row",
-            "location": "table[1].row[2]",
-            "text": "brake response time",
-        }],
-    )
-    data = {
-        "performance_parameters": [{
-            "parameter": "brake response",
-            "source_location": "T-1-R-2",
-            "source_excerpt": "brake response time",
-        }],
-        "driver_contexts": [],
-        "exposure_inputs": [],
-    }
-
-    unresolved = ItemSupplementAgent._attach_source_refs(data, routed, "ItemDef.docx")
-
-    assert unresolved == 0
-    assert data["performance_parameters"][0]["sources"] == [{
-        "source_type": "item_definition",
-        "source_id": "ItemDef.docx",
-        "location": "table[1].row[2]",
-        "excerpt": "brake response time",
-    }]

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -79,22 +78,9 @@ class ScenarioEvidenceContractError(ValueError):
 class FactRegistry:
     """Typed evidence store with fail-closed namespaces and collisions."""
 
-    def __init__(self, facts: dict[str, Any] | None = None):
+    def __init__(self):
         self._records: dict[str, EvidenceRecord] = {}
         self._duplicate_ref_count = 0
-        for evidence_ref, value in (facts or {}).items():
-            self.register(
-                value if isinstance(value, EvidenceRecord)
-                else self._legacy_record(evidence_ref, value)
-            )
-
-    @property
-    def facts(self) -> dict[str, dict[str, Any]]:
-        """v1 compatibility snapshot; the authoritative store is typed."""
-        return {
-            ref: self._compatibility_dict(record)
-            for ref, record in self._records.items()
-        }
 
     @property
     def records(self) -> tuple[EvidenceRecord, ...]:
@@ -129,7 +115,7 @@ class FactRegistry:
 
     def resolve(self, evidence_ref: str) -> dict[str, Any] | None:
         record = self._records.get(evidence_ref)
-        return self._compatibility_dict(record) if record else None
+        return self._record_dict(record) if record else None
 
     def resolve_record(self, evidence_ref: str) -> EvidenceRecord | None:
         return self._records.get(evidence_ref)
@@ -147,31 +133,7 @@ class FactRegistry:
         }
 
     @staticmethod
-    def _legacy_record(evidence_ref: str, value: Any) -> EvidenceRecord:
-        payload = dict(value) if isinstance(value, dict) else {"value": value}
-        kind = EvidenceKind(payload.pop("kind", EvidenceKind.DIRECT_FACT.value))
-        provenance_default = (
-            FactProvenance.DERIVED
-            if evidence_ref.startswith("DERIVED.")
-            else FactProvenance.LLM_INFERENCE
-        )
-        provenance = FactProvenance(payload.pop("provenance", provenance_default.value))
-        approval = ReviewStatus(payload.pop(
-            "approval_status", payload.pop("approval", ReviewStatus.PENDING.value)
-        ))
-        sources = tuple(
-            item if isinstance(item, SourceRef) else SourceRef(**item)
-            for item in payload.pop("source_refs", payload.pop("sources", []))
-        )
-        record_value = payload.pop("value", None)
-        metadata = payload.pop("metadata", {})
-        metadata = {**payload, **metadata}
-        return EvidenceRecord(
-            evidence_ref, record_value, kind, provenance, approval, sources, metadata
-        )
-
-    @staticmethod
-    def _compatibility_dict(record: EvidenceRecord) -> dict[str, Any]:
+    def _record_dict(record: EvidenceRecord) -> dict[str, Any]:
         return {
             "value": record.value,
             "kind": record.kind.value,

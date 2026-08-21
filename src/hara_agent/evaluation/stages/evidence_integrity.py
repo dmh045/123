@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from hara_agent.models import EvidenceKind, EvidenceRecord, FactProvenance, ReviewStatus
+from hara_agent.models import EvidenceRecord, FactProvenance
 from hara_agent.services.semantic.scenario_evidence import FactRegistry
 
 
@@ -34,24 +34,6 @@ class EvidenceIntegrityHarness:
             record for record in registered
             if actual[record.evidence_ref].source_refs == record.source_refs
         ]
-        legacy_authority_leaks = {
-            record.evidence_ref for record in registry.records
-            if record.provenance is FactProvenance.LEGACY_MIGRATION
-            and (
-                record.approval_status is not ReviewStatus.PENDING
-                or record.kind is EvidenceKind.APPROVED_RULE
-            )
-        }
-        legacy_authority_leaks.update(
-            record.evidence_ref for record in expected
-            if record.provenance is FactProvenance.LEGACY_MIGRATION
-            and record.evidence_ref in actual
-            and (
-                actual[record.evidence_ref].provenance
-                is not FactProvenance.LEGACY_MIGRATION
-                or actual[record.evidence_ref].approval_status is not ReviewStatus.PENDING
-            )
-        )
         diagnostics = registry.snapshot(include_values=False)["diagnostics"]
         return {
             "stage": "evidence_integrity",
@@ -66,7 +48,6 @@ class EvidenceIntegrityHarness:
                 "source_ref_preservation_rate": self._rate(
                     len(source_matches), len(expected)
                 ),
-                "legacy_authority_leak_count": len(legacy_authority_leaks),
                 "duplicate_ref_count": diagnostics["duplicate_ref_count"],
             },
             "diagnostics": {
@@ -84,7 +65,6 @@ class EvidenceIntegrityHarness:
                     record.evidence_ref for record in registered
                     if record not in source_matches
                 ),
-                "legacy_authority_leak_refs": sorted(legacy_authority_leaks),
             },
             "registry_snapshot": registry.snapshot(include_values=False),
         }

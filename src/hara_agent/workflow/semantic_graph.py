@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from hara_agent.contracts import RequiredFactSpec
+from hara_agent.infrastructure.llm import LLMClient
 from hara_agent.models import (
     FunctionDefinition,
     GuidewordAssessment,
@@ -13,19 +15,18 @@ from hara_agent.models import (
     SourceRef,
 )
 from hara_agent.services.semantic import (
-    FunctionExtractionAgent,
     ItemArtifactExtractionAgent,
-    ItemDefinitionExtractionAgent,
     ItemEvidenceRouter,
     ItemSupplementAgent,
     TargetedProjectFactExtractionAgent,
     GuidewordApplicabilityAgent,
     MalfunctionHazardAgent,
     ScenarioFeasibilityAgent,
+    ScenarioRiskFactAgent,
 )
 from hara_agent.services.analysis import (
     ASILLookupService,
-    FTTIService,
+    MethodRiskFactBindingService,
     SafetyGoalService,
     ScenarioScoringService,
 )
@@ -41,7 +42,6 @@ from .nodes import (
     aggregate_safety_goals,
     derive_malfunctions,
     extract_item_artifacts,
-    extract_functions,
     read_item_document,
     render_excel_report,
     pass_quality_gate,
@@ -60,23 +60,25 @@ class SemanticWorkflowInputs:
     progress: Callable[[str, int, int], None] | None = None
     stage_progress: Callable[[str, str, float], None] | None = None
     artifact_cache: ValidatedArtifactCache | None = None
+    required_fact_specs: tuple[RequiredFactSpec, ...] = ()
+    requested_operating_modes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class SemanticWorkflowAgents:
-    item_definition: ItemDefinitionExtractionAgent
-    functions: FunctionExtractionAgent
+    client: LLMClient
     guidewords: GuidewordApplicabilityAgent
     malfunctions: MalfunctionHazardAgent
     scenarios: ScenarioFeasibilityAgent
+    risk_facts: ScenarioRiskFactAgent | None = None
 
 
 @dataclass(frozen=True)
 class RiskWorkflowServices:
     scoring: ScenarioScoringService
     asil_table: ASILLookupService
-    ftti: FTTIService
     safety_goals: SafetyGoalService
+    risk_fact_binding: MethodRiskFactBindingService | None = None
 
 
 @dataclass(frozen=True)
@@ -124,12 +126,7 @@ def build_semantic_frontend_graph(
     agents: SemanticWorkflowAgents,
     checkpoint_repository: CheckpointRepository | None = None,
 ) -> WorkflowGraph:
-    """Compose evidence extraction through scenario selection.
-
-    Scoring is deliberately outside this graph slice until its Agent node is
-    connected. Call ``run(..., stop_before={WorkflowStage.SCORING})`` during
-    the incremental migration.
-    """
+    """Compose the reusable evidence-extraction and scenario-selection slice."""
     graph = WorkflowGraph(checkpoint_repository, progress=inputs.stage_progress)
     graph.add_node(
         WorkflowStage.INITIALIZE,
@@ -140,24 +137,16 @@ def build_semantic_frontend_graph(
         lambda state: extract_item_artifacts(
             state,
             ItemArtifactExtractionAgent(
-                agents.item_definition.client,
-                agents.functions.validator,
+                agents.client,
             ),
-            ItemSupplementAgent(agents.item_definition.client),
+            ItemSupplementAgent(agents.client),
             ItemEvidenceRouter(),
-            targeted_agent=TargetedProjectFactExtractionAgent(agents.item_definition.client),
+            targeted_agent=TargetedProjectFactExtractionAgent(agents.client),
             max_workers=inputs.max_workers,
             progress=inputs.progress,
             cache=inputs.artifact_cache,
-        ),
-    )
-    graph.add_node(
-        WorkflowStage.ITEM_DEFINITION,
-        lambda state: extract_functions(
-            state,
-            agents.functions,
-            state.item_definition["text"],
-            state.item_definition["source_id"],
+            required_fact_specs=inputs.required_fact_specs,
+            requested_operating_modes=inputs.requested_operating_modes,
         ),
     )
     graph.add_node(
@@ -191,6 +180,8 @@ def build_semantic_frontend_graph(
             _scenario_candidates(state, inputs),
             max_workers=inputs.max_workers,
             progress=inputs.progress,
+            risk_fact_agent=agents.risk_facts,
+            required_fact_specs=inputs.required_fact_specs,
         ),
     )
     return graph
@@ -203,7 +194,7 @@ def build_hara_agent_graph(
     checkpoint_repository: CheckpointRepository | None = None,
     reporting: ReportingWorkflowConfig | None = None,
 ) -> WorkflowGraph:
-    """Compose the migrated Agent path through the engineering quality gate."""
+    """Compose the production path through scoring, quality gate, and reporting."""
     graph = build_semantic_frontend_graph(inputs, agents, checkpoint_repository)
     scenario_node = graph.nodes[WorkflowStage.MALFUNCTIONS]
     downstream_preflight = DownstreamPreflightService()
@@ -216,7 +207,7 @@ def build_hara_agent_graph(
             state,
             risk_services.scoring,
             risk_services.asil_table,
-            risk_services.ftti,
+            risk_services.risk_fact_binding,
         ),
     )
     graph.add_node(

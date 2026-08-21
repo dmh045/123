@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 from openpyxl.utils import get_column_letter, range_boundaries
@@ -16,7 +15,7 @@ from hara_agent.contracts import (
     RangePredicate, ReportContract, ReportFieldMapping, RequiredFactSpec,
     RoleBinding, RuleType, ScaleLevel, ScenarioDimension, ScenarioModel,
     SeverityContract, SeverityScale, SourceRef, TemplateDiagnosticCode,
-    TemplateDiagnosticSeverity, TemplateRole, TemplateRoleContract,
+    TemplateRole, TemplateRoleContract,
     WorkflowContract, WorkflowStep, unique_sources,
 )
 

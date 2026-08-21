@@ -4,9 +4,6 @@ import sys
 import time
 from typing import Any
 
-from hara_agent.contracts import (
-    CausalMechanismCatalog, InMemoryCausalMechanismCatalog,
-)
 from hara_agent.infrastructure.llm import (
     LLMClient, LLMOutputLimitError, LLMRequest, LLMTimeoutError,
 )
@@ -34,11 +31,6 @@ from .scenario_batching import (
     build_scenario_batches,
     build_scenario_user_prompt,
 )
-from .scenario_provider_contract import (
-    ScenarioContractMode, ScenarioContractRuntimeConfig,
-    parse_v2_assessment, reject_v2_fields_in_v1_payload, validate_v2_envelope,
-)
-from .scenario_provider_schema import scenario_v2_provider_schema
 
 
 class ScenarioFeasibilityAgent:
@@ -50,7 +42,7 @@ class ScenarioFeasibilityAgent:
 你是汽车功能安全HARA工程因果相关性分类器，不是事故故事生成器。输入候选已通过确定性ODD过滤。你的任务是独立判断给定Malfunction在每个明确Scenario中，是否存在由已提供工程事实支持的可信因果链；不是先假设每个Scenario都有危险再寻找解释。负面结论是正常且预期的输出，不得按固定数量保留场景，也不得为了提高覆盖率强行生成Hazard。
 
 STRICT FACT BOUNDARY
-只能使用请求中明确提供的：1) Malfunction description、FunctionalEffect与VehicleLevelHazard；2) Scenario facts；3) 请求中明确给出的Item facts；4) 请求中明确给出的approved domain rules；以及由这些事实直接支持的基本物理推理。未知事实不得默认存在。不得为了建立危险链新增独立世界状态，包括未提供的交通参与者、后车、突然出现的行人或障碍物、天气、湿滑/低附着路面、坡道、驾驶员恐慌或误操作、远程操作员失误、通信/传感器/执行器/转向等新增故障、机械滑移、车辆前窜或侧滑。若这些事实明确存在于输入中才可使用。
+只能使用请求中明确提供的：1) Malfunction description、FunctionalEffect与VehicleLevelHazard；2) Scenario facts；3) 请求中明确给出的Item facts；4) 请求中明确给出的approved engineering rules；以及由这些事实直接支持的基本物理推理。未知事实不得默认存在。不得为了建立危险链新增独立世界状态，包括未提供的交通参与者、后车、突然出现的行人或障碍物、天气、湿滑/低附着路面、坡道、驾驶员恐慌或误操作、远程操作员失误、通信/传感器/执行器/转向等新增故障、机械滑移、车辆前窜或侧滑。若这些事实明确存在于输入中才可使用。
 
 CAUSAL CHAIN TEST
 仅当以下链条每一跳连续且有输入依据时，causally_relevant才可为true：Malfunction(M) → direct system/vehicle behavior(B) → interaction with explicit Scenario facts(I) → Hazardous Event(H) → direct Potential Harm。M→B必须来自给定失效语义；B→I必须与明确Scenario条件直接交互；I→H不得依赖新发明的initiating event；H→Harm允许直接工程推理，但不得增加第二条新故障链。可信因果可能性不要求事故100%必然发生，但必须有完整、工程上可信且由已知条件支持的路径。physical feasibility、functional relevance与causal relevance必须分别判断；physical=true或functional=true不推出causal=true。
@@ -73,7 +65,7 @@ ATOMIC SCENARIO AND FACT PRECEDENCE
 Each Scenario is one atomic, internally consistent world state. Scenario labels and names are descriptive only and MUST NOT override structured facts. Structured explicit facts take precedence over approved derived facts, natural-language summaries, and labels. Do not infer a replacement numeric or state value from a Scenario name; in particular, a label containing "standstill" does not make ego_speed_kph zero when the structured field says otherwise.
 
 BATCH INDEPENDENCE
-Each assessment is an independent engineering classification. Do NOT compare scenarios with one another. Do NOT use another Scenario in the same batch as evidence. Do NOT normalize one Scenario relative to another, assume a progression or severity ladder from batch order, or carry facts between Scenarios. For each assessment use only the shared Malfunction facts, that Scenario's own explicit facts, and approved Item/Domain facts. The Malfunction baseline is never another Scenario in the current batch; do not fabricate an unavailable baseline.
+Each assessment is an independent engineering classification. Do NOT compare scenarios with one another. Do NOT use another Scenario in the same batch as evidence. Do NOT normalize one Scenario relative to another, assume a progression or severity ladder from batch order, or carry facts between Scenarios. For each assessment use only the shared Malfunction facts, that Scenario's own explicit facts, and approved project or method facts. The Malfunction baseline is never another Scenario in the current batch; do not fabricate an unavailable baseline.
 """
 
     SYSTEM_PROMPT += """
@@ -90,46 +82,17 @@ For causally_relevant=true, all four hops are complete and breakpoint=NONE. For 
 Return exactly one JSON object matching the requested schema. Do not use Markdown. Do not wrap the response in ```json or any code fence. Do not add explanatory text before or after the JSON. The first non-whitespace character must be { and the last non-whitespace character must be }. All strings must be valid JSON strings. Do not include comments or trailing commas. The top-level object must remain {"assessments": [...]}.
 """
 
-    V10_CONTRACT_PROMPT = """STRUCTURED CAUSAL EVIDENCE V2 CONTRACT
-Return edges as an array using the stable M_TO_B, B_TO_I, I_TO_H, H_TO_HARM sequence. Each edge has claim, per-record supports, and a mechanism_application. Each support declares one exact fact_registry evidence_ref and its canonical kind. Mixed DIRECT_FACT and DERIVED_PHYSICS supports are valid when independently typed and validated.
-
-Mechanisms are closed-world: select only from AVAILABLE_CAUSAL_MECHANISMS. Never invent a mechanism id, version, premise or binding. If no listed mechanism supports the next transition, return causally_relevant=false at that breakpoint and do not fabricate later edges. STRICT_RELEASE forbids LEGACY_MIGRATION, LLM_INFERENCE and ASSUMPTION as positive supports. Python performs the authoritative exact-ref, authority, approval, binding and cross-field validation.
-
-For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty risk_dimension_changes, hazardous_event and potential_harm. For false, return only the complete edge prefix before the first unsupported transition; return no risk dimension changes and empty hazard outputs. Risk dimension changes use the same supports schema as edges. Do not return v1 causal_chain, basis_type or evidence_refs fields.
-"""
-
     def __init__(
         self, client: LLMClient, *,
         batch_max_chars: int | None = None,
         batch_max_items: int | None = None,
         max_split_depth: int | None = None,
-        assessment_contract: ScenarioContractMode | str = ScenarioContractMode.V1,
-        mechanism_catalog: CausalMechanismCatalog | None = None,
     ):
         self.client = client
-        self.mechanism_catalog = mechanism_catalog or InMemoryCausalMechanismCatalog()
-        self.mechanism_definitions = self.mechanism_catalog.list_definitions()
-        self.contract_config = ScenarioContractRuntimeConfig.create(
-            assessment_contract, mechanism_definitions=self.mechanism_definitions,
-        )
-        self.prompt_version = self.contract_config.prompt_version
-        self.assessment_contract_version = self.contract_config.assessment_contract_version
-        self.schema_name = self.contract_config.schema_name
-        self.mechanism_catalog_fingerprint = (
-            self.contract_config.mechanism_catalog_fingerprint
-        )
-        self.provider_schema_fingerprint = (
-            self.contract_config.provider_schema_fingerprint
-        )
-        self.contract_cache_fingerprint = self.contract_config.cache_fingerprint
-        common_prompt, marker, _ = self.SYSTEM_PROMPT.partition(
-            "STRUCTURED CAUSAL EVIDENCE CONTRACT"
-        )
-        self.system_prompt = (
-            common_prompt + self.V10_CONTRACT_PROMPT
-            if self.contract_config.mode is ScenarioContractMode.V2 and marker
-            else self.SYSTEM_PROMPT
-        )
+        self.prompt_version = self.PROMPT_VERSION
+        self.assessment_contract_version = SCENARIO_ASSESSMENT_CONTRACT_VERSION
+        self.schema_name = "ScenarioFeasibilityAssessmentList"
+        self.system_prompt = self.SYSTEM_PROMPT
         config = getattr(client, "config", None)
         self.batch_max_chars = batch_max_chars or getattr(
             config, "scenario_batch_max_chars", DEFAULT_SCENARIO_BATCH_MAX_CHARS,
@@ -155,13 +118,10 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
             max_items=self.batch_max_items,
             system_prompt=self.system_prompt + "\n" + self.MACHINE_OUTPUT_RULE,
             project_registry=project_registry,
-            assessment_contract_version=self.assessment_contract_version,
-            mechanism_definitions=self.mechanism_definitions,
         )
         batch_sizes = [
             len(self.system_prompt + self.MACHINE_OUTPUT_RULE) + len(build_scenario_user_prompt(
                 malfunction, batch, project_registry,
-                self.assessment_contract_version, self.mechanism_definitions,
             ))
             for batch in batches
         ]
@@ -227,9 +187,6 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
             "malfunction_id": malfunction.malfunction_id,
             "prompt_version": self.prompt_version,
             "assessment_contract_version": self.assessment_contract_version,
-            "mechanism_catalog_fingerprint": self.mechanism_catalog_fingerprint,
-            "provider_schema_fingerprint": self.provider_schema_fingerprint,
-            "contract_cache_fingerprint": self.contract_cache_fingerprint,
             "schema_name": self.schema_name,
             "models": models,
             "request_ids": request_ids,
@@ -280,7 +237,6 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
     ) -> list[ScenarioFeasibilityAssessment]:
         user_prompt = build_scenario_user_prompt(
             malfunction, scenarios, project_registry,
-            self.assessment_contract_version, self.mechanism_definitions,
         )
         input_chars = len(self.system_prompt + self.MACHINE_OUTPUT_RULE) + len(user_prompt)
         if input_chars > self.batch_max_chars:
@@ -311,22 +267,9 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
                 "split_depth": depth,
                 "scenario_count": len(scenarios),
                 "assessment_contract_version": self.assessment_contract_version,
-                "mechanism_catalog_fingerprint": self.mechanism_catalog_fingerprint,
-                "contract_cache_fingerprint": self.contract_cache_fingerprint,
-                "provider_schema_fingerprint": self.provider_schema_fingerprint,
-                "strict_no_format_retry": (
-                    self.contract_config.mode is ScenarioContractMode.V2
-                ),
-                "provider_response_constraint": (
-                    "PROMPT_JSON_SCHEMA"
-                    if self.contract_config.mode is ScenarioContractMode.V2 else "NONE"
-                ),
+                "provider_response_constraint": "NONE",
             },
             max_tokens=8192,
-            response_schema=(
-                scenario_v2_provider_schema()
-                if self.contract_config.mode is ScenarioContractMode.V2 else None
-            ),
         )
         batch_started = time.monotonic()
         stats["actual_llm_calls"] += 1
@@ -379,30 +322,14 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
                 project_registry=project_registry,
             )
         scenario_by_id = {item.scenario_id: item for item in scenarios}
-        if self.contract_config.mode is ScenarioContractMode.V2:
-            raw = validate_v2_envelope(
-                response.data, [item.scenario_id for item in scenarios]
-            )
-            parsed = [parse_v2_assessment(
-                item,
-                malfunction=malfunction,
-                scenario=scenario_by_id.get(str(item.get("scenario_id", "")).strip()),
-                registry=build_fact_registry(
-                    malfunction,
-                    scenario_by_id[str(item.get("scenario_id", "")).strip()],
-                    project_registry,
-                ),
-                catalog=self.mechanism_catalog,
-            ) for item in raw]
-        else:
-            raw = response.data.get("assessments")
-            if not isinstance(raw, list):
-                raise ValueError("LLM输出缺少assessments数组")
-            parsed = [self._parse(
-                malfunction, item, scenario=scenario_by_id.get(str(item.get("scenario_id", "")).strip()),
-                batch=parent_batch, split_path=split_path, split_depth=depth,
-                project_registry=project_registry,
-            ) for item in raw]
+        raw = response.data.get("assessments")
+        if not isinstance(raw, list):
+            raise ValueError("LLM输出缺少assessments数组")
+        parsed = [self._parse(
+            malfunction, item, scenario=scenario_by_id.get(str(item.get("scenario_id", "")).strip()),
+            batch=parent_batch, split_path=split_path, split_depth=depth,
+            project_registry=project_registry,
+        ) for item in raw]
         self._validate(parsed, [item.scenario_id for item in scenarios])
         elapsed = time.monotonic() - batch_started
         usage = response.usage
@@ -452,7 +379,10 @@ For causally_relevant=true, return all four edges, breakpoint=NONE, non-empty ri
     ) -> ScenarioFeasibilityAssessment:
         if not isinstance(item, dict):
             raise ScenarioSchemaContractError("Scenario assessment必须为JSON object")
-        reject_v2_fields_in_v1_payload(item)
+        if any(field in item for field in ("edges", "supports", "mechanism_application")):
+            raise ScenarioSchemaContractError(
+                "Scenario assessment contains unsupported experimental contract fields"
+            )
         if "risk_dimensions_changed" in item:
             raise ScenarioSchemaContractError(
                 "risk_dimensions_changed属于v8旧schema；v9必须使用risk_dimension_changes"

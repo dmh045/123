@@ -19,10 +19,9 @@ def test_governance_declares_template_method_and_project_fact_authority():
         assert "MethodContract" in text
         assert "ProjectFacts" in text
         assert "PENDING" in text or "fail closed" in text
-    assert "do not add" in agents.casefold()
-    assert "new business rules" in agents.casefold()
-    assert "third customer-maintained business input" in " ".join(router.split())
-    assert "not" in router
+    assert "one runtime" in agents.casefold()
+    assert "do not recreate" in agents.casefold()
+    assert "third manually maintained business input" in " ".join(migration.split())
 
 
 def test_stage_skills_do_not_make_domain_profile_future_authority():
@@ -40,7 +39,8 @@ def test_stage_skills_do_not_make_domain_profile_future_authority():
     combined = "\n".join(_read(path) for path in skill_paths)
 
     assert "compiled" in combined.casefold()
-    assert "migration-only" in combined.casefold()
+    assert "one methodcontract-driven runtime" in combined.casefold()
+    assert "migration-only" not in combined.casefold()
     assert "Domain Profiles for approved domain/project knowledge" not in combined
 
 

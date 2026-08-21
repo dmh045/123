@@ -1,8 +1,23 @@
 from hara_agent.infrastructure.llm import LLMResponse
 from hara_agent.infrastructure.llm.openai_compatible import OpenAICompatibleClient
-from hara_agent.services.extraction import SPEED_PROJECT_FACT_SPECS
+from hara_agent.models import ProjectFactOutputType
+from hara_agent.services.extraction import RequiredProjectFactSpec
 from hara_agent.services.semantic import TargetedProjectFactExtractionAgent
 from hara_agent.services.semantic.item_supplement_agent import RoutedDocumentBlocks
+
+
+SPEED_PROJECT_FACT_SPECS = tuple(
+    RequiredProjectFactSpec(
+        f"speed.{name}", ProjectFactOutputType.SPEED_ENVELOPE,
+        (alias,), ("km/h", "kph"), (name,),
+        ("status", "operator", "value", "unit", "operating_mode", "source_block_id"),
+    )
+    for name, alias in (
+        ("search", "搜索车位"),
+        ("control", "控车范围"),
+        ("parking", "泊车时的最大车速"),
+    )
+)
 
 
 class TargetedClient:

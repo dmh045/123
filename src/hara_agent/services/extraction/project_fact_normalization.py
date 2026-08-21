@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Sequence
 
 from hara_agent.models import (
-    ConstraintOperator, DriverContextFact, DriverLocation, FactProvenance,
-    NumericConstraintFact, ProjectFactOutputType, ReviewStatus, SourceRef,
-    SpeedEnvelope,
+    ConstraintOperator, FactProvenance, ProjectFactOutputType, ReviewStatus,
+    RiskFact, SourceRef, SpeedEnvelope,
 )
 
 from .project_fact_specs import RequiredProjectFactSpec
@@ -26,16 +27,14 @@ class ProjectFactNormalizationFailure:
 @dataclass
 class ProjectFactNormalizationResult:
     speed_envelopes: list[SpeedEnvelope] = field(default_factory=list)
-    numeric_constraints: list[NumericConstraintFact] = field(default_factory=list)
-    driver_context_facts: list[DriverContextFact] = field(default_factory=list)
+    risk_facts: list[RiskFact] = field(default_factory=list)
     coverage: list[dict[str, Any]] = field(default_factory=list)
     failures: list[ProjectFactNormalizationFailure] = field(default_factory=list)
 
     def to_cache_dict(self) -> dict[str, Any]:
         return {
             "speed_envelopes": [asdict(item) for item in self.speed_envelopes],
-            "numeric_constraints": [asdict(item) for item in self.numeric_constraints],
-            "driver_context_facts": [asdict(item) for item in self.driver_context_facts],
+            "risk_facts": [asdict(item) for item in self.risk_facts],
             "coverage": self.coverage,
             "failures": [asdict(item) for item in self.failures],
         }
@@ -46,27 +45,18 @@ class ProjectFactNormalizer:
 
     OPERATOR_ALIASES = {
         "LT": ConstraintOperator.LT, "<": ConstraintOperator.LT,
-        "LE": ConstraintOperator.LE, "<=": ConstraintOperator.LE, "≤": ConstraintOperator.LE, "≦": ConstraintOperator.LE,
+        "LE": ConstraintOperator.LE, "<=": ConstraintOperator.LE, "â‰¤": ConstraintOperator.LE, "â‰¦": ConstraintOperator.LE,
         "EQ": ConstraintOperator.EQ, "=": ConstraintOperator.EQ,
-        "GE": ConstraintOperator.GE, ">=": ConstraintOperator.GE, "≥": ConstraintOperator.GE, "≧": ConstraintOperator.GE,
-        "GT": ConstraintOperator.GT, ">": ConstraintOperator.GT, "＞": ConstraintOperator.GT,
+        "GE": ConstraintOperator.GE, ">=": ConstraintOperator.GE, "â‰¥": ConstraintOperator.GE, "â‰§": ConstraintOperator.GE,
+        "GT": ConstraintOperator.GT, ">": ConstraintOperator.GT, "ï¼ž": ConstraintOperator.GT,
         "RANGE": ConstraintOperator.RANGE,
     }
     UNIT_ALIASES = {
         "km/h": "km/h", "kph": "km/h", "kmh": "km/h",
-        "m/s²": "m/s²", "m/s2": "m/s²",
+        "m/sÂ²": "m/sÂ²", "m/s2": "m/sÂ²",
         "ms": "ms", "millisecond": "ms", "milliseconds": "ms",
-        "deg": "deg", "°": "deg",
+        "deg": "deg", "Â°": "deg",
     }
-    DRIVER_ALIASES = {
-        "INSIDE": DriverLocation.INSIDE, "inside": DriverLocation.INSIDE,
-        "driver inside": DriverLocation.INSIDE,
-        "在驾驶位": DriverLocation.INSIDE, "驾驶员在车内": DriverLocation.INSIDE,
-        "OUTSIDE": DriverLocation.OUTSIDE, "outside": DriverLocation.OUTSIDE,
-        "driver outside": DriverLocation.OUTSIDE,
-        "不在驾驶位": DriverLocation.OUTSIDE, "驾驶员在车外": DriverLocation.OUTSIDE,
-    }
-
     def normalize(
         self,
         specs: Sequence[RequiredProjectFactSpec],
@@ -88,12 +78,8 @@ class ProjectFactNormalizer:
             candidate = dict(item)
             identity_resolution = "EXPLICIT"
             if not isinstance(candidate.get("fact_type"), str):
-                resolved_type = self._resolve_driver_fact_type(candidate, specs)
-                if resolved_type is None:
-                    self._fail(result, "", "INVALID_FACT_TYPE", "each result requires fact_type")
-                    continue
-                candidate["fact_type"] = resolved_type
-                identity_resolution = "DETERMINISTIC_DRIVER_ENUM"
+                self._fail(result, "", "INVALID_FACT_TYPE", "each result requires fact_type")
+                continue
             candidate["_identity_resolution"] = identity_resolution
             by_type.setdefault(candidate["fact_type"], []).append(candidate)
         expected_types = {spec.fact_type for spec in specs}
@@ -137,10 +123,8 @@ class ProjectFactNormalizer:
                 seen_atomic.add(key)
                 if isinstance(fact, SpeedEnvelope):
                     result.speed_envelopes.append(fact)
-                elif isinstance(fact, NumericConstraintFact):
-                    result.numeric_constraints.append(fact)
                 else:
-                    result.driver_context_facts.append(fact)
+                    result.risk_facts.append(fact)
                 result.coverage.append({
                     "fact_type": spec.fact_type,
                     "status": FOUND,
@@ -153,7 +137,7 @@ class ProjectFactNormalizer:
         return result
 
     def _atomic_fact(self, spec, candidate, source):
-        if spec.output_type in {ProjectFactOutputType.SPEED_ENVELOPE, ProjectFactOutputType.NUMERIC_CONSTRAINT}:
+        if spec.output_type is ProjectFactOutputType.SPEED_ENVELOPE:
             operator = self.OPERATOR_ALIASES.get(str(candidate.get("operator", "")))
             if operator is None:
                 raise ValueError("INVALID_OPERATOR: unsupported operator")
@@ -161,56 +145,79 @@ class ProjectFactNormalizer:
             value_max = candidate.get("value_max")
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError("NON_ATOMIC_CANDIDATE: value must be one JSON number")
-            if operator is ConstraintOperator.RANGE and (isinstance(value_max, bool) or not isinstance(value_max, (int, float))):
+            if operator is ConstraintOperator.RANGE and (
+                isinstance(value_max, bool) or not isinstance(value_max, (int, float))
+            ):
                 raise ValueError("NON_ATOMIC_CANDIDATE: RANGE requires one numeric value_max")
             if operator is not ConstraintOperator.RANGE and value_max is not None:
                 raise ValueError("NON_ATOMIC_CANDIDATE: non-RANGE candidate cannot contain value_max")
             raw_unit = str(candidate.get("unit", ""))
             unit = self.UNIT_ALIASES.get(raw_unit)
-            if unit is None or (spec.unit_hints and raw_unit not in spec.unit_hints and unit not in {
-                self.UNIT_ALIASES.get(item, item) for item in spec.unit_hints
-            }):
+            allowed_units = {self.UNIT_ALIASES.get(item, item) for item in spec.unit_hints}
+            if unit is None or (spec.unit_hints and unit not in allowed_units):
                 raise ValueError("INVALID_UNIT: unit is not allowed by the spec")
-            if spec.output_type is ProjectFactOutputType.SPEED_ENVELOPE:
-                mode = str(candidate.get("operating_mode", "")).strip()
-                if not mode:
-                    raise ValueError("MISSING_CONTEXT: operating_mode is required")
-                if spec.context_hints:
-                    mode = spec.context_hints[0]
-                if operator is ConstraintOperator.RANGE:
-                    minimum, maximum = float(value), float(value_max)
-                elif operator in {ConstraintOperator.LE, ConstraintOperator.LT, ConstraintOperator.EQ}:
-                    minimum, maximum = (float(value), float(value)) if operator is ConstraintOperator.EQ else (0.0, float(value))
-                else:
-                    raise ValueError("INVALID_OPERATOR: speed lower-bound-only facts are unsupported")
-                return SpeedEnvelope(mode, minimum, maximum, str(candidate.get("condition", "")), unit, [source])
-            condition = str(candidate.get("condition", ""))
+            mode = str(candidate.get("operating_mode", "")).strip()
+            if not mode:
+                raise ValueError("MISSING_CONTEXT: operating_mode is required")
             if spec.context_hints:
-                condition = spec.context_hints[0]
-            parameter = str(candidate.get("parameter", ""))
-            if not parameter:
-                raise ValueError("MISSING_REQUIRED_FIELD: parameter")
-            if spec.aliases:
-                parameter = spec.aliases[0]
-            context = {"condition": condition}
-            qualification = candidate.get("qualification")
-            if qualification is not None:
-                if not isinstance(qualification, str):
-                    raise ValueError("NON_ATOMIC_CANDIDATE: qualification must be a string")
-                context["qualification"] = qualification
-            return NumericConstraintFact(
-                spec.fact_type, parameter, operator,
-                float(value), unit, context,
-                float(value_max) if value_max is not None else None,
-                [source], FactProvenance.PROJECT_INPUT, ReviewStatus.PENDING, "LLM",
+                mode = spec.context_hints[0]
+            if operator is ConstraintOperator.RANGE:
+                minimum, maximum = float(value), float(value_max)
+            elif operator in {ConstraintOperator.LE, ConstraintOperator.LT, ConstraintOperator.EQ}:
+                minimum, maximum = (
+                    (float(value), float(value))
+                    if operator is ConstraintOperator.EQ
+                    else (0.0, float(value))
+                )
+            else:
+                raise ValueError("INVALID_OPERATOR: speed lower-bound-only facts are unsupported")
+            return SpeedEnvelope(
+                mode, minimum, maximum, str(candidate.get("condition", "")),
+                unit, [source],
             )
-        location = self.DRIVER_ALIASES.get(str(candidate.get("driver_location", "")))
-        if location is None:
-            raise ValueError("INVALID_DRIVER_LOCATION: expected INSIDE or OUTSIDE")
-        return DriverContextFact(
-            spec.fact_type, location, str(candidate.get("control_mode", "")),
-            str(candidate.get("condition", "")), [source],
-            FactProvenance.PROJECT_INPUT, ReviewStatus.PENDING, "LLM",
+        if spec.output_type is not ProjectFactOutputType.RISK_FACT:
+            raise ValueError("INVALID_FACT_TYPE: unsupported output type")
+        value = candidate.get("value")
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValueError("NON_ATOMIC_CANDIDATE: value must be one string or number")
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("NON_ATOMIC_CANDIDATE: value must not be blank")
+        raw_unit = str(candidate.get("unit", "")).strip()
+        expected_unit = spec.unit_hints[0] if spec.unit_hints else ""
+        if expected_unit and raw_unit != expected_unit:
+            raise ValueError("INVALID_UNIT: unit must match the Method Contract")
+        if not expected_unit and raw_unit:
+            raise ValueError("INVALID_UNIT: unit is not defined by the Method Contract")
+        context = candidate.get("context")
+        if not isinstance(context, dict) or any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in context.items()
+        ):
+            raise ValueError("MISSING_CONTEXT: context must be a string-to-string object")
+        identity = json.dumps(
+            {
+                "parameter": spec.fact_type,
+                "value": value,
+                "unit": expected_unit,
+                "context": context,
+                "source": asdict(source),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return RiskFact(
+            fact_id="RF-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20],
+            parameter=spec.fact_type,
+            value=value,
+            unit=expected_unit,
+            context=dict(context),
+            source_refs=[source],
+            provenance=FactProvenance.LLM_INFERENCE,
+            approval=ReviewStatus.PENDING,
+            produced_by="targeted_project_fact_agent",
         )
 
     @staticmethod
@@ -236,19 +243,7 @@ class ProjectFactNormalizer:
     def _identity(fact):
         if isinstance(fact, SpeedEnvelope):
             return ("speed", fact.operating_mode.casefold())
-        return (type(fact).__name__, fact.fact_type)
-
-    def _resolve_driver_fact_type(self, candidate, specs):
-        location = self.DRIVER_ALIASES.get(str(candidate.get("driver_location", "")))
-        if location is None:
-            return None
-        suffix = ".inside" if location is DriverLocation.INSIDE else ".outside"
-        matches = [
-            spec.fact_type for spec in specs
-            if spec.output_type is ProjectFactOutputType.DRIVER_CONTEXT
-            and spec.fact_type.casefold().endswith(suffix)
-        ]
-        return matches[0] if len(matches) == 1 else None
+        return ("risk", fact.parameter, tuple(sorted(fact.context.items())))
 
     @staticmethod
     def _fail(result, fact_type, code, reason):

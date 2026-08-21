@@ -5,11 +5,8 @@ from typing import Any, Optional
 
 from .common import FactProvenance, ReviewStatus, SourceRef
 from .project_facts import (
-    DriverContextFact, MethodRiskFactBinding, RiskFact,
-    NumericConstraintFact,
+    MethodRiskFactBinding, RiskFact,
     method_risk_fact_binding_from_dict, risk_fact_from_dict,
-    driver_context_from_dict,
-    numeric_constraint_from_dict,
 )
 
 
@@ -71,14 +68,8 @@ class ItemDefinitionFacts:
     speed_min_kph: Optional[float] = None
     speed_max_kph: Optional[float] = None
     speed_envelopes: list[SpeedEnvelope] = field(default_factory=list)
-    numeric_constraints: list[NumericConstraintFact] = field(default_factory=list)
-    driver_context_facts: list[DriverContextFact] = field(default_factory=list)
     risk_facts: list[RiskFact] = field(default_factory=list)
     method_risk_fact_bindings: list[MethodRiskFactBinding] = field(default_factory=list)
-    # Compatibility views. New production consumers must use the typed fields above.
-    performance_parameters: list[dict[str, Any]] = field(default_factory=list)
-    driver_contexts: list[dict[str, Any]] = field(default_factory=list)
-    exposure_inputs: list[dict[str, Any]] = field(default_factory=list)
     sources: list[SourceRef] = field(default_factory=list)
     status: ReviewStatus = ReviewStatus.PENDING
     confidence: float = 0.0
@@ -108,14 +99,6 @@ class ItemDefinitionFacts:
             )
             envelopes.append(SpeedEnvelope(**envelope))
         payload["speed_envelopes"] = envelopes
-        payload["numeric_constraints"] = [
-            item if isinstance(item, NumericConstraintFact) else numeric_constraint_from_dict(item)
-            for item in payload.get("numeric_constraints", [])
-        ]
-        payload["driver_context_facts"] = [
-            item if isinstance(item, DriverContextFact) else driver_context_from_dict(item)
-            for item in payload.get("driver_context_facts", [])
-        ]
         payload["risk_facts"] = [
             item if isinstance(item, RiskFact) else risk_fact_from_dict(item)
             for item in payload.get("risk_facts", [])
@@ -141,12 +124,6 @@ class ItemDefinitionFacts:
         modes = [envelope.operating_mode.strip().casefold() for envelope in self.speed_envelopes]
         if len(modes) != len(set(modes)):
             raise ValueError("speed_envelopes must contain at most one envelope per operating mode")
-        numeric_types = [item.fact_type for item in self.numeric_constraints]
-        if len(numeric_types) != len(set(numeric_types)):
-            raise ValueError("numeric_constraints must contain at most one fact per fact_type")
-        driver_types = [item.fact_type for item in self.driver_context_facts]
-        if len(driver_types) != len(set(driver_types)):
-            raise ValueError("driver_context_facts must contain at most one fact per fact_type")
         risk_ids = [item.fact_id for item in self.risk_facts]
         if len(risk_ids) != len(set(risk_ids)):
             raise ValueError("risk_facts must contain unique fact_id values")
@@ -175,15 +152,3 @@ class ItemDefinitionFacts:
             raise ValueError("Item Definition confidence必须在0到1之间")
         if not self.sources:
             raise ValueError("ItemDefinitionFacts必须包含来源定位")
-        for context in self.driver_contexts:
-            if not str(context.get("context_id", "")).strip():
-                raise ValueError("driver_contexts每项必须包含context_id")
-            if not str(context.get("driver_position", "")).strip():
-                raise ValueError("driver_contexts每项必须包含driver_position")
-            direct_control = context.get("direct_vehicle_control")
-            if direct_control is not None and not isinstance(direct_control, bool):
-                raise ValueError("direct_vehicle_control必须为boolean或null")
-        for evidence in self.exposure_inputs:
-            method = str(evidence.get("method", "")).upper()
-            if method and method not in {"T", "F"}:
-                raise ValueError("exposure_inputs.method必须为T、F或空")

@@ -24,18 +24,12 @@ def test_integrity_harness_reports_clean_registration_and_redacted_snapshot():
     expected = _project_records()
     registry = FactRegistry()
     registry.extend(expected)
-    registry.register(EvidenceRecord(
-        "SCN.relative_distance", "5 m", EvidenceKind.DIRECT_FACT,
-        FactProvenance.LEGACY_MIGRATION, ReviewStatus.PENDING,
-    ))
-
     report = EvidenceIntegrityHarness().evaluate(expected, registry)
 
     assert report["metrics"] == {
         "project_fact_registration_rate": 1.0,
         "provenance_preservation_rate": 1.0,
         "source_ref_preservation_rate": 1.0,
-        "legacy_authority_leak_count": 0,
         "duplicate_ref_count": 0,
     }
     assert all(
@@ -43,28 +37,18 @@ def test_integrity_harness_reports_clean_registration_and_redacted_snapshot():
     )
 
 
-def test_integrity_harness_detects_missing_metadata_and_legacy_authority_leak():
-    expected_legacy = EvidenceRecord(
-        "SCN.legacy", "candidate", EvidenceKind.DIRECT_FACT,
-        FactProvenance.LEGACY_MIGRATION, ReviewStatus.PENDING,
-    )
-    expected = (*_project_records(), expected_legacy)
+def test_integrity_harness_detects_missing_and_changed_metadata():
+    expected = _project_records()
     registry = FactRegistry()
     registry.register(EvidenceRecord(
         expected[0].evidence_ref, expected[0].value, expected[0].kind,
         FactProvenance.LLM_INFERENCE, ReviewStatus.FINALIZED,
     ))
-    registry.register(EvidenceRecord(
-        "SCN.legacy", "candidate", EvidenceKind.DIRECT_FACT,
-        FactProvenance.PROJECT_INPUT, ReviewStatus.FINALIZED,
-    ))
-
     report = EvidenceIntegrityHarness().evaluate(expected, registry)
 
     assert report["metrics"]["project_fact_registration_rate"] == 0.5
     assert report["metrics"]["provenance_preservation_rate"] == 0.0
-    assert report["metrics"]["source_ref_preservation_rate"] == 0.333333
-    assert report["metrics"]["legacy_authority_leak_count"] == 1
+    assert report["metrics"]["source_ref_preservation_rate"] == 0.0
     assert report["diagnostics"]["missing_project_refs"] == [
         "PROJECT.driver.outside"
     ]

@@ -11,8 +11,6 @@ class RunConfig:
     template_path: Path
     output_path: Path
     run_dir: Path
-    domain: Optional[str] = None
-    domain_profile_path: Optional[Path] = None
     allow_draft: bool = False
     resume: bool = False
     run_id: str = "hara-run"
@@ -20,7 +18,6 @@ class RunConfig:
     ego_speed_source: str = ""
     operating_mode: Optional[str] = None
     allow_aggregate_speed_fallback: bool = False
-    allow_legacy_speed_fallback: bool = False
     max_workers: int = 4
 
     def validate(self) -> None:
@@ -32,8 +29,6 @@ class RunConfig:
             raise ValueError("HARA模板必须为.xlsx文件")
         if self.output_path.suffix.lower() != ".xlsx":
             raise ValueError("输出报告必须为.xlsx文件")
-        if self.domain_profile_path and not self.domain_profile_path.is_file():
-            raise FileNotFoundError(f"Domain Profile不存在: {self.domain_profile_path}")
         if not self.run_id or any(not (char.isalnum() or char in "-_") for char in self.run_id):
             raise ValueError("run_id只能包含字母、数字、连字符和下划线")
         if self.ego_speed_kph is not None and self.ego_speed_kph < 0:

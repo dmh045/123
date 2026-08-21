@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from hara_agent.models import EvidenceValue, ReviewStatus, RiskAssessment, SourceRef
-from hara_agent.services.analysis import ASILLookupService, FTTIService, ScenarioScoringService
+from hara_agent.models import (
+    EvidenceValue, ItemDefinitionFacts, ReviewStatus, RiskAssessment, SourceRef,
+)
+from hara_agent.services.analysis import (
+    ASILLookupService, MethodRiskFactBindingService,
+    ScenarioScoringService,
+)
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 
@@ -25,12 +30,15 @@ def _review_status(value: str) -> ReviewStatus:
 
 def _scoring_evidence(result: dict[str, Any], value_key: str) -> EvidenceValue[str]:
     status = _review_status(result.get("engineering_status", "PENDING"))
-    sources = [SourceRef(
-        str(result.get("engineering_source_type", "scoring_service")),
-        str(result.get("engineering_source", "migration-only-domain-policy")),
-        str(result.get("engineering_location", result.get("engineering_rule_id", ""))),
-        str(result.get("engineering_excerpt", result.get("engineering_basis", ""))),
-    )]
+    sources = []
+    engineering_source = str(result.get("engineering_source", "")).strip()
+    if engineering_source:
+        sources.append(SourceRef(
+            str(result.get("engineering_source_type", "scoring_service")),
+            engineering_source,
+            str(result.get("engineering_location", result.get("engineering_rule_id", ""))),
+            str(result.get("engineering_excerpt", result.get("engineering_basis", ""))),
+        ))
     for source in result.get("fact_sources", []):
         if isinstance(source, dict):
             sources.append(SourceRef(
@@ -66,7 +74,7 @@ def score_structured_scenarios(
     state: HARAState,
     scoring: ScenarioScoringService,
     asil_table: ASILLookupService,
-    ftti: FTTIService,
+    risk_fact_binding: MethodRiskFactBindingService | None = None,
 ) -> HARAState:
     """Score each retained malfunction-scenario association without prose heuristics."""
     scenario_by_id = _unique_index(state.scenarios, lambda item: item.scenario_id, "Scenario")
@@ -82,6 +90,11 @@ def score_structured_scenarios(
     ))]
     risks: list[RiskAssessment] = []
     pending: list[dict[str, Any]] = []
+    binding_audits: list[dict[str, Any]] = []
+    project_facts = (
+        ItemDefinitionFacts.from_dict(state.item_definition["typed"])
+        if risk_fact_binding is not None else None
+    )
 
     for index, assessment in enumerate(retained, start=1):
         scenario_id = str(assessment.get("scenario_id", ""))
@@ -92,9 +105,23 @@ def score_structured_scenarios(
             )
         candidate = scenario_by_id[scenario_id]
         scenario = {"scenario_id": scenario_id, **candidate.facts}
-        scenario["_fact_provenance"] = candidate.fact_provenance
+        scenario["_fact_provenance"] = dict(candidate.fact_provenance)
         scenario.setdefault("situational_description", candidate.situational_description)
         scenario.setdefault("situational_detailing", candidate.situational_detailing)
+        if risk_fact_binding is not None and project_facts is not None:
+            binding = risk_fact_binding.bind(project_facts, {
+                **scenario,
+                "malfunction_id": malfunction_id,
+                "scenario_id": scenario_id,
+                "atomic_variant": candidate.atomic_variant,
+            })
+            scenario.update(binding.values)
+            scenario["_fact_provenance"].update(binding.provenance)
+            binding_audits.append({
+                "malfunction_id": malfunction_id,
+                "scenario_id": scenario_id,
+                **binding.audit,
+            })
         hazard_event = str(assessment.get("hazardous_event", ""))
         potential_harm = str(assessment.get("potential_harm", ""))
         if not hazard_event or not potential_harm:
@@ -143,21 +170,6 @@ def score_structured_scenarios(
                 else "ASIL lookup requires complete, approved S/E/C values."
             ),
         )
-        ftti_result = ftti.evaluate(scenario, hazard_event, asil_value)
-        ftti_status = (
-            ReviewStatus.NOT_APPLICABLE
-            if ftti_result["ftti_status"] == "NOT_REQUIRED"
-            else _review_status(ftti_result["ftti_status"])
-        )
-        ftti_value = EvidenceValue(
-            value=ftti_result.get("ftti_value_s"),
-            status=ftti_status,
-            sources=[SourceRef(
-                "ftti_basis", str(ftti_result.get("source", "")),
-                str(ftti_result.get("formula_id", "")), str(ftti_result.get("basis", "")),
-            )],
-            review_reason=str(ftti_result.get("review_reason", "")),
-        )
         risk = RiskAssessment(
             assessment_id=f"RA-{index:04d}-{malfunction_id}-{scenario_id}",
             scenario_id=scenario_id,
@@ -165,14 +177,13 @@ def score_structured_scenarios(
             exposure=exposure,
             controllability=controllability,
             asil=asil,
-            ftti_seconds=ftti_value,
             malfunction_id=malfunction_id,
             hazardous_event=hazard_event,
             potential_harm=potential_harm,
             exposure_tf=exposure_method,
         )
         risks.append(risk)
-        for field_name in ("severity", "exposure", "controllability", "asil", "ftti_seconds"):
+        for field_name in ("severity", "exposure", "controllability", "asil"):
             evidence = getattr(risk, field_name)
             if evidence.status is ReviewStatus.PENDING:
                 pending.append({
@@ -189,5 +200,6 @@ def score_structured_scenarios(
         assessment_count=len(risks),
         pending_field_count=len(pending),
         asil_source=asil_table.source,
+        risk_fact_binding_audits=binding_audits,
     )
     return state

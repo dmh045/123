@@ -18,6 +18,7 @@ def aggregate_safety_goals(
     }
     scenario_ids_by_goal: dict[str, list[str]] = {}
     risk_status_by_goal: dict[str, list[ReviewStatus]] = {}
+    scenarios = {item.scenario_id: item for item in state.scenarios}
 
     for risk in state.risk_results:
         if risk.asil.value in {"QM", "NA", "N/A", ""}:
@@ -29,21 +30,17 @@ def aggregate_safety_goals(
         if function is None:
             raise ValueError(f"Safety Goal聚合缺少Function外键: {malfunction.get('function_id')!r}")
         function_name = str(function.get("name", ""))
-        ftti_result = {
-            "ftti_value_s": risk.ftti_seconds.value,
-            "ftti_status": (
-                "FINALIZED" if risk.ftti_seconds.status is ReviewStatus.FINALIZED
-                else "NEEDS_REVIEW"
-            ),
-        }
         registration = catalog.register_intent(
             function_name=function_name,
             malfunction=str(malfunction.get("description", "")),
             guideword=str(malfunction.get("guideword", "")),
             scenario_id=risk.scenario_id,
+            scenario_description=(
+                scenarios[risk.scenario_id].situational_description
+                if risk.scenario_id in scenarios else ""
+            ),
             hazard_event=risk.hazardous_event,
             asil=str(risk.asil.value),
-            ftti_result=ftti_result,
         )
         sg_id = registration["sg_id"]
         risk.safety_goal_id = sg_id
@@ -53,7 +50,6 @@ def aggregate_safety_goals(
             risk.exposure.status,
             risk.controllability.status,
             risk.asil.status,
-            risk.ftti_seconds.status,
         ])
 
     goals = []
@@ -69,7 +65,6 @@ def aggregate_safety_goals(
             text=str(value["safety_goal"]),
             safe_state=str(value["safety_state"]),
             max_asil=str(value["max_asil"]),
-            ftti_seconds=value.get("ftti_value_s"),
             associated_scenario_ids=list(dict.fromkeys(scenario_ids_by_goal[sg_id])),
             status=status,
         ))

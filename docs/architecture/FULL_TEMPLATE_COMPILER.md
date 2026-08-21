@@ -1,10 +1,10 @@
-# Full Template Compiler (P0-2)
+# Full Template Compiler
 
 ## Boundary
 
-P0-2 compiles method data but does not cut over production runtime, call a
-Provider, copy a Domain Profile, generate project Safety Goal catalogs, or
-delete legacy code.
+The compiler is the sole production source of method data. It runs offline,
+does not call a Provider, and does not consume project facts. Runtime cutover
+is complete; compiled contracts feed the generic analysis services directly.
 
 ```text
 Template workbook
@@ -50,9 +50,9 @@ or an incomplete ASIL matrix.
 ## Lifecycle and golden fixture
 
 The Application compiles one MethodContract per run and shares that in-memory
-contract with the existing workflow. A persistent deserialization cache is
-deliberately deferred until runtime measurements show that it is needed; this
-avoids creating a second contract-loading path before production cutover.
+contract with scenario generation, fact binding, scoring, ASIL lookup,
+Safety-Goal derivation, and rendering. A persistent deserialization cache is
+deliberately deferred until runtime measurements show that it is needed.
 
 The compact generated manifest under `tests/fixtures/method_contract/` is
 regression evidence only. It retains section fingerprints, cardinalities,

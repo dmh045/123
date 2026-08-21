@@ -15,7 +15,7 @@ class EvidenceKind(str, Enum):
     ASSUMPTION = "ASSUMPTION"
 
 
-EVIDENCE_NAMESPACES = ("MF", "SCN", "PROJECT", "METHOD", "DOMAIN_RULE", "DERIVED")
+EVIDENCE_NAMESPACES = ("MF", "SCN", "PROJECT", "METHOD", "APPROVED_RULE", "DERIVED")
 _EVIDENCE_REF = re.compile(
     r"^(?:" + "|".join(EVIDENCE_NAMESPACES) + r")\.[A-Za-z0-9_.-]+$"
 )

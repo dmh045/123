@@ -82,12 +82,3 @@ def test_aggregate_fallback_is_explicit_and_diagnostic():
     assert result.provenance is FactProvenance.DERIVED
     assert result.fallback_used is True
     assert result.resolution_status is ProjectContextResolutionStatus.RESOLVED_AGGREGATE_FALLBACK
-
-
-def test_legacy_profile_speed_never_claims_project_input_provenance():
-    result = ProjectFactResolver.legacy_migration_speed("parking", 5, _source())
-
-    assert result.provenance is FactProvenance.LEGACY_MIGRATION
-    assert result.fallback_used is True
-    assert result.resolution_status is ProjectContextResolutionStatus.RESOLVED_LEGACY_FALLBACK
-    assert result.to_dict()["provenance"] == "LEGACY_MIGRATION"

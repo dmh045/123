@@ -56,35 +56,21 @@ def project_evidence_records(facts: ItemDefinitionFacts) -> tuple[EvidenceRecord
                     "condition": envelope.condition,
                 },
             ))
-    for fact in sorted(facts.numeric_constraints, key=lambda item: (
-        item.fact_type, json.dumps(item.context, ensure_ascii=False, sort_keys=True)
+    for fact in sorted(facts.risk_facts, key=lambda item: (
+        item.parameter, json.dumps(item.context, ensure_ascii=False, sort_keys=True)
     )):
-        identity = f"{_token(fact.fact_type)}.{_context_identity(fact.context)}"
+        identity = f"{_token(fact.parameter)}.{_context_identity(fact.context)}"
         records.append(EvidenceRecord(
-            f"PROJECT.numeric.{identity}",
-            {
-                "parameter": fact.parameter,
-                "operator": fact.operator.value,
-                "value": fact.value,
-                "value_max": fact.value_max,
-                "unit": fact.unit,
-                "context": dict(fact.context),
-            },
+            f"PROJECT.risk.{identity}", fact.value,
             EvidenceKind.DIRECT_FACT, fact.provenance, fact.approval,
             tuple(fact.source_refs),
-            {"fact_type": fact.fact_type, "extracted_by": fact.extracted_by},
-        ))
-    for fact in sorted(facts.driver_context_facts, key=lambda item: item.fact_type):
-        records.append(EvidenceRecord(
-            f"PROJECT.driver.{_token(fact.fact_type.rsplit('.', 1)[-1])}",
             {
-                "driver_location": fact.driver_location.value,
-                "control_mode": fact.control_mode,
-                "condition": fact.condition,
+                "fact_id": fact.fact_id,
+                "parameter": fact.parameter,
+                "unit": fact.unit,
+                "context": dict(fact.context),
+                "produced_by": fact.produced_by,
             },
-            EvidenceKind.DIRECT_FACT, fact.provenance, fact.approval,
-            tuple(fact.sources),
-            {"fact_type": fact.fact_type, "extracted_by": fact.extracted_by},
         ))
     # Construction is the collision check; no last-writer-wins path exists.
     registry = FactRegistry()
@@ -103,7 +89,7 @@ class EvidenceProvider(Protocol):
 
 
 class ApprovedRuleEvidenceProvider(EvidenceProvider, Protocol):
-    """Interface only; production has no approved domain-rule implementation yet."""
+    """Interface for versioned, independently approved engineering rules."""
 
 
 @dataclass(frozen=True)
@@ -114,14 +100,14 @@ class StaticApprovedRuleEvidenceProvider:
 
     def evidence_records(self) -> Iterable[EvidenceRecord]:
         for record in self.records:
-            if not record.evidence_ref.startswith("DOMAIN_RULE."):
-                raise ValueError("approved domain rules require DOMAIN_RULE.* refs")
+            if not record.evidence_ref.startswith("APPROVED_RULE."):
+                raise ValueError("approved rules require APPROVED_RULE.* refs")
             if record.kind is not EvidenceKind.APPROVED_RULE:
-                raise ValueError("approved domain rules require APPROVED_RULE kind")
-            if record.provenance is not FactProvenance.DOMAIN_POLICY:
-                raise ValueError("approved domain rules require DOMAIN_POLICY provenance")
+                raise ValueError("approved rules require APPROVED_RULE kind")
+            if record.provenance is not FactProvenance.APPROVED_RULE:
+                raise ValueError("approved rules require APPROVED_RULE provenance")
             if record.approval_status is not ReviewStatus.FINALIZED:
-                raise ValueError("approved domain rules require FINALIZED approval")
+                raise ValueError("approved rules require FINALIZED approval")
             yield record
 
 

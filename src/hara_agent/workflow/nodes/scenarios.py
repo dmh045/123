@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import sys
+from typing import Sequence
 
+from hara_agent.contracts import FactOrigin, RequiredFactSpec
 from hara_agent.models import ItemDefinitionFacts, MalfunctionCandidate, ScenarioCandidate
 from hara_agent.services.semantic import (
-    ScenarioFeasibilityAgent, build_project_evidence_registry,
+    ScenarioFeasibilityAgent, ScenarioRiskFactAgent, build_project_evidence_registry,
 )
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
@@ -16,7 +18,9 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
                      malfunctions: list[MalfunctionCandidate],
                      candidates: list[ScenarioCandidate],
                      max_workers: int = 1,
-                     progress=None) -> HARAState:
+                     progress=None,
+                     risk_fact_agent: ScenarioRiskFactAgent | None = None,
+                     required_fact_specs: Sequence[RequiredFactSpec] = ()) -> HARAState:
     assessments = []
     typed = state.item_definition.get("typed", {})
     project_registry = (
@@ -38,7 +42,57 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         state.record("scenario_feasibility_assessed", **audit)
     retained_ids = {item.scenario_id for item in assessments if item.retain}
     state.scenarios = [item for item in candidates if item.scenario_id in retained_ids]
-    state.item_definition["scenario_assessments"] = [asdict(item) for item in assessments]
+    serialized_assessments = [asdict(item) for item in assessments]
+    state.item_definition["scenario_assessments"] = serialized_assessments
+    if risk_fact_agent is not None:
+        risk_facts, risk_fact_audit = risk_fact_agent.interpret(
+            serialized_assessments,
+            state.scenarios,
+            malfunctions,
+            required_fact_specs,
+        )
+        typed_facts = ItemDefinitionFacts.from_dict(state.item_definition["typed"])
+        requested_types = {
+            item.fact_type.value
+            for item in required_fact_specs
+            if item.origin is FactOrigin.SCENARIO_FACT
+        }
+        requested_pairs = {
+            (str(item.get("malfunction_id", "")), str(item.get("scenario_id", "")))
+            for item in serialized_assessments
+            if item.get("malfunction_id") and item.get("scenario_id")
+        }
+        replaced_ids = {
+            item.fact_id
+            for item in typed_facts.risk_facts
+            if item.parameter in requested_types
+            and (
+                item.context.get("malfunction_id", ""),
+                item.context.get("scenario_id", ""),
+            ) in requested_pairs
+        }
+        if replaced_ids or risk_facts:
+            typed_facts.risk_facts = [
+                item for item in typed_facts.risk_facts if item.fact_id not in replaced_ids
+            ]
+            typed_facts.method_risk_fact_bindings = [
+                item for item in typed_facts.method_risk_fact_bindings
+                if item.source_fact_id not in replaced_ids
+            ]
+            typed_facts.risk_facts.extend(risk_facts)
+            state.item_definition["typed"] = asdict(typed_facts)
+        if risk_facts:
+            state.pending_reviews.append({
+                "field": "scenario_risk_facts",
+                "reason": (
+                    f"{len(risk_facts)} evidence-grounded scenario facts require engineering approval"
+                ),
+            })
+        state.record(
+            "scenario_risk_facts_interpreted",
+            replaced_stale_fact_count=len(replaced_ids),
+            **risk_fact_audit,
+        )
     pending_assessments = sum(item.status.value == "PENDING" for item in assessments)
     pending_candidates = sum(item.status.value == "PENDING" for item in state.scenarios)
     if pending_assessments or pending_candidates:

@@ -1,52 +1,26 @@
 ---
 name: hara-v13
-description: Project-level entry point for running, reviewing, compiling, or rendering HARA analyses in this repository. Route work to the corresponding project Skill while keeping template method rules, grounded project facts, and deterministic execution separate.
+description: Project entry point for compiling templates, extracting project facts, running HARA, reviewing evidence, and rendering reports.
 ---
 
-# HARA V13 Agent Entry
+# HARA V13
 
-Use this file as a compatibility entry point for Codex/OpenCode. Do not treat it as a runtime business-rule source.
+Route the task to the narrowest applicable project skill:
 
-## Route work
+- End-to-end run or resume: `skills/hara-orchestrate/SKILL.md`
+- Item extraction: `skills/extract-item-definition/SKILL.md`
+- HARA analysis: `skills/analyze-hara/SKILL.md`
+- Quality review: `skills/review-hara/SKILL.md`
+- Excel rendering: `skills/render-hara-report/SKILL.md`
 
-- Full run, resume, or release: read and follow `skills/hara-orchestrate/SKILL.md`.
-- Item Definition extraction: read and follow `skills/extract-item-definition/SKILL.md`.
-- Malfunction, hazard, scenario, S/E/C/FTTI, or Safety Goal analysis: read and follow `skills/analyze-hara/SKILL.md`.
-- Quality audit or problem-list update: read and follow `skills/review-hara/SKILL.md`.
-- Excel generation or formatting: read and follow `skills/render-hara-report/SKILL.md`.
+## Authority
 
-Read only the stage Skill needed for the current request. For an end-to-end run, let `hara-orchestrate` select the remaining Skills.
+1. The active template compiles to one hash-bound `MethodContract` containing workflow, scenario ontology, S/E/C rules, ASIL matrix, SG/Safe-State method, and `ReportContract`.
+2. The Item document compiles to source-grounded, template-independent `ProjectFacts` and `RiskFacts`.
+3. `MethodRiskFactBinding` maps neutral facts to the active method. Exact ontology names bind automatically; ambiguous mappings require human confirmation and are cached by template hash.
+4. Deterministic services execute compiled rules. The LLM may only perform bounded, evidence-linked interpretation.
+5. Missing evidence, ambiguous rules, or pending approval blocks a formal report.
 
-## Authority order
+Unsupported or unapproved facts remain `PENDING`; deterministic execution must fail closed.
 
-1. The approved HARA template, compiled into a `MethodContract`, supplies the
-   method, S/E/C rules, ASIL matrix, Safety Goal/Safe State method, and report
-   contract.
-2. Current project source documents, compiled into grounded `ProjectFacts`,
-   supply project facts.
-3. Deterministic generic services execute rules, validation, IDs, aggregation,
-   quality gates, and workbook rendering.
-4. The LLM performs bounded, source-linked semantic interpretation only.
-5. Human approval resolves explicit ambiguity and engineering review gates.
-
-Mark unsupported facts and judgments `PENDING`. Block formal reports when
-required evidence is unresolved or the compiled method is missing, ambiguous,
-conflicting, or invalid. A generated Template Role manifest binds role
-locations to `template_hash`; it is not a third customer-maintained business
-input and contains no copied engineering rules.
-
-## Current implementation status
-
-The Domain runtime and three-phase/17-step scripts remain `MIGRATION_ONLY` for
-baseline comparison until Template-Driven cutover. Do not add new business
-rules to them and do not treat them as future authority. P0 Template Role
-discovery and P0-2 full MethodContract compilation live under
-`src/hara_agent/template/`. P0-3c compiles and injects one MethodContract into
-the existing Application/WorkflowGraph; it does not create a second workflow.
-Scenario binding, S/E/C execution, ASIL lookup, and review-gated SG/Safe-State
-proposals now use generic MethodContract services. Reusable RiskFacts have a
-strong, source-linked, template-independent contract; only their separate
-MethodRiskFactBindings are template-hash-bound. Exact-name bindings compile
-automatically; bounded semantic RiskFact production/confirmation remains incomplete. Remaining release blockers
-are missing grounded canonical risk facts, unresolved template semantics, and the
-ReportContract renderer cutover—not Domain runtime dependencies.
+The repository has one production runtime: `python -m hara_agent`. Do not add parallel engines, compatibility wrappers, fixed sheet coordinates, copied template rules, or hidden defaults.

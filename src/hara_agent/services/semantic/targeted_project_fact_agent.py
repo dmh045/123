@@ -44,6 +44,7 @@ class TargetedProjectFactExtractionAgent:
             "unit_hints": list(item.unit_hints),
             "context_hints": list(item.context_hints),
             "required_fields": list(item.required_fields),
+            "constraints": list(item.constraints),
             "retrieval_candidate_block_ids": sorted(diagnostics.get(item.fact_type, set())),
         } for item in specs]
         request = LLMRequest(
@@ -51,6 +52,9 @@ class TargetedProjectFactExtractionAgent:
             schema_name=f"TargetedProjectFacts:{category}",
             prompt_version=self.PROMPT_VERSION,
             system_prompt=(
+                "For RISK_FACT, return exactly one scalar value, the exact Method "
+                "Contract unit (or an empty unit), and a string-to-string context object. "
+                "Constraints are validation boundaries, never expected answers. "
                 "你是来源约束的原子项目事实抽取器。只可使用提供的带ID证据块，不得猜测、换算或补充常识。"
                 "每个FOUND结果只能表达一个原子事实；数值必须是JSON number，运算符只能是LT/LE/EQ/GE/GT/RANGE。"
                 "source_block_id必须逐字使用给定ID，source_excerpt若提供必须是该块原文的连续精确子串。"

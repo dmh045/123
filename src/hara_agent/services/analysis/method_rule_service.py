@@ -31,7 +31,7 @@ class MethodRuleScoringService:
     """Execute compiled S/E/C rules against explicit canonical scenario facts.
 
     The service intentionally performs no prose/keyword inference and never
-    substitutes a Domain value. A matched but unresolved template rule is a
+    substitutes an external default. A matched but unresolved template rule is a
     traceable proposal with ``PENDING`` status.
     """
 

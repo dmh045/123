@@ -4,7 +4,6 @@ from pathlib import Path
 
 from hara_agent.models import ReviewStatus, ScenarioCandidate
 from hara_agent.services.analysis import (
-    FTTIService,
     MethodContractASILService,
     MethodRuleScoringService,
     MethodSafetyGoalService,
@@ -138,7 +137,6 @@ def test_scoring_node_uses_method_rules_and_only_looks_up_complete_sec():
         state,
         MethodRuleScoringService(method),
         MethodContractASILService(method),
-        FTTIService(),
     )
 
     risk = result.risk_results[0]
@@ -158,23 +156,22 @@ def test_method_safety_goal_service_aggregates_exact_intent_and_stays_pending():
         malfunction="制动请求丢失",
         guideword="loss",
         scenario_id="SCN-1",
+        scenario_description="停车场泊车",
         hazard_event="车辆接近行人",
         asil="A",
-        ftti_result={"ftti_value_s": 1.2},
     )
     second = service.register_intent(
         function_name="制动控制",
         malfunction="制动请求丢失",
         guideword="loss",
         scenario_id="SCN-2",
+        scenario_description="停车场泊车",
         hazard_event="车辆接近墙体",
         asil="C",
-        ftti_result={"ftti_value_s": 0.8},
     )
 
     assert first["sg_id"] == second["sg_id"]
     entry = service.to_dict()[first["sg_id"]]
     assert entry["max_asil"] == "C"
-    assert entry["ftti_value_s"] == 0.8
     assert entry["derivation_status"] == "NEEDS_REVIEW"
     assert service.is_approved is False

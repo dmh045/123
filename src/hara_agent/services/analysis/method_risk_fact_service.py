@@ -3,23 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from hara_agent.contracts import CategoricalPredicate, FactType, MethodContract
+from hara_agent.contracts import (
+    CategoricalPredicate, FactType, MethodContract, RangePredicate,
+)
 from hara_agent.models import (
     FactProvenance, ItemDefinitionFacts, MethodRiskFactBinding, ReviewStatus,
     RiskFact, SourceRef,
 )
 
 
-METHOD_FACT_KEYS = {
-    FactType.COLLISION_TYPE: "collision_type",
-    FactType.ROAD_USER_TYPE: "road_user_type",
+METHOD_FACT_KEYS = {item: item.value.casefold() for item in FactType}
+METHOD_FACT_KEYS.update({
     FactType.SPEED_UNSPECIFIED: "speed_unspecified_kph",
-    FactType.DURATION_PERCENT: "duration_percent",
-    FactType.OCCURRENCE_FREQUENCY: "occurrence_frequency",
-    FactType.AVOIDABILITY_PERCENT: "avoidability_percent",
     # EXPOSURE stores the method selector, not an E-level result.
     FactType.EXPOSURE: "exposure_method",
-}
+})
 
 
 @dataclass(frozen=True)
@@ -99,23 +97,41 @@ class MethodRiskFactBindingService:
     conflicts are rejected and remain missing for scoring.
     """
 
-    NUMERIC_FACTS = {
-        FactType.SPEED_UNSPECIFIED,
-        FactType.DURATION_PERCENT,
-        FactType.AVOIDABILITY_PERCENT,
-    }
-
     def __init__(self, method: MethodContract):
         self.method = method
         self.template_hash = str(method.metadata["template_hash"])
         self.compiler = MethodRiskFactBindingCompiler(method)
+        rule_fact_types = {
+            predicate.field
+            for rule in (
+                *method.severity.rules,
+                *method.exposure.duration_rules,
+                *method.exposure.frequency_rules,
+                *method.controllability.criteria,
+            )
+            for predicate in rule.predicates
+        }
         self.required = {
             item.fact_type: item for item in method.required_fact_specs
-            if item.fact_type in METHOD_FACT_KEYS
+            if item.fact_type in rule_fact_types
         }
         # Exposure T/F selects which compiled rule family is executable.
         self.required.setdefault(FactType.EXPOSURE, None)
         self.allowed_values = self._allowed_values(method)
+        self.numeric_fact_types = {
+            item.fact_type for item in method.required_fact_specs if item.unit
+        }
+        self.numeric_fact_types.update(
+            predicate.field
+            for rule in (
+                *method.severity.rules,
+                *method.exposure.duration_rules,
+                *method.exposure.frequency_rules,
+                *method.controllability.criteria,
+            )
+            for predicate in rule.predicates
+            if isinstance(predicate, RangePredicate)
+        )
 
     @staticmethod
     def _allowed_values(method: MethodContract) -> dict[FactType, set[str]]:
@@ -152,7 +168,7 @@ class MethodRiskFactBindingService:
     def _normalize_value(
         self, fact_type: FactType, fact: RiskFact
     ) -> str | float | None:
-        if fact_type in self.NUMERIC_FACTS:
+        if fact_type in self.numeric_fact_types:
             if not isinstance(fact.value, (int, float)) or isinstance(fact.value, bool):
                 return None
             required = self.required.get(fact_type)

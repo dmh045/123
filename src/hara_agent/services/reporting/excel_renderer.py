@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
@@ -9,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from openpyxl import load_workbook
 
-from .template_contract import HARATemplateContract
+from hara_agent.contracts import ReportContract, ReportFieldMapping
 
 if TYPE_CHECKING:
     from hara_agent.workflow.state import HARAState
@@ -27,17 +29,62 @@ ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibil
 ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
 
 
+HARA_REQUIRED_FIELDS = frozenset({"hara_id"})
+SG_REQUIRED_FIELDS = frozenset({"sg_id"})
+STATIC_HIERARCHY = (
+    "function", "output", "guideword", "malfunction", "hazard", "scenario",
+)
+
+
+@dataclass(frozen=True)
+class _TableLayout:
+    sheet: str
+    start_row: int
+    columns: dict[str, int]
+    header_rows: tuple[int, ...]
+
+    @property
+    def max_column(self) -> int:
+        return max(self.columns.values())
+
+    @property
+    def watermark_cell(self) -> str:
+        row = max(1, min(self.header_rows) - 1)
+        return f"{HARAExcelRenderer._column_letter(min(self.columns.values()))}{row}"
+
+
 class HARAExcelRenderer:
-    """Edit only target worksheet XML while preserving the complete template package."""
+    """Render canonical results through a compiled, template-owned ReportContract."""
 
-    def __init__(self, contract: HARATemplateContract | None = None):
-        self.contract = contract or HARATemplateContract()
+    def __init__(
+        self,
+        report_contract: ReportContract | None = None,
+        *,
+        template_hash: str | None = None,
+    ):
+        self.report_contract = report_contract
+        self.template_hash = template_hash
 
-    def render(self, state: HARAState, template_path: str | Path,
-               output_path: str | Path, draft: bool = False, smoke: bool = False) -> Path:
+    def render(
+        self,
+        state: HARAState,
+        template_path: str | Path,
+        output_path: str | Path,
+        draft: bool = False,
+        smoke: bool = False,
+    ) -> Path:
         if not draft and not smoke and not state.can_publish:
-            raise ValueError("HARAState仍有待评审项或错误，禁止生成正式报告")
-        template = self.contract.validate(template_path)
+            raise ValueError("HARAState still has pending reviews or errors; formal report is blocked")
+        template = Path(template_path).expanduser().resolve()
+        if not template.is_file():
+            raise FileNotFoundError(f"Template not found: {template}")
+        contract = self.report_contract or self._compile_report_contract(template)
+        if self.template_hash and self._sha256(template) != self.template_hash:
+            raise ValueError("Renderer template hash does not match the compiled MethodContract")
+        hara_layout = self._layout(contract.hara_fields, HARA_REQUIRED_FIELDS, "HARA")
+        sg_layout = self._layout(contract.safety_goal_fields, SG_REQUIRED_FIELDS, "Safety Goal")
+        self._validate_template(template, (hara_layout, sg_layout))
+
         output = Path(output_path).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         hara_rows = self._hara_rows(state)
@@ -47,20 +94,89 @@ class HARAExcelRenderer:
             if smoke else "DRAFT — NOT FOR RELEASE / 待工程评审，禁止正式发布"
         )
         replacements = {
-            self.contract.HARA_SHEET: (
-                self.contract.HARA_START_ROW, 21, hara_rows, self._merge_ranges(hara_rows),
-                {"A3": watermark} if draft or smoke else {},
+            hara_layout.sheet: (
+                hara_layout, hara_rows, self._merge_ranges(hara_rows, hara_layout),
+                {hara_layout.watermark_cell: watermark} if draft or smoke else {},
             ),
-            self.contract.SG_SHEET: (
-                self.contract.SG_START_ROW, 6, sg_rows, [],
-                {"A2": watermark} if draft or smoke else {},
+            sg_layout.sheet: (
+                sg_layout, sg_rows, [],
+                {sg_layout.watermark_cell: watermark} if draft or smoke else {},
             ),
         }
         self._rewrite_package(template, output, replacements)
-        self._verify_reopen(output, len(hara_rows), len(sg_rows))
+        self._verify_reopen(output, hara_layout, len(hara_rows), sg_layout, len(sg_rows))
         return output
 
-    def _hara_rows(self, state: HARAState) -> list[list[object]]:
+    @staticmethod
+    def _compile_report_contract(template: Path) -> ReportContract:
+        from hara_agent.template import TemplateRoleCompiler
+
+        method = TemplateRoleCompiler().compile_method(template)
+        if method.blocking_diagnostics:
+            raise ValueError(
+                "Template ReportContract cannot be compiled: "
+                + "; ".join(item.message for item in method.blocking_diagnostics)
+            )
+        return method.report_contract
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _layout(
+        mappings: tuple[ReportFieldMapping, ...],
+        required: frozenset[str],
+        label: str,
+    ) -> _TableLayout:
+        if not mappings:
+            raise ValueError(f"{label} ReportContract has no field mappings")
+        sheets = {item.sheet for item in mappings}
+        if len(sheets) != 1:
+            raise ValueError(f"{label} fields span multiple sheets: {sorted(sheets)}")
+        columns: dict[str, int] = {}
+        used_columns: dict[int, str] = {}
+        for item in mappings:
+            if item.canonical_field in columns:
+                raise ValueError(f"Duplicate {label} field mapping: {item.canonical_field}")
+            if item.column_index < 1:
+                raise ValueError(f"Invalid {label} column index: {item.column_index}")
+            if item.column_index in used_columns:
+                raise ValueError(
+                    f"Duplicate {label} output column {item.column_index}: "
+                    f"{used_columns[item.column_index]} and {item.canonical_field}"
+                )
+            columns[item.canonical_field] = item.column_index
+            used_columns[item.column_index] = item.canonical_field
+        missing = sorted(required - set(columns))
+        if missing:
+            raise ValueError(f"{label} ReportContract missing required fields: {missing}")
+        header_rows = {row for item in mappings for row in item.header_rows}
+        if not header_rows:
+            raise ValueError(f"{label} ReportContract has no header rows")
+        return _TableLayout(
+            next(iter(sheets)), max(header_rows) + 1, columns, tuple(sorted(header_rows))
+        )
+
+    @staticmethod
+    def _validate_template(template: Path, layouts: tuple[_TableLayout, ...]) -> None:
+        workbook = load_workbook(template, read_only=False, data_only=False)
+        try:
+            for layout in layouts:
+                if layout.sheet not in workbook.sheetnames:
+                    raise ValueError(f"ReportContract sheet is absent: {layout.sheet}")
+                if workbook[layout.sheet].max_row < layout.start_row:
+                    raise ValueError(
+                        f"Template lacks style baseline row {layout.sheet}!{layout.start_row}"
+                    )
+        finally:
+            workbook.close()
+
+    def _hara_rows(self, state: HARAState) -> list[dict[str, object]]:
         scenarios = self._unique_index(state.scenarios, lambda item: item.scenario_id, "Scenario")
         malfunctions = self._unique_index(
             state.malfunctions, lambda item: str(item.get("malfunction_id", "")), "Malfunction",
@@ -69,38 +185,52 @@ class HARAExcelRenderer:
             state.functions, lambda item: str(item.get("function_id", "")), "Function",
         )
         goals = self._unique_index(state.safety_goals, lambda item: item.sg_id, "Safety Goal")
-        rows = []
+        rows: list[dict[str, object]] = []
         for offset, risk in enumerate(state.risk_results):
             if risk.scenario_id not in scenarios or risk.malfunction_id not in malfunctions:
                 raise ValueError(
-                    f"Renderer外键缺失: risk={risk.assessment_id!r}, "
+                    f"Renderer foreign key missing: risk={risk.assessment_id!r}, "
                     f"scenario={risk.scenario_id!r}, malfunction={risk.malfunction_id!r}"
                 )
             scenario = scenarios[risk.scenario_id]
             malfunction = malfunctions[risk.malfunction_id]
             function_id = str(malfunction.get("function_id", ""))
             if function_id not in functions:
-                raise ValueError(f"Renderer Function外键缺失: {function_id!r}")
+                raise ValueError(f"Renderer Function foreign key missing: {function_id!r}")
             function = functions[function_id]
             goal = goals.get(risk.safety_goal_id)
             if risk.asil.value in {"A", "B", "C", "D"} and (
                 not risk.safety_goal_id or goal is None
             ):
                 raise ValueError(
-                    f"Renderer非QM Risk缺少Safety Goal外键: risk={risk.assessment_id!r}, "
+                    f"Non-QM risk lacks Safety Goal foreign key: risk={risk.assessment_id!r}, "
                     f"safety_goal_id={risk.safety_goal_id!r}"
                 )
-            rows.append([
-                f"HARA_{offset + 1:03d}", function.get("name", ""), function.get("output", ""),
-                malfunction.get("guideword", ""), malfunction.get("description", ""),
-                malfunction.get("vehicle_level_hazard", ""), scenario.situational_description,
-                scenario.situational_detailing,
-                "；".join(value for value in (risk.hazardous_event, risk.potential_harm) if value),
-                risk.severity.value, self._basis(risk.severity), risk.exposure.value,
-                risk.exposure_tf, self._basis(risk.exposure),
-                risk.controllability.value, self._basis(risk.controllability), risk.asil.value,
-                goal.sg_id if goal else "", goal.text if goal else "", goal.safe_state if goal else "", "",
-            ])
+            rows.append({
+                "hara_id": f"HARA_{offset + 1:03d}",
+                "function": function.get("name", ""),
+                "output": function.get("output", ""),
+                "guideword": malfunction.get("guideword", ""),
+                "malfunction": malfunction.get("description", ""),
+                "hazard": malfunction.get("vehicle_level_hazard", ""),
+                "scenario": scenario.situational_description,
+                "scenario_detail": scenario.situational_detailing,
+                "hazardous_event": "；".join(
+                    value for value in (risk.hazardous_event, risk.potential_harm) if value
+                ),
+                "severity": risk.severity.value,
+                "severity_rationale": self._basis(risk.severity),
+                "exposure": risk.exposure.value,
+                "exposure_method": risk.exposure_tf,
+                "exposure_rationale": self._basis(risk.exposure),
+                "controllability": risk.controllability.value,
+                "controllability_rationale": self._basis(risk.controllability),
+                "asil": risk.asil.value,
+                "sg_id": goal.sg_id if goal else "",
+                "safety_goal": goal.text if goal else "",
+                "safe_state": goal.safe_state if goal else "",
+                "remark": "",
+            })
         return rows
 
     @staticmethod
@@ -109,32 +239,34 @@ class HARAExcelRenderer:
         for value in values:
             identity = key(value)
             if not identity:
-                raise ValueError(f"Renderer {label} ID不能为空")
+                raise ValueError(f"Renderer {label} ID cannot be empty")
             if identity in result:
-                raise ValueError(f"Renderer {label} ID不唯一，禁止静默覆盖: {identity!r}")
+                raise ValueError(f"Renderer {label} ID is not unique: {identity!r}")
             result[identity] = value
         return result
 
     @staticmethod
-    def _safety_goal_rows(state: HARAState) -> list[list[object]]:
-        malfunctions = {
-            str(item.get("malfunction_id", "")): item for item in state.malfunctions
-        }
-        risks_by_goal = {}
+    def _safety_goal_rows(state: HARAState) -> list[dict[str, object]]:
+        malfunctions = {str(item.get("malfunction_id", "")): item for item in state.malfunctions}
+        risks_by_goal: dict[str, list] = {}
         for risk in state.risk_results:
             if risk.safety_goal_id:
                 risks_by_goal.setdefault(risk.safety_goal_id, []).append(risk)
-        rows = []
+        rows: list[dict[str, object]] = []
         for offset, goal in enumerate(state.safety_goals):
             hazards = list(dict.fromkeys(
                 str(malfunctions.get(risk.malfunction_id, {}).get("vehicle_level_hazard", ""))
                 for risk in risks_by_goal.get(goal.sg_id, [])
                 if malfunctions.get(risk.malfunction_id, {}).get("vehicle_level_hazard")
             ))
-            rows.append([
-                f"HZ_{offset + 1:02d}", "；".join(hazards), goal.sg_id,
-                goal.text, goal.safe_state, goal.max_asil,
-            ])
+            rows.append({
+                "hazard_id": f"HZ_{offset + 1:02d}",
+                "hazard": "；".join(hazards),
+                "sg_id": goal.sg_id,
+                "safety_goal": goal.text,
+                "safe_state": goal.safe_state,
+                "max_asil": goal.max_asil,
+            })
         return rows
 
     @staticmethod
@@ -148,11 +280,9 @@ class HARAExcelRenderer:
             sheet_paths = self._sheet_paths(source)
             unknown = sorted(set(replacements) - set(sheet_paths))
             if unknown:
-                raise ValueError(f"模板Sheet关系缺失: {unknown}")
+                raise ValueError(f"Template sheet relationships missing: {unknown}")
             changed = {
-                sheet_paths[name]: self._replace_sheet_data(
-                    source.read(sheet_paths[name]), *config
-                )
+                sheet_paths[name]: self._replace_sheet_data(source.read(sheet_paths[name]), *config)
                 for name, config in replacements.items()
             }
             handle, temp_name = tempfile.mkstemp(
@@ -183,28 +313,35 @@ class HARAExcelRenderer:
             result[sheet.attrib["name"]] = target if target.startswith("xl/") else f"xl/{target}"
         return result
 
-    def _replace_sheet_data(self, xml_bytes: bytes, start_row: int, max_column: int,
-                            rows: list[list[object]], merge_ranges: list[str],
-                            header_updates: dict[str, str]) -> bytes:
+    def _replace_sheet_data(
+        self,
+        xml_bytes: bytes,
+        layout: _TableLayout,
+        rows: list[dict[str, object]],
+        merge_ranges: list[str],
+        header_updates: dict[str, str],
+    ) -> bytes:
         root = ET.fromstring(xml_bytes)
         sheet_data = root.find("m:sheetData", NS)
         existing_rows = list(sheet_data.findall("m:row", NS))
-        template_row = next((row for row in existing_rows if int(row.attrib["r"]) == start_row), None)
+        template_row = next(
+            (row for row in existing_rows if int(row.attrib["r"]) == layout.start_row), None
+        )
         if template_row is None:
-            raise ValueError(f"模板缺少样式基准行: {start_row}")
+            raise ValueError(f"Template lacks style baseline row: {layout.start_row}")
         style_by_column = {
             self._column_number(cell.attrib["r"]): cell.attrib.get("s")
             for cell in template_row.findall("m:c", NS)
         }
         row_attributes = {key: value for key, value in template_row.attrib.items() if key != "r"}
         for row in existing_rows:
-            if int(row.attrib["r"]) >= start_row:
+            if int(row.attrib["r"]) >= layout.start_row:
                 sheet_data.remove(row)
         for offset, values in enumerate(rows):
-            row_number = start_row + offset
+            row_number = layout.start_row + offset
             row = ET.Element(f"{{{MAIN_NS}}}row", {"r": str(row_number), **row_attributes})
-            for column in range(1, max_column + 1):
-                value = values[column - 1] if column <= len(values) else ""
+            for field, column in sorted(layout.columns.items(), key=lambda item: item[1]):
+                value = values.get(field, "")
                 if value is None or value == "":
                     continue
                 attrs = {"r": f"{self._column_letter(column)}{row_number}", "t": "inlineStr"}
@@ -217,11 +354,11 @@ class HARAExcelRenderer:
             sheet_data.append(row)
         for reference, value in header_updates.items():
             self._set_inline_string(sheet_data, reference, value)
-        self._replace_data_merges(root, start_row, merge_ranges)
+        self._replace_data_merges(root, layout.start_row, merge_ranges)
         dimension = root.find("m:dimension", NS)
         if dimension is not None:
-            last_row = max(start_row - 1, start_row + len(rows) - 1)
-            dimension.attrib["ref"] = f"A1:{self._column_letter(max_column)}{last_row}"
+            last_row = max(layout.start_row - 1, layout.start_row + len(rows) - 1)
+            dimension.attrib["ref"] = f"A1:{self._column_letter(layout.max_column)}{last_row}"
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     @classmethod
@@ -233,17 +370,14 @@ class HARAExcelRenderer:
         )
         if row is None:
             row = ET.Element(f"{{{MAIN_NS}}}row", {"r": str(row_number)})
-            inserted = False
             for index, existing in enumerate(list(sheet_data)):
                 if int(existing.attrib["r"]) > row_number:
                     sheet_data.insert(index, row)
-                    inserted = True
                     break
-            if not inserted:
+            else:
                 sheet_data.append(row)
         cell = next(
-            (item for item in row.findall("m:c", NS) if item.attrib.get("r") == reference),
-            None,
+            (item for item in row.findall("m:c", NS) if item.attrib.get("r") == reference), None
         )
         if cell is None:
             cell = ET.Element(f"{{{MAIN_NS}}}c", {"r": reference})
@@ -270,22 +404,32 @@ class HARAExcelRenderer:
         merge_cells.attrib["count"] = str(len(list(merge_cells)))
 
     @staticmethod
-    def _merge_ranges(rows: list[list[object]]) -> list[str]:
+    def _merge_ranges(rows: list[dict[str, object]], layout: _TableLayout) -> list[str]:
         ranges = []
-        start_row = HARATemplateContract.HARA_START_ROW
-        for column in range(2, 8):
+        available_hierarchy = tuple(
+            field for field in STATIC_HIERARCHY if field in layout.columns
+        )
+        for position, field in enumerate(available_hierarchy):
+            column = layout.columns[field]
+            parents = available_hierarchy[:position]
             group_start = 0
             for index in range(1, len(rows) + 1):
                 boundary = index == len(rows)
                 if not boundary:
                     boundary = not (
-                        rows[index][column - 1] == rows[index - 1][column - 1]
-                        and rows[index][1:column - 1] == rows[index - 1][1:column - 1]
+                        rows[index].get(field) == rows[index - 1].get(field)
+                        and all(
+                            rows[index].get(parent) == rows[index - 1].get(parent)
+                            for parent in parents
+                        )
                     )
                 if boundary:
-                    if index - group_start > 1 and rows[group_start][column - 1] not in (None, ""):
+                    if index - group_start > 1 and rows[group_start].get(field) not in (None, ""):
                         letter = HARAExcelRenderer._column_letter(column)
-                        ranges.append(f"{letter}{start_row + group_start}:{letter}{start_row + index - 1}")
+                        ranges.append(
+                            f"{letter}{layout.start_row + group_start}:"
+                            f"{letter}{layout.start_row + index - 1}"
+                        )
                     group_start = index
         return ranges
 
@@ -310,23 +454,32 @@ class HARAExcelRenderer:
             result = chr(65 + remainder) + result
         return result
 
-    def _verify_reopen(self, output: Path, hara_count: int, sg_count: int) -> None:
+    def _verify_reopen(
+        self,
+        output: Path,
+        hara: _TableLayout,
+        hara_count: int,
+        sg: _TableLayout,
+        sg_count: int,
+    ) -> None:
         with ZipFile(output, "r") as package:
             if package.testzip() is not None:
-                raise ValueError("报告ZIP包完整性校验失败")
+                raise ValueError("Report ZIP package integrity check failed")
         workbook = load_workbook(output, read_only=False, data_only=False)
         try:
-            hara = workbook[self.contract.HARA_SHEET]
+            hara_sheet = workbook[hara.sheet]
             for offset in range(hara_count):
-                row = self.contract.HARA_START_ROW + offset
-                if not hara.cell(row, 1).value:
-                    raise ValueError(f"报告复核失败: 05_HARA!A{row}为空")
-                if str(hara.cell(row, 17).value or "").startswith("="):
-                    raise ValueError(f"报告复核失败: 05_HARA!Q{row}仍为旧ASIL公式")
-            sg = workbook[self.contract.SG_SHEET]
+                row = hara.start_row + offset
+                if not hara_sheet.cell(row, hara.columns["hara_id"]).value:
+                    raise ValueError(f"Report verification failed: {hara.sheet} row {row} lacks HARA ID")
+                if "asil" in hara.columns and str(
+                    hara_sheet.cell(row, hara.columns["asil"]).value or ""
+                ).startswith("="):
+                    raise ValueError(f"Report verification failed: {hara.sheet} row {row} retains ASIL formula")
+            sg_sheet = workbook[sg.sheet]
             for offset in range(sg_count):
-                row = self.contract.SG_START_ROW + offset
-                if not sg.cell(row, 3).value:
-                    raise ValueError(f"报告复核失败: 06_Safety Goal!C{row}为空")
+                row = sg.start_row + offset
+                if not sg_sheet.cell(row, sg.columns["sg_id"]).value:
+                    raise ValueError(f"Report verification failed: {sg.sheet} row {row} lacks SG ID")
         finally:
             workbook.close()

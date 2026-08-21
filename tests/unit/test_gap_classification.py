@@ -21,7 +21,6 @@ def test_gap_classification_is_stable_and_complete():
         "ROUTING_MISSED",
         "NORMALIZATION_LOSS",
         "METHOD_DEFINED",
-        "LEGACY_ASSUMPTION",
         "SOURCE_NOT_PROVIDED",
     ]
 
@@ -32,7 +31,6 @@ def test_gap_classification_is_stable_and_complete():
         (FactProvenance.PROJECT_INPUT, False, True, "PRESENT_EXPLICIT"),
         (FactProvenance.PROJECT_INPUT, True, True, "PRESENT_DERIVABLE"),
         (FactProvenance.METHOD_CONTRACT, False, False, "METHOD_DEFINED"),
-        (FactProvenance.LEGACY_MIGRATION, False, False, "LEGACY_ASSUMPTION"),
         (FactProvenance.PROJECT_INPUT, False, False, "SOURCE_NOT_PROVIDED"),
     ],
 )
@@ -43,19 +41,22 @@ def test_fact_authority_and_source_drive_gap_classification(
     source = SourceRef("synthetic", "synthetic", "row[1]", block.text)
     fact = ExpectedProjectFact(
         fact_id="x",
-        field="performance_parameters",
-        value={"parameter": "x", "value": 1},
+        field="risk_facts",
+        value={"fact_type": "x", "parameter": "x", "value": 1},
         source=source if with_source else None,
         source_block_ids=("B-1",) if with_source else (),
         derivable=derivable,
         provenance=provenance,
     )
     project = {
-        "performance_parameters": [{
-            "parameter": "x", "value": 1,
-            "source_location": "row[1]", "source_excerpt": block.text,
+        "risk_facts": [{
+            "fact_type": "x", "parameter": "x", "value": 1,
+            "source_refs": [{
+                "source_type": "synthetic", "source_id": "synthetic",
+                "location": "row[1]", "excerpt": block.text,
+            }],
         }]
-    } if expected != "SOURCE_NOT_PROVIDED" else {"performance_parameters": []}
+    } if expected != "SOURCE_NOT_PROVIDED" else {"risk_facts": []}
 
     report = ExtractionEvaluationHarness().evaluate(ExtractionEvaluationInput(
         source_id="synthetic",

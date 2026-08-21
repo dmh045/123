@@ -4,10 +4,6 @@ from dataclasses import asdict
 from typing import Any
 
 from hara_agent.services.semantic import ScenarioEvidenceContractError
-from hara_agent.contracts import ScenarioEvidenceV2ContractError
-from hara_agent.services.semantic import (
-    ScenarioProviderContractError, ScenarioProviderErrorCode,
-)
 from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
 from hara_agent.services.semantic.scenario_evidence import SCENARIO_ASSESSMENT_CONTRACT_VERSION
 
@@ -37,11 +33,7 @@ class ScenarioEvaluationHarness:
                         if scenario.scenario_id == item.scenario_id
                     ), result=item,
                 ) for item in results)
-            except (
-                ScenarioEvidenceContractError,
-                ScenarioEvidenceV2ContractError,
-                ScenarioProviderContractError,
-            ) as error:
+            except ScenarioEvidenceContractError as error:
                 scenario_id = getattr(error, "scenario_id", "") or request.scenarios[0].scenario_id
                 fingerprint = next(
                     (
@@ -55,15 +47,6 @@ class ScenarioEvaluationHarness:
                     semantic_fingerprint=fingerprint, error=error,
                 ))
         metrics = scenario_repeat_metrics(attempts)
-        provider_errors = [
-            item.error for item in attempts
-            if not item.valid and isinstance(item.error, ScenarioProviderContractError)
-        ]
-        coverage_codes = {
-            ScenarioProviderErrorCode.MISSING_ASSESSMENT,
-            ScenarioProviderErrorCode.DUPLICATE_ASSESSMENT,
-            ScenarioProviderErrorCode.UNKNOWN_SCENARIO_ID,
-        }
         prompt_version = getattr(
             self.agent, "prompt_version", getattr(self.agent, "PROMPT_VERSION", "")
         )
@@ -78,12 +61,6 @@ class ScenarioEvaluationHarness:
                 "assessment": assessment_version,
                 "prompt": prompt_version,
                 "provider_schema": getattr(self.agent, "schema_name", "ScenarioFeasibilityAssessmentList"),
-                "mechanism_catalog_fingerprint": getattr(
-                    self.agent, "mechanism_catalog_fingerprint", ""
-                ),
-                "contract_cache_fingerprint": getattr(
-                    self.agent, "contract_cache_fingerprint", ""
-                ),
             },
             "input": {
                 "malfunction_id": request.malfunction.malfunction_id,
@@ -106,16 +83,9 @@ class ScenarioEvaluationHarness:
                 "assumption_violation": metrics["assumption_violation_count"],
             },
             "contract_metrics": {
-                "schema_valid_attempt_count": request.repeat - len(provider_errors),
+                "schema_valid_attempt_count": successful_attempts,
                 "contract_valid_attempt_count": successful_attempts,
-                "provider_payload_error_count": len(provider_errors),
-                "mechanism_application_shape_error_count": sum(
-                    error.code is ScenarioProviderErrorCode.INVALID_MECHANISM_APPLICATION_SHAPE
-                    for error in provider_errors
-                ),
-                "exact_coverage_error_count": sum(
-                    error.code in coverage_codes for error in provider_errors
-                ),
+                "provider_payload_error_count": 0,
             },
             "stability": {
                 key: metrics[key] for key in (
@@ -141,7 +111,6 @@ class ScenarioEvaluationHarness:
                     "semantic_fingerprint": item.semantic_fingerprint,
                     "invalid_evidence_refs": getattr(item.error, "invalid_evidence_refs", []),
                     "basis_type": getattr(item.error, "basis_type", ""),
-                    "mechanism_code": getattr(item.error, "mechanism_code", ""),
                 }
                 for item in attempts if not item.valid
             ],

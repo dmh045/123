@@ -4,25 +4,27 @@ import threading
 import sys
 import time
 from dataclasses import asdict, replace
+from typing import Sequence
 
+from hara_agent.contracts import RequiredFactSpec
 from hara_agent.models import (
     FunctionDefinition, ItemDefinitionFacts, ReviewStatus, SourceRef,
 )
 from hara_agent.services.extraction import ValidatedArtifactCache
-from hara_agent.services.extraction import PROJECT_FACT_SPEC_BATCHES
+from hara_agent.services.extraction import build_project_fact_spec_batches
 from hara_agent.services.semantic import (
     ItemArtifactExtractionAgent,
     ItemEvidenceRouter,
     ItemSupplementAgent,
     TargetedProjectFactExtractionAgent,
 )
-from hara_agent.services.semantic.item_definition_agent import ItemDefinitionExtractionAgent
+from hara_agent.services.semantic.item_definition_agent import ItemDefinitionNormalizer
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 from .parallel import ordered_parallel_map
 
 
-ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v3-atomic-project-facts"
+ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v5-method-driven-project-facts"
 
 
 def _facts_from_dict(value: dict) -> ItemDefinitionFacts:
@@ -66,11 +68,8 @@ def _merge_supplements(
         "speed_min_kph": facts.speed_min_kph,
         "speed_max_kph": facts.speed_max_kph,
         "speed_envelopes": list(facts.speed_envelopes),
-        "numeric_constraints": list(facts.numeric_constraints),
-        "driver_context_facts": list(facts.driver_context_facts),
-        "performance_parameters": list(facts.performance_parameters),
-        "driver_contexts": list(facts.driver_contexts),
-        "exposure_inputs": list(facts.exposure_inputs),
+        "risk_facts": list(facts.risk_facts),
+        "method_risk_fact_bindings": list(facts.method_risk_fact_bindings),
     }
     odd_patch = patches.get("odd_repair", {})
     odd = odd_patch.get("odd", {}) if isinstance(odd_patch, dict) else {}
@@ -86,23 +85,14 @@ def _merge_supplements(
     )
     for field, candidate in list_mappings:
         if not values[field] and candidate is not None:
-            values[field] = [str(item) for item in ItemDefinitionExtractionAgent._list(candidate, field)]
+            values[field] = [str(item) for item in ItemDefinitionNormalizer._list(candidate, field)]
     if values["speed_min_kph"] is None and "speed_range_kph" in odd:
-        speed_min, speed_max, warning = ItemDefinitionExtractionAgent._speed_range(
+        speed_min, speed_max, warning = ItemDefinitionNormalizer._speed_range(
             odd.get("speed_range_kph")
         )
         values["speed_min_kph"], values["speed_max_kph"] = speed_min, speed_max
         if warning:
             warnings.append(warning)
-
-    project_patch = patches.get("project_evidence", {})
-    if isinstance(project_patch, dict):
-        for field in ("performance_parameters", "driver_contexts", "exposure_inputs"):
-            candidate = project_patch.get(field)
-            if candidate is not None:
-                values[field] = ItemDefinitionExtractionAgent._list(candidate, field)
-    else:
-        warnings.append("项目证据补抽取不是object，已忽略")
 
     return replace(facts, **values, status=ReviewStatus.PENDING), warnings
 
@@ -110,18 +100,14 @@ def _merge_supplements(
 def _merge_targeted_project_facts(
     facts: ItemDefinitionFacts, payloads: dict[str, dict],
 ) -> ItemDefinitionFacts:
-    speed_envelopes, numeric_constraints, driver_context_facts = [], [], []
-    for category in PROJECT_FACT_SPEC_BATCHES:
-        payload = payloads.get(category, {})
-        speed_envelopes.extend(payload.get("speed_envelopes", []))
-        numeric_constraints.extend(payload.get("numeric_constraints", []))
-        driver_context_facts.extend(payload.get("driver_context_facts", []))
     serialized = asdict(facts)
-    serialized.update({
-        "speed_envelopes": speed_envelopes,
-        "numeric_constraints": numeric_constraints,
-        "driver_context_facts": driver_context_facts,
-    })
+    for payload in payloads.values():
+        for field in (
+            "speed_envelopes", "risk_facts",
+        ):
+            for item in payload.get(field, []):
+                if item not in serialized[field]:
+                    serialized[field].append(item)
     return ItemDefinitionFacts.from_dict(serialized)
 
 
@@ -135,6 +121,8 @@ def extract_item_artifacts(
     max_workers: int = 2,
     progress=None,
     cache: ValidatedArtifactCache | None = None,
+    required_fact_specs: Sequence[RequiredFactSpec] = (),
+    requested_operating_modes: Sequence[str] = (),
 ) -> HARAState:
     """Run one full-document extraction, then only targeted repair calls."""
     stage_started = time.monotonic()
@@ -156,6 +144,20 @@ def extract_item_artifacts(
         "base_url": getattr(client_config, "base_url", ""),
         "model": getattr(client_config, "model", type(artifact_agent.client).__name__),
         "extraction_thinking": getattr(client_config, "extraction_thinking", "default"),
+        "required_project_fact_specs": [
+            {
+                "fact_type": spec.fact_type.value,
+                "required_for": list(spec.required_for),
+                "unit": spec.unit,
+                "constraints": list(spec.constraints),
+                "condition": spec.condition,
+                "origin": spec.origin.value,
+            }
+            for spec in required_fact_specs
+        ],
+        "requested_operating_modes": [
+            str(mode) for mode in requested_operating_modes if str(mode).strip()
+        ],
     }
     cache_key = cache.key(cache_material) if cache else ""
     cache_lookup_started = time.monotonic()
@@ -237,14 +239,6 @@ def extract_item_artifacts(
         routing_diagnostics.append(odd_result.diagnostics.to_dict())
         if odd_result.routed:
             routed.append(odd_result.routed)
-    project_result = (
-        router.retrieve(blocks, "project_evidence")
-        if "project_evidence" not in cached_supplements else None
-    )
-    if project_result:
-        routing_diagnostics.append(project_result.diagnostics.to_dict())
-        if project_result.routed:
-            routed.append(project_result.routed)
     routing_elapsed = time.monotonic() - routing_started
 
     patches, supplement_audits = dict(cached_supplements), []
@@ -283,6 +277,9 @@ def extract_item_artifacts(
         merge_warnings = []
     merge_elapsed = time.monotonic() - merge_started
 
+    project_fact_batches = build_project_fact_spec_batches(
+        (*requested_operating_modes, *facts.operating_modes), required_fact_specs,
+    )
     targeted_audits = []
     targeted_payloads = (
         dict(cached_payload.get("targeted_project_facts", {}))
@@ -290,7 +287,7 @@ def extract_item_artifacts(
     )
     if targeted_agent is not None:
         targeted_routes = []
-        for category, specs in PROJECT_FACT_SPEC_BATCHES.items():
+        for category, specs in project_fact_batches.items():
             if category in targeted_payloads:
                 continue
             route_result = router.retrieve(
@@ -357,7 +354,6 @@ def extract_item_artifacts(
         "[HARA] extract timing "
         f"core_item_artifact={core_elapsed:.1f}s evidence_routing={routing_elapsed:.1f}s "
         f"supplement_odd_repair={supplement_elapsed.get('odd_repair', 0.0):.1f}s "
-        f"supplement_project_evidence={supplement_elapsed.get('project_evidence', 0.0):.1f}s "
         f"supplement_parallel_wall={supplement_wall_elapsed:.1f}s "
         f"merge_validate={merge_elapsed:.1f}s cache_lookup={cache_lookup_elapsed:.1f}s "
         f"cache_save={cache_save_elapsed:.1f}s total={total_elapsed:.1f}s "
