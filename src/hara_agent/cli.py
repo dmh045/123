@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
-from hara_agent.config import LLMConfig
+from hara_agent.config import LLMConfig, load_local_env
 from hara_agent.contracts import (
     CompileStatus, TemplateRole, TemplateRoleConfirmation,
 )
@@ -77,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_local_env()
     args = build_parser().parse_args(argv)
     if args.command == "confirm-template-role":
         compiler = _role_compiler()

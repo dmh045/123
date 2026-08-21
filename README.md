@@ -13,6 +13,8 @@ The template owns the analysis method and report structure. The Item owns projec
 ## Run
 
 Python 3.12 is the validated baseline.
+The CLI loads a repository-local `.env` when present; existing shell or CI
+environment variables take precedence, and secret values are never logged.
 
 ```powershell
 python -m venv .venv
