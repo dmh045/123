@@ -96,10 +96,21 @@ class ProjectFactResolver:
                 f"ambiguous speed envelope for operating mode {operating_mode!r}"
             )
         if not allow_aggregate_fallback:
+            available_envelopes = sorted({
+                item.operating_mode for item in facts.speed_envelopes
+                if item.operating_mode.strip()
+            })
+            declared_modes = sorted({
+                item for item in facts.operating_modes if item.strip()
+            })
             raise UnresolvedProjectContextError(
                 operating_mode,
                 f"no speed envelope for operating mode {operating_mode!r}; "
-                "aggregate fallback was not authorized"
+                "aggregate fallback was not authorized; "
+                f"available_speed_envelope_modes={available_envelopes}; "
+                f"declared_operating_modes={declared_modes}; "
+                "use an exact source-defined operating mode or provide an explicit "
+                "project speed input with provenance"
             )
         if len(facts.speed_envelopes) > 1:
             raise UnresolvedProjectContextError(
@@ -201,7 +212,9 @@ class ProjectFactResolver:
             resolution_source="ExplicitProjectInput",
             provenance=FactProvenance.PROJECT_INPUT,
             source_refs=refs,
-            approval=ReviewStatus.PENDING,
+            approval=(
+                ReviewStatus.FINALIZED if refs else ReviewStatus.PENDING
+            ),
             fallback_used=False,
             resolution_status=ProjectContextResolutionStatus.RESOLVED,
             matched_envelope={

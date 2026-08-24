@@ -26,6 +26,10 @@ class ScenarioSchemaContractError(ValueError):
     """A Scenario assessment violates the declared item-level JSON contract."""
 
 
+class ScenarioCoverageContractError(ValueError):
+    """A Scenario response omits or adds identities relative to its request."""
+
+
 class ScenarioFactConsistencyError(ValueError):
     """Authoritative structured Scenario facts are internally inconsistent."""
 

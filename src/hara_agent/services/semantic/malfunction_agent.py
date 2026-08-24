@@ -18,7 +18,7 @@ from .traceability import resolve_malfunction_sources
 class MalfunctionHazardAgent:
     """Generate traceable malfunction and vehicle-level hazard candidates."""
 
-    PROMPT_VERSION = "malfunction-hazard-v4"
+    PROMPT_VERSION = "malfunction-hazard-v5"
     SYSTEM_PROMPT = """你是汽车功能安全HARA分析助手。只处理已判定适用的Guideword。Malfunction描述功能相对预期行为的偏差；functional_effect描述功能/车辆行为影响；vehicle_level_hazard描述可能造成伤害的车辆级危险状态，不得直接写人员伤亡。causal_chain必须明确从失效到车辆级危险状态的至少两段因果关系。不得复制无关子系统模板。"""
 
     INJURY_TERMS = ("死亡", "致命伤", "骨折", "窒息", "fatality", "death", "injury")
@@ -31,7 +31,11 @@ class MalfunctionHazardAgent:
                  ) -> tuple[list[MalfunctionCandidate], dict[str, Any]]:
         applicable = [
             item for item in assessments
-            if item.is_semantically_complete and item.applicable
+            if (
+                item.is_semantically_complete
+                and item.applicable
+                and item.status is ReviewStatus.FINALIZED
+            )
         ]
         if any(item.function_id != function.function_id for item in assessments):
             raise ValueError("GuidewordAssessment与Function不一致")
@@ -62,12 +66,82 @@ class MalfunctionHazardAgent:
                 "complete_guidewords": complete_count,
                 "incomplete_guidewords": incomplete_count,
             }
-        request = LLMRequest(
+        request = self._request(function, applicable)
+        response = self.client.complete_json(request)
+        candidates = self._parse_candidates(
+            function, response.data, assessments,
+        )
+        self._validate(candidates, applicable, require_coverage=False)
+        missing = self._missing_guidewords(candidates, applicable)
+        repair_response = None
+        if missing:
+            print(
+                "[HARA] malfunction coverage repair "
+                f"function={function.function_id} missing={missing} attempt=1/1",
+                file=sys.stderr,
+                flush=True,
+            )
+            repair_request = self._request(
+                function,
+                [item for item in applicable if item.guideword in set(missing)],
+                coverage_repair=True,
+                existing=candidates,
+            )
+            repair_response = self.client.complete_json(repair_request)
+            repaired = self._parse_candidates(
+                function, repair_response.data, assessments,
+            )
+            self._validate(
+                repaired,
+                [item for item in applicable if item.guideword in set(missing)],
+            )
+            candidates.extend(repaired)
+        self._validate(candidates, applicable)
+        for candidate in candidates:
+            candidate.status = ReviewStatus.FINALIZED
+        return candidates, {
+            "task": request.task,
+            "function_id": function.function_id,
+            "prompt_version": request.prompt_version,
+            "model": response.model,
+            "request_id": response.request_id,
+            "usage": response.usage,
+            "repair_model": repair_response.model if repair_response else "",
+            "repair_request_id": repair_response.request_id if repair_response else "",
+            "repair_usage": repair_response.usage if repair_response else {},
+            "applicable_guidewords": len(applicable),
+            "candidate_count": len(candidates),
+            "coverage_repair_count": int(repair_response is not None),
+            "coverage_missing_before_repair": missing,
+            "llm_call_count": 1 + int(repair_response is not None),
+        }
+
+    def _request(
+        self,
+        function: FunctionDefinition,
+        applicable: list[GuidewordAssessment],
+        *,
+        coverage_repair: bool = False,
+        existing: list[MalfunctionCandidate] | None = None,
+    ) -> LLMRequest:
+        guidewords = [item.guideword for item in applicable]
+        repair_instruction = ""
+        if coverage_repair:
+            repair_instruction = (
+                "这是一次且仅一次的覆盖补全。只允许为MissingGuidewords生成候选；"
+                "不得重复ExistingCandidates，不得返回其他Guideword。"
+                f"\nMissingGuidewords={guidewords}"
+                f"\nExistingCandidates={[(item.malfunction_id, item.guideword, item.description) for item in (existing or [])]}\n"
+            )
+        return LLMRequest(
             task="derive_malfunctions_and_hazards",
             system_prompt=self.SYSTEM_PROMPT,
             user_prompt=(
                 f"Function={function.name}\nOutput={function.output}\nDescription={function.description}\n"
-                f"ApplicableGuidewords={[item.guideword for item in applicable]}\n"
+                f"ApplicableGuidewords={guidewords}\n"
+                "必须为ApplicableGuidewords中的每一个Guideword至少返回一个Malfunction候选；"
+                "不得遗漏，不得增加列表外Guideword。"
+                + repair_instruction +
                 "必须返回一个JSON object，顶层必须包含candidates字段，且candidates必须为JSON array。"
                 "当前任务不需要额外顶层字段。不得使用malfunctions、results、items、candidate_list或hazards"
                 "替代candidates；不得直接返回JSON array；不得在JSON前后添加说明文字。"
@@ -78,31 +152,65 @@ class MalfunctionHazardAgent:
             ),
             schema_name="MalfunctionHazardCandidateList",
             prompt_version=self.PROMPT_VERSION,
-            metadata={"function_id": function.function_id},
+            metadata={
+                "function_id": function.function_id,
+                "coverage_repair": coverage_repair,
+                "guideword_count": len(guidewords),
+            },
             max_tokens=8192,
         )
-        response = self.client.complete_json(request)
-        raw = response.data.get("candidates")
+
+    def _parse_candidates(
+        self,
+        function: FunctionDefinition,
+        data: dict[str, Any],
+        assessments: list[GuidewordAssessment],
+    ) -> list[MalfunctionCandidate]:
+        raw = data.get("candidates")
         if not isinstance(raw, list):
             raise ValueError("LLM输出缺少candidates数组")
         assessment_by_guideword = {item.guideword: item for item in assessments}
-        candidates = [
-            self._parse(function, item, assessment_by_guideword.get(
-                str(item.get("guideword", "")).strip() if isinstance(item, dict) else ""
-            ))
-            for item in raw
-        ]
-        self._validate(candidates, applicable)
-        return candidates, {
-            "task": request.task,
-            "function_id": function.function_id,
-            "prompt_version": request.prompt_version,
-            "model": response.model,
-            "request_id": response.request_id,
-            "usage": response.usage,
-            "applicable_guidewords": len(applicable),
-            "candidate_count": len(candidates),
-        }
+        candidates: list[MalfunctionCandidate] = []
+        seen_ids: set[str] = set()
+        seen_descriptions: set[str] = set()
+        for index, item in enumerate(raw):
+            guideword = (
+                str(item.get("guideword", "")).strip()
+                if isinstance(item, dict) else ""
+            )
+            assessment = assessment_by_guideword.get(guideword)
+            try:
+                if assessment is None:
+                    raise ValueError("guideword is not an approved applicable input")
+                candidate = self._parse(function, item, assessment)
+                hazard_lower = candidate.vehicle_level_hazard.lower()
+                if any(term in hazard_lower for term in self.INJURY_TERMS):
+                    raise ValueError("vehicle-level hazard contains an injury outcome")
+                if candidate.malfunction_id in seen_ids:
+                    raise ValueError("duplicate malfunction_id")
+                if candidate.description in seen_descriptions:
+                    raise ValueError("duplicate malfunction description")
+            except (TypeError, ValueError) as error:
+                print(
+                    "[HARA] malfunction candidate filtered "
+                    f"function={function.function_id} index={index} "
+                    f"guideword={guideword or '<missing>'} reason={error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
+            seen_ids.add(candidate.malfunction_id)
+            seen_descriptions.add(candidate.description)
+            candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _missing_guidewords(
+        candidates: list[MalfunctionCandidate],
+        applicable: list[GuidewordAssessment],
+    ) -> list[str]:
+        covered = {item.guideword for item in candidates}
+        return sorted({item.guideword for item in applicable} - covered)
 
     @staticmethod
     def _parse(
@@ -112,7 +220,13 @@ class MalfunctionHazardAgent:
     ) -> MalfunctionCandidate:
         if not isinstance(item, dict):
             raise ValueError("candidates数组元素必须为object")
-        status = ReviewStatus.FINALIZED if str(item.get("status", "")).upper() == "FINALIZED" else ReviewStatus.PENDING
+        raw_chain = item.get("causal_chain")
+        if (
+            not isinstance(raw_chain, list)
+            or isinstance(raw_chain, (str, bytes))
+            or any(not isinstance(value, str) for value in raw_chain)
+        ):
+            raise ValueError("Malfunction causal_chain must be an array of strings")
         sources, source_origin = resolve_malfunction_sources(function, assessment)
         candidate = MalfunctionCandidate(
             malfunction_id=str(item.get("malfunction_id", "")).strip(),
@@ -121,9 +235,9 @@ class MalfunctionHazardAgent:
             description=str(item.get("description", "")).strip(),
             functional_effect=str(item.get("functional_effect", "")).strip(),
             vehicle_level_hazard=str(item.get("vehicle_level_hazard", "")).strip(),
-            causal_chain=[str(value).strip() for value in item.get("causal_chain", []) if str(value).strip()],
+            causal_chain=[value.strip() for value in raw_chain if value.strip()],
             sources=sources,
-            status=status,
+            status=ReviewStatus.PENDING,
             confidence=parse_confidence(
                 item.get("confidence"),
                 field_name=(
@@ -154,7 +268,8 @@ class MalfunctionHazardAgent:
         return candidate
 
     def _validate(self, candidates: list[MalfunctionCandidate],
-                  applicable: list[GuidewordAssessment]):
+                  applicable: list[GuidewordAssessment], *,
+                  require_coverage: bool = True):
         allowed = {item.guideword for item in applicable}
         ids = [item.malfunction_id for item in candidates]
         descriptions = [item.description for item in candidates]
@@ -165,7 +280,7 @@ class MalfunctionHazardAgent:
             raise ValueError(f"Malfunction使用了未判定适用的Guideword: {invalid}")
         covered = {item.guideword for item in candidates}
         missing = sorted(allowed - covered)
-        if missing:
+        if require_coverage and missing:
             raise ValueError(f"适用Guideword缺少Malfunction候选: {missing}")
         for item in candidates:
             hazard_lower = item.vehicle_level_hazard.lower()

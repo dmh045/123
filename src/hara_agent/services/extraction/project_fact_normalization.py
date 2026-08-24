@@ -173,7 +173,8 @@ class ProjectFactNormalizer:
                 raise ValueError("INVALID_OPERATOR: speed lower-bound-only facts are unsupported")
             return SpeedEnvelope(
                 mode, minimum, maximum, str(candidate.get("condition", "")),
-                unit, [source],
+                unit, [source], FactProvenance.PROJECT_INPUT,
+                ReviewStatus.FINALIZED,
             )
         if spec.output_type is not ProjectFactOutputType.RISK_FACT:
             raise ValueError("INVALID_FACT_TYPE: unsupported output type")
@@ -215,9 +216,9 @@ class ProjectFactNormalizer:
             unit=expected_unit,
             context=dict(context),
             source_refs=[source],
-            provenance=FactProvenance.LLM_INFERENCE,
-            approval=ReviewStatus.PENDING,
-            produced_by="targeted_project_fact_agent",
+            provenance=FactProvenance.PROJECT_INPUT,
+            approval=ReviewStatus.FINALIZED,
+            produced_by="validated_item_project_fact_extraction",
         )
 
     @staticmethod

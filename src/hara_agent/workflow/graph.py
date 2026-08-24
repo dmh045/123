@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Callable
 
+from hara_agent.services.validation import ReleaseGateValidator
+
 from .checkpoints import CheckpointRepository
 from .state import HARAState, WorkflowStage
 
@@ -45,6 +47,12 @@ class WorkflowGraph:
                 self._save(state)
                 return WorkflowRunResult(state, True, f"planned_stop:{state.stage.value}")
             if stop_on_review and state.stage is WorkflowStage.QUALITY_GATE and not state.can_publish:
+                validation = ReleaseGateValidator().evaluate(state)
+                state.record(
+                    "quality_gate_blocked",
+                    blockers=list(validation.blockers),
+                    checks=validation.checks,
+                )
                 self._save(state)
                 return WorkflowRunResult(state, True, "pending_engineering_review")
             node = self.nodes.get(state.stage)

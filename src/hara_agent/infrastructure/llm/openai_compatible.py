@@ -54,6 +54,19 @@ class LLMTransportError(RuntimeError):
         self.error_counts = dict(error_counts)
 
 
+class LLMQuotaExceededError(RuntimeError):
+    """A non-transient provider quota exhaustion that must not be retried."""
+
+    def __init__(self, *, provider_code: str, reset_at: str = ""):
+        message = f"LLM account quota exceeded; provider_code={provider_code}"
+        if reset_at:
+            message += f"; reset_at={reset_at}"
+        message += "; request was not retried because quota exhaustion is non-transient"
+        super().__init__(message)
+        self.provider_code = provider_code
+        self.reset_at = reset_at
+
+
 class LLMSchemaContractError(ValueError):
     """Complete JSON that does not satisfy the requested schema envelope."""
 
@@ -244,35 +257,13 @@ class OpenAICompatibleClient:
             self._validate_schema_envelope(data, request.schema_name)
         except LLMSchemaContractError as exc:
             self._log_schema_mismatch(request, data, exc)
-            # Allow best-effort local repair for GuidewordAssessmentList by
-            # wrapping discovered assessment-like lists as {'assessments': [...]}
-            if request.schema_name == "GuidewordAssessmentList" and request.task != "repair_schema_envelope":
-                assessments = self._assessment_collection_for_repair(data)
-                if assessments is not None:
-                    print(
-                        "[HARA] LLM schema auto-repair applied for GuidewordAssessmentList",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    data = {"assessments": assessments}
-                    schema_repair_count = 1
-                else:
-                    # fallback to existing repair behavior for MalfunctionCandidate
-                    if (
-                        request.schema_name != "MalfunctionHazardCandidateList"
-                        or request.task == "repair_schema_envelope"
-                    ):
-                        raise
-                    data = self._repair_schema_envelope_once(request, data)
-                    schema_repair_count = 1
-            else:
-                if (
-                    request.schema_name != "MalfunctionHazardCandidateList"
-                    or request.task == "repair_schema_envelope"
-                ):
-                    raise
-                data = self._repair_schema_envelope_once(request, data)
-                schema_repair_count = 1
+            if request.task == "repair_schema_envelope":
+                raise
+            repaired = self._repair_list_schema_envelope_once(request, data)
+            if repaired is None:
+                raise
+            data = repaired
+            schema_repair_count = 1
         usage = raw_usage
         usage.update({
             "latency_seconds": round(latency_seconds, 3),
@@ -324,7 +315,10 @@ class OpenAICompatibleClient:
             configured_mode = self.config.guideword_thinking
         elif task == "derive_malfunctions_and_hazards":
             configured_mode = self.config.malfunction_thinking
-        elif task == "assess_scenario_feasibility":
+        elif task in {
+            "assess_scenario_feasibility",
+            "interpret_scenario_risk_facts",
+        }:
             configured_mode = self.config.scenario_thinking
         elif task == "repair_schema_envelope":
             configured_mode = "disabled"
@@ -337,6 +331,14 @@ class OpenAICompatibleClient:
     @staticmethod
     def _normalize_schema_envelope(data: Any, schema_name: str) -> Any:
         if schema_name == "MalfunctionHazardCandidateList":
+            return data
+        if schema_name in {
+            "ScenarioFeasibilityAssessmentList",
+            "ScenarioFeasibilityAssessmentV2List",
+            "ScenarioRiskFacts",
+        } and isinstance(data, list):
+            # Let the strict envelope validator route a complete direct array
+            # through deterministic wrapping rather than rejecting it here.
             return data
         if schema_name != "GuidewordAssessmentList":
             if not isinstance(data, dict):
@@ -364,6 +366,7 @@ class OpenAICompatibleClient:
             "MalfunctionHazardCandidateList": ("candidates", list),
             "ScenarioFeasibilityAssessmentList": ("assessments", list),
             "ScenarioFeasibilityAssessmentV2List": ("assessments", list),
+            "ScenarioRiskFacts": ("results", list),
         }
         contract = required_envelopes.get(schema_name)
         if contract is None:
@@ -414,7 +417,10 @@ class OpenAICompatibleClient:
         cls, request: LLMRequest, data: Any, exc: BaseException,
     ) -> None:
         keys = sorted(str(key) for key in data)[:20] if isinstance(data, dict) else []
-        expected = "candidates" if request.schema_name == "MalfunctionHazardCandidateList" else "assessments"
+        expected = {
+            "MalfunctionHazardCandidateList": "candidates",
+            "ScenarioRiskFacts": "results",
+        }.get(request.schema_name, "assessments")
         print(
             "[HARA] LLM schema mismatch "
             f"task={request.task}{cls._request_context(request)} "
@@ -425,78 +431,150 @@ class OpenAICompatibleClient:
         )
 
     @staticmethod
-    def _candidate_collection_for_repair(data: Any) -> list[dict[str, Any]] | None:
+    def _is_complete_malfunction_candidate(data: Any) -> bool:
+        if not isinstance(data, dict):
+            return False
+        required = {
+            "malfunction_id", "guideword", "description", "functional_effect",
+            "vehicle_level_hazard", "causal_chain", "confidence", "status",
+        }
+        if not required.issubset(data):
+            return False
+        text_fields = required - {"causal_chain", "confidence"}
+        if any(not isinstance(data[field], str) or not data[field].strip() for field in text_fields):
+            return False
+        if not isinstance(data["causal_chain"], list):
+            return False
+        confidence = data["confidence"]
+        return (
+            not isinstance(confidence, bool)
+            and isinstance(confidence, (int, float))
+            and 0.0 <= float(confidence) <= 1.0
+        )
+
+    @classmethod
+    def _candidate_collection_for_repair(
+        cls, data: Any,
+    ) -> list[dict[str, Any]] | None:
+        if cls._is_complete_malfunction_candidate(data):
+            return [data]
+        if isinstance(data, list):
+            if not data:
+                return []
+            if all(cls._is_complete_malfunction_candidate(item) for item in data):
+                return data
+            return None
         if not isinstance(data, dict):
             return None
         collections = [value for value in data.values() if isinstance(value, list)]
         candidate_collections = [
             value for value in collections
-            if value and all(isinstance(item, dict) for item in value)
-            and all("malfunction_id" in item and "guideword" in item for item in value)
+            if value and all(cls._is_complete_malfunction_candidate(item) for item in value)
         ]
         if len(candidate_collections) == 1:
             return candidate_collections[0]
-        if len(collections) == 1 and not collections[0]:
-            return collections[0]
         return None
 
     @staticmethod
-    def _assessment_collection_for_repair(data: Any) -> list[dict[str, Any]] | None:
-        """Find a plausible assessments-like list in the parsed envelope for repair.
+    def _is_complete_list_item(data: Any, schema_name: str) -> bool:
+        if not isinstance(data, dict):
+            return False
+        if schema_name == "GuidewordAssessmentList":
+            return (
+                isinstance(data.get("guideword"), str)
+                and bool(data["guideword"].strip())
+                and isinstance(data.get("applicable"), bool)
+                and isinstance(data.get("rationale"), str)
+                and bool(data["rationale"].strip())
+                and "confidence" in data
+                and isinstance(data.get("status"), str)
+            )
+        if schema_name in {
+            "ScenarioFeasibilityAssessmentList",
+            "ScenarioFeasibilityAssessmentV2List",
+        }:
+            return (
+                isinstance(data.get("scenario_id"), str)
+                and bool(data["scenario_id"].strip())
+                and all(isinstance(data.get(field), bool) for field in (
+                    "physically_feasible", "functionally_relevant", "causally_relevant",
+                ))
+                and isinstance(data.get("rationale"), str)
+                and "confidence" in data
+            )
+        if schema_name == "ScenarioRiskFacts":
+            identity_complete = all(
+                isinstance(data.get(field), str) and bool(data[field].strip())
+                for field in ("malfunction_id", "scenario_id", "fact_type", "status")
+            )
+            if not identity_complete:
+                return False
+            status = data["status"].upper()
+            if status == "NOT_FOUND":
+                return True
+            return (
+                status == "FOUND"
+                and "value" in data
+                and isinstance(data.get("unit"), str)
+                and isinstance(data.get("evidence_ids"), list)
+            )
+        return False
 
-        Returns a list of dict items if found, otherwise None.
-        """
+    @classmethod
+    def _list_collection_for_repair(
+        cls, data: Any, schema_name: str,
+    ) -> list[dict[str, Any]] | None:
+        if schema_name == "MalfunctionHazardCandidateList":
+            return cls._candidate_collection_for_repair(data)
+        if cls._is_complete_list_item(data, schema_name):
+            return [data]
+        if isinstance(data, list):
+            if not data:
+                return []
+            if all(cls._is_complete_list_item(item, schema_name) for item in data):
+                return data
+            return None
         if not isinstance(data, dict):
             return None
         collections = [value for value in data.values() if isinstance(value, list)]
-        candidate_collections = [
+        candidates = [
             value for value in collections
-            if value and all(isinstance(item, dict) for item in value)
-            and all("guideword" in item and "applicable" in item for item in value)
+            if value and all(cls._is_complete_list_item(item, schema_name) for item in value)
         ]
-        if len(candidate_collections) == 1:
-            return candidate_collections[0]
-        return None
+        return candidates[0] if len(candidates) == 1 else None
 
-    def _repair_schema_envelope_once(
+    def _repair_list_schema_envelope_once(
         self, original_request: LLMRequest, data: Any,
-    ) -> dict[str, Any]:
-        original_candidates = self._candidate_collection_for_repair(data)
-        if original_candidates is None:
-            raise LLMSchemaContractError(
-                "MalfunctionHazardCandidateList schema不匹配且不存在可验证的候选集合；禁止凭空repair"
-            )
+    ) -> dict[str, Any] | None:
+        original_items = self._list_collection_for_repair(
+            data, original_request.schema_name,
+        )
+        if original_items is None:
+            return None
+        envelope_key = {
+            "MalfunctionHazardCandidateList": "candidates",
+            "GuidewordAssessmentList": "assessments",
+            "ScenarioFeasibilityAssessmentList": "assessments",
+            "ScenarioFeasibilityAssessmentV2List": "assessments",
+            "ScenarioRiskFacts": "results",
+        }.get(original_request.schema_name)
+        if envelope_key is None:
+            return None
         context = self._request_context(original_request)
         print(
             "[HARA] schema repair started "
             f"task={original_request.task}{context} "
-            "schema_name=MalfunctionHazardCandidateList expected_key=candidates attempt=1/1",
+            f"schema_name={original_request.schema_name} expected_key={envelope_key} "
+            "mode=deterministic_wrap attempt=1/1",
             file=sys.stderr,
             flush=True,
         )
-        repair_request = LLMRequest(
-            task="repair_schema_envelope",
-            system_prompt=(
-                "你只负责修复JSON顶层结构，不得重新分析、增加、删除或修改任何候选业务字段。"
-                "必须逐项原样保留候选对象，仅包装为顶层candidates数组。"
-            ),
-            user_prompt=(
-                "将以下已解析JSON仅做结构修复。输出必须为JSON object，顶层必须包含"
-                "candidates数组。不得修改malfunction_id、guideword、description、functional_effect、"
-                "vehicle_level_hazard、causal_chain、confidence、status或任何其他候选字段。\n"
-                + json.dumps(data, ensure_ascii=False)
-            ),
-            schema_name="MalfunctionHazardCandidateList",
-            prompt_version="schema-envelope-repair-v1",
-            metadata=dict(original_request.metadata),
-            max_tokens=original_request.max_tokens,
-        )
+        repaired = {envelope_key: original_items}
         try:
-            repaired = self.complete_json(repair_request).data
-            self._validate_schema_envelope(repaired, "MalfunctionHazardCandidateList")
-            if repaired["candidates"] != original_candidates:
+            self._validate_schema_envelope(repaired, original_request.schema_name)
+            if repaired[envelope_key] != original_items:
                 raise LLMSchemaContractError(
-                    "schema repair changed semantic candidates"
+                    "schema repair changed semantic items"
                 )
         except Exception as exc:
             print(
@@ -509,7 +587,8 @@ class OpenAICompatibleClient:
             raise
         print(
             "[HARA] schema repair completed "
-            f"function={original_request.metadata.get('function_id', 'unknown')} attempt=1/1",
+            f"function={original_request.metadata.get('function_id', 'unknown')} "
+            "mode=deterministic_wrap attempt=1/1",
             file=sys.stderr,
             flush=True,
         )
@@ -580,6 +659,8 @@ class OpenAICompatibleClient:
 
     @staticmethod
     def _exception_type(exc: BaseException) -> str:
+        if isinstance(exc, LLMQuotaExceededError):
+            return "quota_exceeded"
         if isinstance(exc, TransientLLMError):
             return exc.category
         if isinstance(exc, http.client.RemoteDisconnected):
@@ -643,8 +724,8 @@ class OpenAICompatibleClient:
     @classmethod
     def _parse_scenario_json_content(
         cls, content: Any, *, request: LLMRequest, finish_reason: str,
-    ) -> tuple[dict[str, Any], bool]:
-        if isinstance(content, dict):
+    ) -> tuple[dict[str, Any] | list[Any], bool]:
+        if isinstance(content, (dict, list)):
             return content, False
         text = str(content or "").strip()
         starts_with_fence = bool(re.match(r"^```(?:json)?\s*(?:\r?\n)?", text, re.IGNORECASE))
@@ -687,9 +768,9 @@ class OpenAICompatibleClient:
                 "Scenario provider response违反machine JSON contract",
                 diagnostics,
             ) from exc
-        if not isinstance(parsed, dict):
+        if not isinstance(parsed, (dict, list)):
             raise LLMJSONContractError(
-                "Scenario JSON顶层必须为object",
+                "Scenario JSON顶层必须为object或可验证的assessment array",
                 {
                     "task": request.task, "schema_name": request.schema_name,
                     "finish_reason": finish_reason, "content_chars": len(text),
@@ -732,6 +813,38 @@ class OpenAICompatibleClient:
         return value
 
     @staticmethod
+    def _quota_error(detail: str) -> LLMQuotaExceededError | None:
+        """Recognize quota exhaustion without making ordinary 429s permanent."""
+        try:
+            payload = json.loads(detail)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return None
+        provider_code = str(error.get("code") or "").strip()
+        provider_message = str(error.get("message") or "").strip()
+        normalized_code = re.sub(r"[^a-z0-9]", "", provider_code.lower())
+        quota_codes = {
+            "accountquotaexceeded",
+            "insufficientquota",
+            "quotaexceeded",
+        }
+        weekly_quota_message = "exceeded the weekly usage quota" in provider_message.lower()
+        if normalized_code not in quota_codes and not weekly_quota_message:
+            return None
+        reset_match = re.search(
+            r"\breset\s+at\s+(.+?)(?=\.\s+(?:We\b|Please\b)|$)",
+            provider_message,
+            flags=re.IGNORECASE,
+        )
+        reset_at = reset_match.group(1).strip() if reset_match else ""
+        return LLMQuotaExceededError(
+            provider_code=provider_code or "quota_exceeded",
+            reset_at=reset_at,
+        )
+
+    @staticmethod
     def _http_transport(url: str, headers: dict[str, str], body: bytes,
                         timeout: float) -> dict[str, Any]:
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -755,6 +868,9 @@ class OpenAICompatibleClient:
                 payload = b"".join(chunks).decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            quota_error = OpenAICompatibleClient._quota_error(detail) if exc.code == 429 else None
+            if quota_error is not None:
+                raise quota_error from exc
             if exc.code == 429 or 500 <= exc.code < 600:
                 raise TransientLLMError(
                     f"LLM HTTP暂时错误 {exc.code}: {detail[:240]}",

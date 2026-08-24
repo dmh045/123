@@ -196,10 +196,14 @@ def test_application_fails_closed_without_or_with_unknown_structured_mode():
         HARAApplication(_config(operating_mode=None), object()).resolve_project_speed_context(
             _state(_facts())
         )
-    with pytest.raises(UnresolvedProjectContextError):
+    with pytest.raises(UnresolvedProjectContextError) as captured:
         HARAApplication(_config(operating_mode="highway"), object()).resolve_project_speed_context(
             _state(_facts())
         )
+    assert "available_speed_envelope_modes=['control', 'parking', 'search']" in str(
+        captured.value
+    )
+    assert "declared_operating_modes=['parking']" in str(captured.value)
 
 
 def test_application_aggregate_fallback_requires_explicit_authorization():

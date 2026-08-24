@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from hara_agent.contracts import ScenarioCausalAssessment
 from hara_agent.models import (
     EvidenceValue, ItemDefinitionFacts, ReviewStatus, RiskAssessment, SourceRef,
 )
@@ -70,6 +71,31 @@ def _scoring_evidence(result: dict[str, Any], value_key: str) -> EvidenceValue[s
     )
 
 
+def _validated_causal_assessment(value: dict[str, Any]) -> ScenarioCausalAssessment:
+    payload = value.get("causal_assessment")
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Scenario scoring requires a typed causal_assessment; legacy flags are not authoritative"
+        )
+    try:
+        assessment = ScenarioCausalAssessment.from_dict(payload)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Scenario causal_assessment failed deterministic validation") from error
+    dimensions = [item.dimension for item in assessment.risk_dimension_changes]
+    consistent = all((
+        assessment.scenario_id == str(value.get("scenario_id", "")),
+        assessment.is_validated is (value.get("causally_relevant") is True),
+        assessment.breakpoint is not None,
+        assessment.breakpoint.value == str(value.get("breakpoint", "")),
+        dimensions == list(value.get("risk_dimensions_changed", [])),
+        assessment.hazardous_event == str(value.get("hazardous_event", "")),
+        assessment.potential_harm == str(value.get("potential_harm", "")),
+    ))
+    if not consistent:
+        raise ValueError("Scenario causal_assessment conflicts with compatibility fields")
+    return assessment
+
+
 def score_structured_scenarios(
     state: HARAState,
     scoring: ScenarioScoringService,
@@ -82,11 +108,16 @@ def score_structured_scenarios(
         state.malfunctions, lambda item: str(item.get("malfunction_id", "")), "Malfunction",
     )
     assessments = state.item_definition.get("scenario_assessments", [])
-    retained = [item for item in assessments if all((
+    typed_assessments = [
+        (item, _validated_causal_assessment(item)) for item in assessments
+    ]
+    retained = [(item, causal) for item, causal in typed_assessments if all((
+        item.get("status") == ReviewStatus.FINALIZED.value,
+        causal.review_status is ReviewStatus.FINALIZED,
         item.get("physically_feasible") is True,
         item.get("functionally_relevant") is True,
-        item.get("causally_relevant") is True,
-        bool(item.get("risk_dimensions_changed")),
+        causal.is_validated,
+        bool(causal.risk_dimension_changes),
     ))]
     risks: list[RiskAssessment] = []
     pending: list[dict[str, Any]] = []
@@ -96,7 +127,7 @@ def score_structured_scenarios(
         if risk_fact_binding is not None else None
     )
 
-    for index, assessment in enumerate(retained, start=1):
+    for index, (assessment, causal_assessment) in enumerate(retained, start=1):
         scenario_id = str(assessment.get("scenario_id", ""))
         malfunction_id = str(assessment.get("malfunction_id", ""))
         if scenario_id not in scenario_by_id or malfunction_id not in malfunction_by_id:
@@ -122,8 +153,8 @@ def score_structured_scenarios(
                 "scenario_id": scenario_id,
                 **binding.audit,
             })
-        hazard_event = str(assessment.get("hazardous_event", ""))
-        potential_harm = str(assessment.get("potential_harm", ""))
+        hazard_event = causal_assessment.hazardous_event
+        potential_harm = causal_assessment.potential_harm
         if not hazard_event or not potential_harm:
             raise ValueError(
                 f"保留场景缺少Hazardous Event/Potential Harm: {malfunction_id}/{scenario_id}"

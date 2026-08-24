@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 from .common import ReviewStatus, SourceRef
+
+if TYPE_CHECKING:
+    from hara_agent.contracts.scenario_causal_assessment import ScenarioCausalAssessment
 
 
 @dataclass
@@ -52,14 +56,18 @@ class ScenarioFeasibilityAssessment:
     causal_chain: dict[str, Any] = field(default_factory=dict)
     risk_dimension_changes: list[dict[str, Any]] = field(default_factory=list)
     evidence_contract_version: str = ""
+    causal_assessment: "ScenarioCausalAssessment | None" = None
 
     @property
     def retain(self) -> bool:
-        return (
+        legacy_result = (
             self.physically_feasible
             and self.functionally_relevant
             and self.causally_relevant
             and bool(self.risk_dimensions_changed)
+        )
+        return legacy_result and (
+            self.causal_assessment is None or self.causal_assessment.is_validated
         )
 
     def __post_init__(self):
@@ -69,3 +77,27 @@ class ScenarioFeasibilityAssessment:
             raise ValueError("保留场景必须给出Hazardous Event和Potential Harm")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("Scenario confidence必须在0到1之间")
+        if self.causal_assessment is not None:
+            if self.causal_assessment.scenario_id != self.scenario_id:
+                raise ValueError("Scenario causal assessment ID不一致")
+            if self.causally_relevant and not self.causal_assessment.is_validated:
+                raise ValueError("正向因果结论必须具有VALIDATED causal assessment")
+            if self.breakpoint != self.causal_assessment.breakpoint.value:
+                raise ValueError("Scenario breakpoint与typed causal assessment不一致")
+
+    def to_dict(self) -> dict[str, Any]:
+        result = asdict(self)
+        result["status"] = self.status.value
+        if self.causal_assessment is not None:
+            result["causal_assessment"] = self.causal_assessment.to_dict()
+        return self._serialize(result)
+
+    @classmethod
+    def _serialize(cls, value: Any) -> Any:
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {key: cls._serialize(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._serialize(item) for item in value]
+        return value

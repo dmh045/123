@@ -135,6 +135,9 @@ class HARAApplication:
                 item_path=self.config.item_path,
                 guidewords=guidewords,
                 scenario_candidate_factory=prepare_candidates,
+                project_context_preflight=(
+                    lambda state: self.resolve_project_speed_context(state).to_dict()
+                ),
                 max_workers=self.config.max_workers,
                 progress=report_batch,
                 stage_progress=report_stage,

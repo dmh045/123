@@ -60,7 +60,7 @@ def test_current_template_compiles_full_method_contract():
     assert len(method.controllability.criteria) == 4
     assert len(method.controllability.examples) == 11
     assert len(method.asil.mappings) == 80
-    assert len(method.required_fact_specs) == 8
+    assert len(method.required_fact_specs) == 9
     assert len(method.report_contract.hara_fields) == 21
     assert len(method.report_contract.safety_goal_fields) == 6
     assert method.scenario_model.source_type == "METHOD_SCENARIO_ONTOLOGY"

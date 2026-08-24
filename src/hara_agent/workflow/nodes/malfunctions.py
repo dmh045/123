@@ -63,9 +63,17 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         for reason in ("no_applicable_guidewords", "no_complete_applicable_guidewords")
     }
     llm_called = sum(not audit.get("skipped", False) for audit in audits)
+    coverage_repairs = sum(
+        int(audit.get("coverage_repair_count", 0)) for audit in audits
+    )
+    actual_llm_calls = sum(
+        int(audit.get("llm_call_count", int(not audit.get("skipped", False))))
+        for audit in audits
+    )
     print(
         "[HARA] malfunction derivation summary "
         f"functions={len(functions)} llm_called={llm_called} "
+        f"actual_llm_calls={actual_llm_calls} coverage_repairs={coverage_repairs} "
         f"skipped_no_applicable={skip_reasons['no_applicable_guidewords']} "
         f"skipped_incomplete={skip_reasons['no_complete_applicable_guidewords']} "
         f"candidate_count={len(candidates)}",
@@ -76,6 +84,8 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         "malfunction_derivation_summary",
         function_count=len(functions),
         llm_called=llm_called,
+        actual_llm_calls=actual_llm_calls,
+        coverage_repair_count=coverage_repairs,
         skipped_no_applicable=skip_reasons["no_applicable_guidewords"],
         skipped_incomplete=skip_reasons["no_complete_applicable_guidewords"],
         candidate_count=len(candidates),

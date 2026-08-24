@@ -98,7 +98,11 @@ class ScenarioEvaluationHarness:
                 {
                     "scenario_id": item.scenario_id,
                     "semantic_fingerprint": item.semantic_fingerprint,
-                    **asdict(item.result),
+                    **(
+                        item.result.to_dict()
+                        if hasattr(item.result, "to_dict")
+                        else asdict(item.result)
+                    ),
                 }
                 for item in attempts if item.valid
             ],

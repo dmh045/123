@@ -24,7 +24,7 @@ from hara_agent.workflow.state import HARAState, WorkflowStage
 from .parallel import ordered_parallel_map
 
 
-ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v5-method-driven-project-facts"
+ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v6-approved-item-input"
 
 
 def _facts_from_dict(value: dict) -> ItemDefinitionFacts:
@@ -94,7 +94,7 @@ def _merge_supplements(
         if warning:
             warnings.append(warning)
 
-    return replace(facts, **values, status=ReviewStatus.PENDING), warnings
+    return replace(facts, **values), warnings
 
 
 def _merge_targeted_project_facts(
@@ -329,6 +329,13 @@ def extract_item_artifacts(
                 targeted_audits.append(audit)
             cache_save_elapsed += targeted_save_elapsed[0]
         facts = _merge_targeted_project_facts(facts, targeted_payloads)
+    # Approved input is accepted after bounded normalization.  Missing core
+    # facts and degraded repairs remain fail-closed at the specific boundary.
+    facts.status = (
+        ReviewStatus.FINALIZED
+        if not _missing_core_fields(facts) and not merge_warnings
+        else ReviewStatus.PENDING
+    )
     total_elapsed = time.monotonic() - stage_started
     supplement_elapsed = {
         audit["task"].removeprefix("supplement_"): audit.get("elapsed_seconds", 0.0)
@@ -396,14 +403,24 @@ def extract_item_artifacts(
         cache_key=cache_key,
     )
 
-    state.pending_reviews.append({
-        "field": "item_definition",
-        "reason": "Item Definition/ODD语义抽取尚未完成工程确认",
-    })
-    if functions:
+    if facts.status is ReviewStatus.PENDING:
+        state.pending_reviews.append({
+            "field": "item_definition",
+            "reason": (
+                "Approved Item Definition could not be normalized completely; "
+                f"missing={_missing_core_fields(facts)} warnings={merge_warnings}"
+            ),
+        })
+    pending_functions = [
+        item for item in functions if item.status is ReviewStatus.PENDING
+    ]
+    if pending_functions:
         state.pending_reviews.append({
             "field": "functions",
-            "reason": f"{len(functions)}个Function候选尚未完成工程确认",
+            "reason": (
+                f"{len(pending_functions)} Function candidates did not pass "
+                "schema/role/source validation"
+            ),
         })
     state.stage = WorkflowStage.FUNCTIONS
     return state

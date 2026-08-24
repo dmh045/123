@@ -136,7 +136,7 @@ class FullTemplateCompiler:
                     )
                 )
 
-        required_facts = self._derive_required_facts(all_rules, workflow)
+        required_facts = self._derive_required_facts(all_rules, workflow, exposure)
         core_complete = all(
             (
                 guidewords.guidewords,
@@ -1337,7 +1337,10 @@ class FullTemplateCompiler:
         )
 
     def _derive_required_facts(
-        self, rules: tuple[CompiledRule, ...], workflow: WorkflowContract
+        self,
+        rules: tuple[CompiledRule, ...],
+        workflow: WorkflowContract,
+        exposure: ExposureContract,
     ) -> tuple[RequiredFactSpec, ...]:
         by_fact: dict[FactType, list[tuple[CompiledRule, object]]] = {}
         for rule in rules:
@@ -1379,6 +1382,29 @@ class FullTemplateCompiler:
                     source_refs=source_refs,
                 )
             )
+        if exposure.duration_rules and exposure.frequency_rules:
+            selector_sources = unique_sources([
+                source
+                for rule in (*exposure.duration_rules, *exposure.frequency_rules)
+                for source in rule.source_refs
+            ])
+            selector_rule_ids = tuple(
+                rule.rule_id
+                for rule in (*exposure.duration_rules, *exposure.frequency_rules)
+            )
+            specs.append(RequiredFactSpec(
+                fact_type=FactType.EXPOSURE,
+                required_for=("EXPOSURE_METHOD_SELECTION",),
+                unit="",
+                constraints=("EXPOSURE IN ('T', 'F')",),
+                condition=(
+                    "Required when the compiled MethodContract contains both "
+                    "duration and frequency exposure rule families."
+                ),
+                origin=FactOrigin.PROJECT_FACT,
+                source_rule_ids=selector_rule_ids,
+                source_refs=selector_sources,
+            ))
         for fact, activity in (
             (FactType.FUNCTION, "FUNCTION_EXTRACTION"),
             (FactType.OUTPUT, "FUNCTION_EXTRACTION"),

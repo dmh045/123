@@ -1,0 +1,32 @@
+{
+  "benchmark_version": "synthetic-hara-benchmark-v1",
+  "classification": "EVALUATION_ONLY",
+  "scenario": {
+    "scenario_count": 1,
+    "causal_validation_rate": 1.0,
+    "causal_gap_rate": 0.0,
+    "unsupported_chain_rate": 0.0
+  },
+  "evidence": {
+    "edge_evidence_coverage": 1.0,
+    "missing_evidence_rate": 0.0
+  },
+  "risk": {
+    "risk_count": 1,
+    "severity_completed": 1,
+    "exposure_completed": 1,
+    "controllability_completed": 1,
+    "ASIL_generated": 1
+  },
+  "release": {
+    "ready_for_draft": true,
+    "ready_for_release": false,
+    "blocked_reason": [
+      "PROJECT_FACTS_PENDING_APPROVAL",
+      "SCENARIO_CAUSAL_ASSESSMENT_PENDING_APPROVAL",
+      "RISK_ASSESSMENT_PENDING_APPROVAL",
+      "SAFETY_GOAL_PENDING_APPROVAL",
+      "PENDING_ENGINEERING_REVIEW"
+    ]
+  }
+}

@@ -253,6 +253,16 @@ class MethodScenarioCandidateService:
                 )
                 for item in dimensions
             ]
+            fact_provenance["operating_mode"] = self._fact_metadata(
+                FactProvenance.PROJECT_INPUT,
+                project_facts.status,
+                project_sources,
+            )
+            fact_provenance["method_scenario_dimensions"] = self._fact_metadata(
+                FactProvenance.DERIVED,
+                ReviewStatus.FINALIZED if finalized else ReviewStatus.PENDING,
+                [*project_sources, *method_sources],
+            )
             candidates.append(ScenarioCandidate(
                 scenario_id=scenario_id,
                 operating_scenario=facts.get("operating_scenario", operating_mode),

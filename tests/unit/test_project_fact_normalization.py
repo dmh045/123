@@ -1,4 +1,4 @@
-from hara_agent.models import ProjectFactOutputType
+from hara_agent.models import ProjectFactOutputType, ReviewStatus
 from hara_agent.services.extraction import (
     ProjectFactNormalizer, RequiredProjectFactSpec,
 )
@@ -42,6 +42,10 @@ def test_mode_speed_facts_are_atomic_and_source_grounded():
         ("search", 30), ("control", 7), ("maneuver", 5),
     ]
     assert result.speed_envelopes[-1].sources[0].location == "row[2]"
+    assert all(
+        item.status is ReviewStatus.FINALIZED
+        for item in result.speed_envelopes
+    )
 
 
 def test_unknown_or_support_only_sources_fail_closed():

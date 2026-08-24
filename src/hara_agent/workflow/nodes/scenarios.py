@@ -40,9 +40,12 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         assessments.extend(items)
         audits.append(audit)
         state.record("scenario_feasibility_assessed", **audit)
-    retained_ids = {item.scenario_id for item in assessments if item.retain}
+    retained_ids = {
+        item.scenario_id for item in assessments
+        if item.retain and item.status.value == "FINALIZED"
+    }
     state.scenarios = [item for item in candidates if item.scenario_id in retained_ids]
-    serialized_assessments = [asdict(item) for item in assessments]
+    serialized_assessments = [item.to_dict() for item in assessments]
     state.item_definition["scenario_assessments"] = serialized_assessments
     if risk_fact_agent is not None:
         risk_facts, risk_fact_audit = risk_fact_agent.interpret(
@@ -81,11 +84,16 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
             ]
             typed_facts.risk_facts.extend(risk_facts)
             state.item_definition["typed"] = asdict(typed_facts)
-        if risk_facts:
+        pending_risk_facts = [
+            item for item in risk_facts
+            if item.approval.value == "PENDING"
+        ]
+        if pending_risk_facts:
             state.pending_reviews.append({
                 "field": "scenario_risk_facts",
                 "reason": (
-                    f"{len(risk_facts)} evidence-grounded scenario facts require engineering approval"
+                    f"{len(pending_risk_facts)} scenario facts did not pass "
+                    "bounded evidence validation"
                 ),
             })
         state.record(

@@ -56,6 +56,7 @@ class SemanticWorkflowInputs:
     guidewords: list[str]
     scenario_candidates: list[ScenarioCandidate] = field(default_factory=list)
     scenario_candidate_factory: Callable[[HARAState], tuple[list[ScenarioCandidate], dict]] | None = None
+    project_context_preflight: Callable[[HARAState], dict] | None = None
     max_workers: int = 4
     progress: Callable[[str, int, int], None] | None = None
     stage_progress: Callable[[str, str, float], None] | None = None
@@ -121,6 +122,24 @@ def _scenario_candidates(state: HARAState, inputs: SemanticWorkflowInputs) -> li
     return candidates
 
 
+def _assess_guidewords_after_project_context_preflight(
+    state: HARAState,
+    inputs: SemanticWorkflowInputs,
+    agents: SemanticWorkflowAgents,
+) -> HARAState:
+    if inputs.project_context_preflight is not None:
+        audit = inputs.project_context_preflight(state)
+        state.record("project_context_preflight_passed", **audit)
+    return assess_guidewords(
+        state,
+        agents.guidewords,
+        [_function(value) for value in state.functions],
+        inputs.guidewords,
+        max_workers=inputs.max_workers,
+        progress=inputs.progress,
+    )
+
+
 def build_semantic_frontend_graph(
     inputs: SemanticWorkflowInputs,
     agents: SemanticWorkflowAgents,
@@ -151,13 +170,8 @@ def build_semantic_frontend_graph(
     )
     graph.add_node(
         WorkflowStage.FUNCTIONS,
-        lambda state: assess_guidewords(
-            state,
-            agents.guidewords,
-            [_function(value) for value in state.functions],
-            inputs.guidewords,
-            max_workers=inputs.max_workers,
-            progress=inputs.progress,
+        lambda state: _assess_guidewords_after_project_context_preflight(
+            state, inputs, agents,
         ),
     )
     graph.add_node(

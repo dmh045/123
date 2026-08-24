@@ -15,6 +15,14 @@ from .method_contract import (
     ScaleLevel, ScenarioDimension, ScenarioModel, SeverityContract, SeverityScale,
     SourceRef, WorkflowContract, WorkflowStep, unique_sources,
 )
+from .causal_graph import (
+    CausalEdge, CausalGraph, CausalNode, CausalNodeType, CausalRelation,
+)
+from .evidence_binding import EvidenceBinding
+from .scenario_causal_assessment import (
+    SCENARIO_CAUSAL_ASSESSMENT_VERSION, CausalAssessmentStatus,
+    CausalBreakpoint, RiskDimensionChange, ScenarioCausalAssessment,
+)
 
 __all__ = [
     "METHOD_CONTRACT_VERSION",
@@ -32,4 +40,8 @@ __all__ = [
     "ReportFieldMapping", "RequiredFactSpec", "RuleType", "ScaleLevel",
     "ScenarioDimension", "ScenarioModel", "SeverityContract", "SeverityScale",
     "SourceRef", "WorkflowContract", "WorkflowStep", "unique_sources",
+    "CausalEdge", "CausalGraph", "CausalNode", "CausalNodeType",
+    "CausalRelation", "EvidenceBinding", "SCENARIO_CAUSAL_ASSESSMENT_VERSION",
+    "CausalAssessmentStatus", "CausalBreakpoint", "RiskDimensionChange",
+    "ScenarioCausalAssessment",
 ]

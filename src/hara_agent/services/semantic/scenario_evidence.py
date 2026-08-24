@@ -4,6 +4,14 @@ import re
 from enum import Enum
 from typing import Any
 
+from hara_agent.contracts.causal_graph import (
+    CausalEdge, CausalGraph, CausalNode, CausalNodeType, CausalRelation,
+)
+from hara_agent.contracts.evidence_binding import EvidenceBinding
+from hara_agent.contracts.scenario_causal_assessment import (
+    SCENARIO_CAUSAL_ASSESSMENT_VERSION, CausalBreakpoint,
+    RiskDimensionChange, ScenarioCausalAssessment,
+)
 from hara_agent.models import (
     EvidenceKind, EvidenceRecord, FactProvenance, MalfunctionCandidate,
     ReviewStatus, ScenarioCandidate, SourceRef,
@@ -12,20 +20,12 @@ from hara_agent.models import (
 from .scenario_contract import RISK_DIMENSION_VALUES, SCENARIO_CONTRACT_VERSION
 
 
-SCENARIO_ASSESSMENT_CONTRACT_VERSION = "scenario-evidence-v1"
+SCENARIO_ASSESSMENT_CONTRACT_VERSION = SCENARIO_CAUSAL_ASSESSMENT_VERSION
 
 
 # v1 hop basis values and Registry evidence kinds intentionally share values,
 # while kind and provenance remain separate axes.
 EvidenceBasisType = EvidenceKind
-
-
-class CausalBreakpoint(str, Enum):
-    M_TO_B = "M_TO_B"
-    B_TO_I = "B_TO_I"
-    I_TO_H = "I_TO_H"
-    H_TO_HARM = "H_TO_HARM"
-    NONE = "NONE"
 
 
 class DerivedPhysicsType(str, Enum):
@@ -166,7 +166,7 @@ def build_fact_registry(
     if project_registry is not None:
         registry.extend(project_registry.records)
     malfunction_provenance = (
-        FactProvenance.PROJECT_INPUT
+        FactProvenance.DERIVED
         if malfunction.sources else FactProvenance.LLM_INFERENCE
     )
     for name, value in (
@@ -205,13 +205,31 @@ def build_fact_registry(
     distance_m = _distance_m(scenario.facts.get("relative_distance"))
     relative_speed = scenario.facts.get("relative_speed_kph")
     if distance_m is not None and isinstance(relative_speed, (int, float)) and relative_speed > 0:
+        input_records = [
+            registry.resolve_record("SCN.relative_distance"),
+            registry.resolve_record("SCN.relative_speed_kph"),
+        ]
+        derived_sources = tuple(dict.fromkeys(
+            source
+            for record in input_records if record is not None
+            for source in record.source_refs
+        ))
+        derived_status = (
+            ReviewStatus.FINALIZED
+            if all(
+                record is not None
+                and record.approval_status is ReviewStatus.FINALIZED
+                for record in input_records
+            )
+            else ReviewStatus.PENDING
+        )
         registry.register(EvidenceRecord(
             "DERIVED.ttc_s",
             round(distance_m / (float(relative_speed) / 3.6), 6),
             EvidenceKind.DERIVED_PHYSICS,
             FactProvenance.DERIVED,
-            ReviewStatus.PENDING,
-            (),
+            derived_status,
+            derived_sources,
             {
                 "derivation_type": DerivedPhysicsType.TTC.value,
                 "inputs": ["SCN.relative_distance", "SCN.relative_speed_kph"],
@@ -255,10 +273,15 @@ def validate_evidence_contract(
 
     chain = item.get("causal_chain")
     if not isinstance(chain, dict):
+        shape = (
+            f"list_length={len(chain)}"
+            if isinstance(chain, list)
+            else f"actual_type={type(chain).__name__}"
+        )
         raise _error(malfunction, scenario, prompt_version, batch, split_path, split_depth,
                      code=ScenarioEvidenceErrorCode.INVALID_CAUSAL_CHAIN_SHAPE,
                      hop="causal_chain", claim="", basis_type="", invalid_refs=[],
-                     reason="causal_chain must be object")
+                     reason=f"causal_chain must be object; {shape}")
     hop_names = ("m_to_b", "b_to_i", "i_to_h", "h_to_harm")
     breakpoint_index = {
         CausalBreakpoint.M_TO_B: 0, CausalBreakpoint.B_TO_I: 1,
@@ -391,6 +414,170 @@ def validate_evidence_contract(
                      hop="risk_dimension_changes", claim="", basis_type="", invalid_refs=[],
                      reason="causal=true requires dimension evidence")
     return dimensions, {"assumption_hop_count": assumption_hops}
+
+
+def compile_causal_assessment(
+    *,
+    malfunction: MalfunctionCandidate,
+    scenario: ScenarioCandidate,
+    item: dict[str, Any],
+    registry: FactRegistry,
+) -> ScenarioCausalAssessment:
+    """Compile an already schema/evidence-validated Provider payload to the typed contract."""
+
+    chain = item["causal_chain"]
+    node_specs = (
+        (
+            "malfunction", CausalNodeType.MALFUNCTION,
+            malfunction.description, ("MF.description",),
+        ),
+        (
+            "behavior", CausalNodeType.SYSTEM_BEHAVIOR_CHANGE,
+            malfunction.functional_effect or chain["m_to_b"]["claim"],
+            tuple(chain["m_to_b"].get("evidence_refs", [])),
+        ),
+        (
+            "consequence", CausalNodeType.OPERATIONAL_CONSEQUENCE,
+            str(chain.get("b_to_i", {}).get("claim", "")),
+            tuple(chain.get("b_to_i", {}).get("evidence_refs", [])),
+        ),
+        (
+            "hazard", CausalNodeType.HAZARD,
+            str(item.get("hazardous_event", "")).strip()
+            or str(chain.get("i_to_h", {}).get("claim", "")),
+            tuple(chain.get("i_to_h", {}).get("evidence_refs", [])),
+        ),
+        (
+            "harm", CausalNodeType.HARM,
+            str(item.get("potential_harm", "")).strip()
+            or str(chain.get("h_to_harm", {}).get("claim", "")),
+            tuple(chain.get("h_to_harm", {}).get("evidence_refs", [])),
+        ),
+    )
+    hop_specs = (
+        ("m_to_b", "malfunction", "behavior"),
+        ("b_to_i", "behavior", "consequence"),
+        ("i_to_h", "consequence", "hazard"),
+        ("h_to_harm", "hazard", "harm"),
+    )
+    present_hops = [name for name, _, _ in hop_specs if isinstance(chain.get(name), dict)]
+    required_node_names = {"malfunction"}
+    for name, source, target in hop_specs:
+        if name in present_hops:
+            required_node_names.update((source, target))
+    node_id = {
+        name: f"{scenario.scenario_id}:{malfunction.malfunction_id}:{name}"
+        for name, *_ in node_specs
+    }
+    nodes = tuple(
+        CausalNode(node_id[name], node_type, description, provenance)
+        for name, node_type, description, provenance in node_specs
+        if name in required_node_names and description.strip()
+    )
+    available_nodes = {item.node_id for item in nodes}
+    edges: list[CausalEdge] = []
+    bindings: list[EvidenceBinding] = []
+    unsupported: list[str] = []
+    all_refs: list[str] = []
+    for name, source, target in hop_specs:
+        hop = chain.get(name)
+        if not isinstance(hop, dict):
+            continue
+        source_id, target_id = node_id[source], node_id[target]
+        if source_id not in available_nodes or target_id not in available_nodes:
+            continue
+        refs = tuple(str(value) for value in hop.get("evidence_refs", []))
+        basis = EvidenceKind(hop["basis_type"])
+        edge_id = name.upper()
+        edges.append(CausalEdge(
+            edge_id=edge_id,
+            source=source_id,
+            target=target_id,
+            relation=CausalRelation.CAUSES,
+            description=str(hop["claim"]),
+            evidence_refs=refs,
+        ))
+        source_refs: list[SourceRef] = []
+        resolved_records = []
+        for evidence_ref in refs:
+            record = registry.resolve_record(evidence_ref)
+            if record is not None:
+                resolved_records.append(record)
+                for source_ref in record.source_refs:
+                    if source_ref not in source_refs:
+                        source_refs.append(source_ref)
+        binding_status = (
+            ReviewStatus.FINALIZED
+            if (
+                basis is EvidenceKind.ASSUMPTION
+                or (
+                    bool(refs)
+                    and len(resolved_records) == len(refs)
+                    and all(
+                        record.approval_status is ReviewStatus.FINALIZED
+                        and bool(record.source_refs)
+                        for record in resolved_records
+                    )
+                )
+            )
+            else ReviewStatus.PENDING
+        )
+        bindings.append(EvidenceBinding(
+            edge_id=edge_id,
+            evidence_refs=refs,
+            basis_type=basis,
+            source_refs=tuple(source_refs),
+            status=binding_status,
+        ))
+        all_refs.extend(refs)
+        if basis is EvidenceKind.ASSUMPTION:
+            unsupported.append(edge_id)
+    breakpoint = CausalBreakpoint(item["breakpoint"])
+    if breakpoint is not CausalBreakpoint.NONE:
+        breakpoint_edge = breakpoint.value
+        if breakpoint_edge not in unsupported:
+            unsupported.append(breakpoint_edge)
+    ordered_nodes = tuple(
+        node_id[name] for name, *_ in node_specs if node_id[name] in available_nodes
+    )
+    changes = tuple(RiskDimensionChange(
+        dimension=str(value["dimension"]),
+        evidence_refs=tuple(str(item) for item in value["evidence_refs"]),
+        reason=str(value["reason"]),
+    ) for value in item["risk_dimension_changes"])
+    change_records = [
+        registry.resolve_record(evidence_ref)
+        for change in changes
+        for evidence_ref in change.evidence_refs
+    ]
+    review_status = (
+        ReviewStatus.FINALIZED
+        if (
+            malfunction.status is ReviewStatus.FINALIZED
+            and scenario.status is ReviewStatus.FINALIZED
+            and all(item.status is ReviewStatus.FINALIZED for item in bindings)
+            and all(
+                record is not None
+                and record.approval_status is ReviewStatus.FINALIZED
+                and bool(record.source_refs)
+                for record in change_records
+            )
+        )
+        else ReviewStatus.PENDING
+    )
+    return ScenarioCausalAssessment(
+        scenario_id=scenario.scenario_id,
+        causal_graph=CausalGraph(nodes=nodes, edges=tuple(edges)),
+        causal_chain=ordered_nodes,
+        breakpoint=breakpoint,
+        evidence_bindings=tuple(bindings),
+        unsupported_links=tuple(unsupported),
+        risk_dimension_changes=changes,
+        hazardous_event=str(item.get("hazardous_event", "")).strip(),
+        potential_harm=str(item.get("potential_harm", "")).strip(),
+        provenance=tuple(dict.fromkeys(all_refs)),
+        review_status=review_status,
+    )
 
 
 def _error(malfunction, scenario, prompt_version, batch, split_path, split_depth,

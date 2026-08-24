@@ -1,0 +1,12 @@
+[
+  {"name":"complete_chain_primary","category":"normal","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","expected_status":"VALIDATED"},
+  {"name":"complete_chain_alternate","category":"complex_chain","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","expected_status":"VALIDATED"},
+  {"name":"missing_first_edge_evidence","category":"insufficient_evidence","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","missing_evidence_edge":0,"expected_status":"PENDING_CAUSAL_EVIDENCE"},
+  {"name":"missing_last_edge_evidence","category":"insufficient_evidence","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","missing_evidence_edge":3,"expected_status":"PENDING_CAUSAL_EVIDENCE"},
+  {"name":"missing_breakpoint","category":"missing_breakpoint","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":null,"expected_status":"PENDING_BREAKPOINT"},
+  {"name":"direct_malfunction_to_harm","category":"causal_attack","node_types":["MALFUNCTION","HARM"],"breakpoint":"NONE","expected_status":"CAUSAL_GAP"},
+  {"name":"missing_behavior_change","category":"causal_gap","node_types":["MALFUNCTION","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","expected_status":"CAUSAL_GAP"},
+  {"name":"missing_operational_consequence","category":"causal_gap","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","HAZARD","HARM"],"breakpoint":"NONE","expected_status":"CAUSAL_GAP"},
+  {"name":"unsupported_assumption","category":"prompt_injection","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","assumption_edge":2,"expected_status":"CAUSAL_GAP"},
+  {"name":"rejected_evidence_binding","category":"rejected_evidence","node_types":["MALFUNCTION","SYSTEM_BEHAVIOR_CHANGE","OPERATIONAL_CONSEQUENCE","HAZARD","HARM"],"breakpoint":"NONE","rejected_binding_edge":1,"expected_status":"PENDING_CAUSAL_EVIDENCE"}
+]

@@ -18,7 +18,7 @@ from .parsing import CONFIDENCE_PROMPT_CONTRACT
 class ItemArtifactExtractionAgent:
     """Extract core Item facts and Functions once from the full document."""
 
-    PROMPT_VERSION = "item-artifacts-v2"
+    PROMPT_VERSION = "item-artifacts-v3-exact-source"
     SYSTEM_PROMPT = """你是汽车功能安全HARA的相关项定义抽取Agent。只提取文档明确陈述的事实。
 一次返回核心Item Definition和车辆级Functions。不得把标题、条件、步骤、后果或质量要求识别为Function；
 不得用常识补写ODD、速度或功能。复杂的性能、驾驶员控制和Exposure证据由后续局部抽取处理，本次不要展开。
@@ -27,6 +27,31 @@ class ItemArtifactExtractionAgent:
     def __init__(self, client: LLMClient, validator: FunctionValidator | None = None):
         self.client = client
         self.validator = validator or FunctionValidator()
+
+    @staticmethod
+    def _ensure_source_grounded(
+        facts: ItemDefinitionFacts,
+        functions: list[FunctionDefinition],
+        document_text: str,
+    ) -> None:
+        """Require exact evidence from the approved Item Definition input."""
+
+        records = [("item_definition", facts.sources)] + [
+            (function.function_id, function.sources) for function in functions
+        ]
+        for identity, sources in records:
+            if not sources:
+                raise ValueError(f"{identity} missing Item Definition SourceRef")
+            for source in sources:
+                excerpt = source.excerpt.strip()
+                if source.source_type != "item_definition":
+                    raise ValueError(f"{identity} has non-Item source authority")
+                if not source.location.strip() or not excerpt:
+                    raise ValueError(f"{identity} has incomplete Item Definition SourceRef")
+                if excerpt not in document_text:
+                    raise ValueError(
+                        f"{identity} source excerpt is not present in Item Definition"
+                    )
 
     def extract(
         self, document_text: str, source_id: str,
@@ -50,7 +75,8 @@ class ItemArtifactExtractionAgent:
                 "weather_conditions、road_surfaces、speed_range_kph。functions每项包含function_id、name、"
                 "output、description、preconditions、triggers、odd_constraints、fallback_behavior、"
                 "consequences、source_location、source_excerpt、confidence、status。最多20个Function；"
-                "每项列表最多10条，所有source_excerpt最多120字符。不得输出Markdown、解释或额外字段。\n\n"
+                "每项列表最多10条，所有source_excerpt最多120字符，且必须是输入原文中连续、逐字相同的摘录。"
+                "不得省略、改写或使用省略号。不得输出Markdown、解释或额外字段。\n\n"
                 + CONFIDENCE_PROMPT_CONTRACT + "\n"
                 + document_text
             ),
@@ -93,9 +119,13 @@ class ItemArtifactExtractionAgent:
         FunctionNormalizer._validate_unique(functions)
         self.validator.ensure_valid(functions)
 
-        facts.status = ReviewStatus.PENDING
+        self._ensure_source_grounded(facts, functions, document_text)
+
+        # Provider labels are not approval authority.  The approved input plus
+        # the deterministic schema/role/exact-source checks above are the gate.
+        facts.status = ReviewStatus.FINALIZED if not warnings else ReviewStatus.PENDING
         for function in functions:
-            function.status = ReviewStatus.PENDING
+            function.status = ReviewStatus.FINALIZED
         elapsed_seconds = time.monotonic() - started
         return facts, functions, {
             "task": request.task,

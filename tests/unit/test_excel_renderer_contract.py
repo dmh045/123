@@ -1,5 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
+import re
+from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
@@ -60,3 +62,28 @@ def test_renderer_rejects_report_contract_with_duplicate_output_column():
             ROOT / "output" / ".test-report" / "invalid.xlsx",
             draft=True,
         )
+
+
+def test_renderer_preserves_ignorable_namespace_declarations_and_drops_calc_chain():
+    method = TemplateRoleCompiler().compile_method(TEMPLATE)
+    output = ROOT / "output" / ".test-report" / "namespace-safe.xlsx"
+
+    HARAExcelRenderer(method.report_contract).render(
+        HARAState(run_id="namespace-safe"), TEMPLATE, output, draft=True,
+    )
+
+    with ZipFile(output, "r") as package:
+        assert "xl/calcChain.xml" not in package.namelist()
+        relationships = package.read("xl/_rels/workbook.xml.rels").decode("utf-8")
+        content_types = package.read("[Content_Types].xml").decode("utf-8")
+        assert "calcChain" not in relationships
+        assert "calcChain" not in content_types
+        for name in ("xl/worksheets/sheet5.xml", "xl/worksheets/sheet6.xml"):
+            xml = package.read(name).decode("utf-8")
+            root = re.search(r"<worksheet\b[^>]*>", xml)
+            assert root is not None
+            assert 'mc:Ignorable="x14ac xr xr2 xr3"' in root.group(0)
+            for prefix in ("x14ac", "xr", "xr2", "xr3"):
+                assert f"xmlns:{prefix}=" in root.group(0)
+            assert "ns2:uid=" not in root.group(0)
+            assert "xr:uid=" in root.group(0)

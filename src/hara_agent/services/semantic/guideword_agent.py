@@ -67,6 +67,19 @@ class GuidewordApplicabilityAgent:
         incomplete_count = len(assessments) - complete_count
         review_finalized_count = sum(item.status == ReviewStatus.FINALIZED for item in assessments)
         review_pending_count = sum(item.status == ReviewStatus.PENDING for item in assessments)
+        applicable_count = sum(
+            item.applicable and item.is_semantically_complete
+            for item in assessments
+        )
+        blanket_applicability = len(expected) > 1 and applicable_count == len(expected)
+        if blanket_applicability:
+            print(
+                "[HARA] guideword blanket applicability warning "
+                f"function={function.function_id} applicable={applicable_count}/{len(expected)} "
+                "action=continue_to_downstream_causal_filters",
+                file=sys.stderr,
+                flush=True,
+            )
         elapsed_seconds = time.monotonic() - started
         print(
             "[HARA] guideword assessment completed "
@@ -94,10 +107,8 @@ class GuidewordApplicabilityAgent:
             "finalized_count": review_finalized_count,
             "pending_count": review_pending_count,
             "parse_error_count": len(parse_errors),
-            "applicable_count": sum(
-                item.applicable and item.is_semantically_complete
-                for item in assessments
-            ),
+            "applicable_count": applicable_count,
+            "blanket_applicability": blanket_applicability,
             "elapsed_seconds": round(elapsed_seconds, 3),
         }
         if parse_errors:
@@ -159,9 +170,14 @@ class GuidewordApplicabilityAgent:
         if not isinstance(item.get("applicable"), bool):
             raise ValueError("Guideword applicable必须为boolean")
         rationale = str(item.get("rationale", "")).strip()
+        sources = resolve_guideword_sources(function)
         status = (
             ReviewStatus.FINALIZED
-            if rationale and str(item.get("status", "")).upper() == "FINALIZED"
+            if (
+                rationale
+                and sources
+                and function.status is ReviewStatus.FINALIZED
+            )
             else ReviewStatus.PENDING
         )
         return GuidewordAssessment(
@@ -169,7 +185,7 @@ class GuidewordApplicabilityAgent:
             guideword=str(item.get("guideword", "")).strip(),
             applicable=item["applicable"],
             rationale=rationale,
-            sources=resolve_guideword_sources(function),
+            sources=sources,
             status=status,
             confidence=parse_confidence(
                 item.get("confidence"),

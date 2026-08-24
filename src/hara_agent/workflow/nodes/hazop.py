@@ -41,5 +41,17 @@ def assess_guidewords(state: HARAState, agent: GuidewordApplicabilityAgent,
             "issue_type": "pending_review",
             "reason": f"{review_pending_count}个完整Guideword适用性结论尚未完成工程审批",
         })
+    blanket_function_ids = [
+        str(audit.get("function_id", ""))
+        for _, audit in batches
+        if audit.get("blanket_applicability") is True
+    ]
+    if blanket_function_ids:
+        state.record(
+            "guideword_blanket_applicability_observed",
+            function_ids=blanket_function_ids,
+            function_count=len(blanket_function_ids),
+            action="continue_to_malfunction_and_causal_filters",
+        )
     state.stage = WorkflowStage.HAZOP
     return state

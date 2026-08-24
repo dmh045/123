@@ -25,7 +25,7 @@
     "asil_mappings": 80,
     "hara_report_fields": 21,
     "safety_goal_report_fields": 6,
-    "required_fact_specs": 8,
+    "required_fact_specs": 9,
     "diagnostics": 12,
     "unique_sources": 649
   },
@@ -40,7 +40,7 @@
     "safety_goal_method": "fb4854c8fe3c02ed91674d8892cfb6e7f7261478b66487f5dc585edd5f9ac20e",
     "safe_state_method": "ad8b8bb9d536644bfa5b3f17cc954713109a6ff4996df029a6abce78cd9b0b71",
     "report_contract": "9675d02ae1f5d4f4f3961847fdf48df18263df6ee96ced4d2816e146875a4e2f",
-    "required_fact_specs": "ae98363d3481f965b8f91940ee3b24e86c612ddac1e6edf899a8112b3c2ebc06"
+    "required_fact_specs": "363df3568ee3a659b1a69d28df912dca48b8780b7f5c2806570a516db7a99646"
   },
   "source_hash_digest": "5cbe954ad61a41eaaeb26ba9e735b029d7bfa5e95a54b68b2d88d123ba6bbd08",
   "diagnostics": [

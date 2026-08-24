@@ -50,16 +50,9 @@ class HARAState:
 
     @property
     def can_publish(self) -> bool:
-        statuses = [
-            getattr(risk, field).status
-            for risk in self.risk_results
-            for field in ("severity", "exposure", "controllability", "asil")
-        ] + [goal.status for goal in self.safety_goals]
-        return (
-            not self.pending_reviews
-            and not self.errors
-            and all(status in {ReviewStatus.FINALIZED, ReviewStatus.NOT_APPLICABLE} for status in statuses)
-        )
+        from hara_agent.services.validation import ReleaseGateValidator
+
+        return ReleaseGateValidator().evaluate(self).ready_for_release
 
     def record(self, event: str, **details: Any) -> None:
         self.audit_trail.append({"event": event, **details})

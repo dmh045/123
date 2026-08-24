@@ -80,10 +80,13 @@ def _speed_spec(mode: str) -> RequiredProjectFactSpec:
 def _method_risk_spec(spec: RequiredFactSpec) -> RequiredProjectFactSpec:
     canonical = spec.fact_type.value
     spaced = canonical.replace("_", " ").casefold()
+    aliases = [canonical, spaced]
+    if spec.fact_type is FactType.EXPOSURE:
+        aliases.extend(("exposure method", "T/F"))
     return RequiredProjectFactSpec(
         fact_type=canonical,
         output_type=ProjectFactOutputType.RISK_FACT,
-        aliases=tuple(dict.fromkeys((canonical, spaced))),
+        aliases=tuple(dict.fromkeys(aliases)),
         unit_hints=(spec.unit,) if spec.unit.strip() else (),
         context_hints=(),
         required_fields=("status", "value", "unit", "context", "source_block_id"),

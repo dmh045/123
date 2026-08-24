@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,9 @@ ET.register_namespace("x14", "http://schemas.microsoft.com/office/spreadsheetml/
 ET.register_namespace("xm", "http://schemas.microsoft.com/office/excel/2006/main")
 ET.register_namespace("mc", "http://schemas.openxmlformats.org/markup-compatibility/2006")
 ET.register_namespace("x14ac", "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac")
+ET.register_namespace("xr", "http://schemas.microsoft.com/office/spreadsheetml/2014/revision")
+ET.register_namespace("xr2", "http://schemas.microsoft.com/office/spreadsheetml/2015/revision2")
+ET.register_namespace("xr3", "http://schemas.microsoft.com/office/spreadsheetml/2016/revision3")
 
 
 HARA_REQUIRED_FIELDS = frozenset({"hara_id"})
@@ -285,6 +289,15 @@ class HARAExcelRenderer:
                 sheet_paths[name]: self._replace_sheet_data(source.read(sheet_paths[name]), *config)
                 for name, config in replacements.items()
             }
+            removed_parts: set[str] = set()
+            if "xl/calcChain.xml" in source.namelist():
+                removed_parts.add("xl/calcChain.xml")
+                changed["xl/_rels/workbook.xml.rels"] = self._remove_calc_chain_relationship(
+                    source.read("xl/_rels/workbook.xml.rels")
+                )
+                changed["[Content_Types].xml"] = self._remove_calc_chain_content_type(
+                    source.read("[Content_Types].xml")
+                )
             handle, temp_name = tempfile.mkstemp(
                 prefix=f".{output.stem}.", suffix=".xlsx", dir=str(output.parent)
             )
@@ -292,6 +305,8 @@ class HARAExcelRenderer:
             try:
                 with ZipFile(temp_name, "w", ZIP_DEFLATED) as target:
                     for info in source.infolist():
+                        if info.filename in removed_parts:
+                            continue
                         target.writestr(info, changed.get(info.filename, source.read(info.filename)))
                 os.replace(temp_name, output)
             finally:
@@ -359,6 +374,52 @@ class HARAExcelRenderer:
         if dimension is not None:
             last_row = max(layout.start_row - 1, layout.start_row + len(rows) - 1)
             dimension.attrib["ref"] = f"A1:{self._column_letter(layout.max_column)}{last_row}"
+        serialized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        return self._preserve_root_namespaces(xml_bytes, serialized)
+
+    @staticmethod
+    def _preserve_root_namespaces(original: bytes, serialized: bytes) -> bytes:
+        """Retain template namespace declarations referenced lexically by mc:Ignorable."""
+        original_text = original.decode("utf-8")
+        serialized_text = serialized.decode("utf-8")
+        original_root = re.search(r"<worksheet\b[^>]*>", original_text)
+        serialized_root = re.search(r"<worksheet\b[^>]*>", serialized_text)
+        if original_root is None or serialized_root is None:
+            raise ValueError("Worksheet XML root element is missing")
+        declarations = {
+            prefix: uri
+            for prefix, _quote, uri in re.findall(
+                r"\sxmlns:([A-Za-z_][\w.-]*)=([\"'])(.*?)\2",
+                original_root.group(0),
+            )
+        }
+        current = set(re.findall(
+            r"\sxmlns:([A-Za-z_][\w.-]*)=", serialized_root.group(0)
+        ))
+        additions = "".join(
+            f' xmlns:{prefix}="{uri}"'
+            for prefix, uri in declarations.items()
+            if prefix not in current
+        )
+        if not additions:
+            return serialized
+        insertion = serialized_root.end() - 1
+        return (serialized_text[:insertion] + additions + serialized_text[insertion:]).encode("utf-8")
+
+    @staticmethod
+    def _remove_calc_chain_relationship(xml_bytes: bytes) -> bytes:
+        root = ET.fromstring(xml_bytes)
+        for relationship in list(root):
+            if relationship.attrib.get("Type", "").endswith("/calcChain"):
+                root.remove(relationship)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    @staticmethod
+    def _remove_calc_chain_content_type(xml_bytes: bytes) -> bytes:
+        root = ET.fromstring(xml_bytes)
+        for override in list(root):
+            if override.attrib.get("PartName") == "/xl/calcChain.xml":
+                root.remove(override)
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     @classmethod
@@ -465,6 +526,7 @@ class HARAExcelRenderer:
         with ZipFile(output, "r") as package:
             if package.testzip() is not None:
                 raise ValueError("Report ZIP package integrity check failed")
+            self._verify_package_xml(package)
         workbook = load_workbook(output, read_only=False, data_only=False)
         try:
             hara_sheet = workbook[hara.sheet]
@@ -483,3 +545,35 @@ class HARAExcelRenderer:
                     raise ValueError(f"Report verification failed: {sg.sheet} row {row} lacks SG ID")
         finally:
             workbook.close()
+
+    @staticmethod
+    def _verify_package_xml(package: ZipFile) -> None:
+        names = set(package.namelist())
+        if "xl/calcChain.xml" in names:
+            raise ValueError("Report retains a stale calculation chain")
+        for name in sorted(names):
+            if not (name.endswith(".xml") or name.endswith(".rels")):
+                continue
+            content = package.read(name)
+            try:
+                ET.fromstring(content)
+            except ET.ParseError as exc:
+                raise ValueError(f"Report XML is malformed: {name}: {exc}") from exc
+            if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+                continue
+            text = content.decode("utf-8")
+            root = re.search(r"<worksheet\b[^>]*>", text)
+            if root is None:
+                raise ValueError(f"Report worksheet root is missing: {name}")
+            ignorable = re.search(r"\bmc:Ignorable=([\"'])(.*?)\1", root.group(0))
+            if ignorable is None:
+                continue
+            declared = set(re.findall(
+                r"\sxmlns:([A-Za-z_][\w.-]*)=", root.group(0)
+            ))
+            missing = sorted(set(ignorable.group(2).split()) - declared)
+            if missing:
+                raise ValueError(
+                    f"Report worksheet has undeclared mc:Ignorable prefixes: "
+                    f"{name}: {missing}"
+                )
