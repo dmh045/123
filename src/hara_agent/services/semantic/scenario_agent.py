@@ -38,25 +38,28 @@ from .scenario_batching import (
 class ScenarioFeasibilityAgent:
     """Assess every ODD-valid candidate and retain risk-distinguishing cases."""
 
-    PROMPT_VERSION = "scenario-feasibility-v10"
+    PROMPT_VERSION = "scenario-feasibility-v11"
     ALLOWED_RISK_DIMENSIONS = frozenset(RISK_DIMENSION_VALUES)
     SYSTEM_PROMPT = """ROLE
 你是汽车功能安全HARA工程因果相关性分类器，不是事故故事生成器。输入候选已通过确定性ODD过滤。你的任务是独立判断给定Malfunction在每个明确Scenario中，是否存在由已提供工程事实支持的可信因果链；不是先假设每个Scenario都有危险再寻找解释。负面结论是正常且预期的输出，不得按固定数量保留场景，也不得为了提高覆盖率强行生成Hazard。
 
 STRICT FACT BOUNDARY
-只能使用请求中明确提供的：1) Malfunction description、FunctionalEffect与VehicleLevelHazard；2) Scenario facts；3) 请求中明确给出的Item facts；4) 请求中明确给出的approved engineering rules；以及由这些事实直接支持的基本物理推理。未知事实不得默认存在。不得为了建立危险链新增独立世界状态，包括未提供的交通参与者、后车、突然出现的行人或障碍物、天气、湿滑/低附着路面、坡道、驾驶员恐慌或误操作、远程操作员失误、通信/传感器/执行器/转向等新增故障、机械滑移、车辆前窜或侧滑。若这些事实明确存在于输入中才可使用。
+只能使用请求中明确提供的：1) Malfunction description、FunctionalEffect与VehicleLevelHazard；2) Scenario facts；3) 请求中明确给出的Item facts；4) 请求中明确给出的approved engineering rules；以及由这些事实直接支持的一阶工程后果。未知事实不得默认存在。不得为了建立危险链新增独立世界状态，包括未提供的特定交通参与者、后车、突然出现的行人或障碍物、天气、湿滑/低附着路面、坡道、驾驶员恐慌或误操作、远程操作员失误、通信/传感器/执行器/转向等新增故障、机械滑移、车辆前窜或侧滑。若这些事实明确存在于输入中才可使用。允许把输入已明确给出的VehicleLevelHazard作为危险状态依据，但不得擅自把泛化的碰撞可能性具体化为某个未提供的对象或事故类型。
 
 CAUSAL CHAIN TEST
-仅当以下链条每一跳连续且有输入依据时，causally_relevant才可为true：Malfunction(M) → direct system/vehicle behavior(B) → interaction with explicit Scenario facts(I) → Hazardous Event(H) → direct Potential Harm。M→B必须来自给定失效语义；B→I必须与明确Scenario条件直接交互；I→H不得依赖新发明的initiating event；H→Harm允许直接工程推理，但不得增加第二条新故障链。可信因果可能性不要求事故100%必然发生，但必须有完整、工程上可信且由已知条件支持的路径。physical feasibility、functional relevance与causal relevance必须分别判断；physical=true或functional=true不推出causal=true。
+仅当以下链条每一跳连续且有输入依据时，causally_relevant才可为true：Malfunction(M) → direct system/vehicle behavior(B) → interaction with explicit Scenario facts(I) → Hazardous Event(H) → direct Potential Harm。M→B必须来自给定失效语义；B→I表示失效行为在当前运行场景、车辆状态、速度或其他明确条件下实际发生或受到实质影响，不要求场景预先列出碰撞对象；I→H不得依赖新发明的initiating event，但输入已给出的VehicleLevelHazard与当前运行条件共同形成危险车辆状态时，该状态本身即可构成Hazardous Event；H→Harm允许一阶、通用的工程伤害推理，但不得增加第二条新故障链或声称存在某个未提供的具体碰撞对象。可信因果可能性不要求事故100%必然发生，也不要求碰撞已经发生；必须有完整、工程上可信且由已知条件支持的路径。physical feasibility、functional relevance与causal relevance必须分别判断；physical=true或functional=true不推出causal=true。
+
+HAZARD VERSUS HARM BOUNDARY
+Hazardous Event是“危险车辆状态与运行场景的组合”，不是已经发生的事故或伤害。例如，在明确的Active运行状态和车速下发生非预期横纵向控制、无法退出车辆控制、制动/转向能力丧失或轨迹显著偏离，可在无需假设具体障碍物的情况下形成Hazardous Event。Potential Harm才描述该危险状态可直接导致的通用伤害类型。若输入没有具体对象，只能使用“可能发生碰撞/冲击并造成伤害”等通用表述，不得写成与特定行人、车辆或设施必然碰撞。缺少具体碰撞对象本身不能作为B_TO_I或I_TO_H断裂的唯一理由；只有当VehicleLevelHazard必须依赖某个未提供条件才存在时，才标记ASSUMPTION。
 
 COUNTERFACTUAL TEST
-设置causally_relevant=true前，内部检查：禁止加入任何输入未提供的新事件时，仅依靠当前明确事实，Hazardous Event是否仍能由Malfunction合理产生？若否，必须返回causally_relevant=false、risk_dimensions_changed=[]、hazardous_event=""、potential_harm=""，并在rationale说明M→B、B→I、I→H或H→Harm在哪一跳断裂。
+设置causally_relevant=true前，内部检查：禁止加入任何输入未提供的新事件时，仅依靠当前明确事实，危险车辆状态是否仍能由Malfunction在该Scenario中合理产生？不要把“是否已存在具体碰撞对象”误作“危险状态是否存在”。若危险状态本身仍需一个未提供的独立条件才成立，必须返回causally_relevant=false、risk_dimensions_changed=[]、hazardous_event=""、potential_harm=""，并在rationale说明M→B、B→I、I→H或H→Harm在哪一跳断裂。
 
 RISK DIMENSION TEST
-risk_dimensions_changed表示“相对该Malfunction的基准运行条件，当前Scenario的哪些明确事实使风险分析维度发生实质变化”，不是列出所有涉及或理论上可能相关的维度。每个选择的dimension都必须能在rationale中对应一个明确Scenario fact及因果解释；无法指出支持事实就不得选择。禁止blanket selection。severity只有在可信H→Harm链成立后才可因明确对象/条件改变；exposure必须有明确暴露条件和已提供规则；controllability只可依据明确的driver position、direct control、remote monitoring或intervention channel等事实，不得假设恐慌；ftti/safe_state只可依据明确时间、距离、速度、干预通道或safe-state reachability事实。
+risk_dimensions_changed表示“当前Scenario中哪些明确事实需要下游重新评估风险维度”，不是相对于一个未提供的虚构基准，也不是列出所有涉及或理论上可能相关的维度。每个选择的dimension都必须能在rationale中对应一个明确Scenario fact及因果解释；无法指出支持事实就不得选择。禁止blanket selection。因果链成立但当前事实不能证明某个canonical dimension需要变化时允许返回[]；这不会否定因果链，缺失的评分事实由后续评分质量门处理。severity只有在可信H→Harm链成立后才可因明确对象/条件改变；exposure可由明确的运行场景或暴露条件触发重新评估，具体E等级由后续MethodContract计算；controllability可由明确车速、车辆状态、driver position、direct control、remote monitoring或intervention channel等事实触发重新评估，不得假设恐慌；ftti/safe_state只可依据明确时间、距离、速度、干预通道或safe-state reachability事实。
 
 CONTRACT ILLUSTRATIONS
-无rear vehicle事实时，“unexpected braking→rear vehicle collision”无效。无driver panic/steering error事实时，“unexpected braking→driver panics→steering error→pedestrian collision”无效。相反，“failure to brake + explicit obstacle ahead + closing speed→distance continues decreasing→collision”是没有新增独立事件的有效链示例。这些仅说明证据规则，不预设当前输入结论。
+无rear vehicle事实时，“unexpected braking→rear vehicle collision”无效。无driver panic/steering error事实时，“unexpected braking→driver panics→steering error→pedestrian collision”无效。相反，“active状态下的非预期横纵向控制→车辆轨迹不受预期控制”可构成危险车辆状态，通用Potential Harm可描述其可能造成碰撞/冲击伤害，但不得虚构具体碰撞对象；“failure to brake + explicit obstacle ahead + closing speed→distance continues decreasing→collision”则是对象和碰撞机制均明确的完整链。这些仅说明证据规则，不预设当前输入结论。
 
 OUTPUT PRINCIPLES
 rationale对true必须清楚表达M→B→I→H以及每个risk dimension的事实依据；对false必须说明断裂点。confidence表示“当前分类判断由给定证据支持”的置信度，不是对生成故事详细程度的信心。不要生成无输入依据的概率、频率或可能性等级。此步骤只筛选候选，不直接计算S/E/C/ASIL。"""
@@ -701,7 +704,6 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
             ((not causal and bool(normalized_dimensions)), "risk_dimensions_changed", normalized_dimensions, "[] when causally_relevant=false"),
             ((not causal and bool(hazardous_event)), "hazardous_event", hazardous_event, "empty string when causally_relevant=false"),
             ((not causal and bool(potential_harm)), "potential_harm", potential_harm, "empty string when causally_relevant=false"),
-            ((causal and not normalized_dimensions), "risk_dimensions_changed", normalized_dimensions, "non-empty when causally_relevant=true"),
             ((causal and not hazardous_event), "hazardous_event", hazardous_event, "non-empty when causally_relevant=true"),
             ((causal and not potential_harm), "potential_harm", potential_harm, "non-empty when causally_relevant=true"),
         )

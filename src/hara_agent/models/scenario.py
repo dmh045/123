@@ -64,7 +64,6 @@ class ScenarioFeasibilityAssessment:
             self.physically_feasible
             and self.functionally_relevant
             and self.causally_relevant
-            and bool(self.risk_dimensions_changed)
         )
         return legacy_result and (
             self.causal_assessment is None or self.causal_assessment.is_validated

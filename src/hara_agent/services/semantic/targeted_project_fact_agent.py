@@ -17,7 +17,7 @@ from .item_supplement_agent import RoutedDocumentBlocks
 class TargetedProjectFactExtractionAgent:
     """One bounded schema-guided call for one Project Fact category."""
 
-    PROMPT_VERSION = "targeted-project-facts-v1"
+    PROMPT_VERSION = "targeted-project-facts-v2-mode-transition-evidence"
 
     def __init__(self, client: LLMClient, normalizer: ProjectFactNormalizer | None = None):
         self.client = client
@@ -52,6 +52,12 @@ class TargetedProjectFactExtractionAgent:
             schema_name=f"TargetedProjectFacts:{category}",
             prompt_version=self.PROMPT_VERSION,
             system_prompt=(
+                "For SPEED_ENVELOPE, an explicit activation, entry, transition, "
+                "or operating condition that names the requested operating mode "
+                "and states a speed inequality/range is valid evidence for that "
+                "mode. Return FOUND for that atomic bound; do not require a section "
+                "whose title says speed envelope. Select only the relevant bound "
+                "when the same source block contains additional speed conditions. "
                 "For RISK_FACT, return exactly one scalar value, the exact Method "
                 "Contract unit (or an empty unit), and a string-to-string context object. "
                 "Constraints are validation boundaries, never expected answers. "

@@ -7,6 +7,7 @@ from dataclasses import asdict, replace
 from typing import Sequence
 
 from hara_agent.contracts import RequiredFactSpec
+from hara_agent.infrastructure.llm import LLMResponse
 from hara_agent.models import (
     FunctionDefinition, ItemDefinitionFacts, ReviewStatus, SourceRef,
 )
@@ -24,7 +25,31 @@ from hara_agent.workflow.state import HARAState, WorkflowStage
 from .parallel import ordered_parallel_map
 
 
-ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v6-approved-item-input"
+ARTIFACT_SCHEMA_VERSION = "validated-item-artifact-v8-requested-mode-speed-scope"
+
+
+def _speed_extraction_modes(
+    requested_operating_modes: Sequence[str],
+    extracted_operating_modes: Sequence[str],
+) -> tuple[str, ...]:
+    """Extract speed only for the caller's modes when they are explicit.
+
+    Declared Item modes remain the fallback for workflows that do not request a
+    particular context.  Mixing both sets made a single production request ask
+    for every state-machine mode and allowed unrelated NOT_FOUND results to
+    obscure the one speed envelope needed by downstream preflight.
+    """
+
+    requested = tuple(
+        str(mode).strip() for mode in requested_operating_modes
+        if str(mode).strip()
+    )
+    if requested:
+        return requested
+    return tuple(
+        str(mode).strip() for mode in extracted_operating_modes
+        if str(mode).strip()
+    )
 
 
 def _facts_from_dict(value: dict) -> ItemDefinitionFacts:
@@ -129,6 +154,7 @@ def extract_item_artifacts(
     cache_save_elapsed = 0.0
     document_text = str(state.item_definition.get("text", ""))
     source_id = str(state.item_definition.get("source_id", ""))
+    blocks = list(state.item_definition.get("blocks", []))
     client_config = getattr(artifact_agent.client, "config", None)
     cache_material = {
         "document_text": document_text,
@@ -159,7 +185,17 @@ def extract_item_artifacts(
             str(mode) for mode in requested_operating_modes if str(mode).strip()
         ],
     }
+    candidate_material = {
+        "document_text": document_text,
+        "source_id": source_id,
+        "main_prompt_version": artifact_agent.PROMPT_VERSION,
+        "provider": cache_material["provider"],
+        "base_url": cache_material["base_url"],
+        "model": cache_material["model"],
+        "extraction_thinking": cache_material["extraction_thinking"],
+    }
     cache_key = cache.key(cache_material) if cache else ""
+    candidate_key = cache.key(candidate_material) if cache else ""
     cache_lookup_started = time.monotonic()
     if cache and cache_key:
         cached_payload, cache_status = cache.load_with_status(cache_key)
@@ -185,6 +221,9 @@ def extract_item_artifacts(
             facts = _facts_from_dict(cached_core["facts"])
             functions = [_function_from_dict(item) for item in cached_core["functions"]]
             artifact_agent.validator.ensure_valid(functions)
+            artifact_agent._ensure_source_grounded(
+                facts, functions, document_text, blocks,
+            )
             core_cached = True
             main_audit = {
                 "task": "extract_core_item_artifacts",
@@ -206,8 +245,61 @@ def extract_item_artifacts(
             )
     core_started = time.monotonic()
     if not core_cached:
-        facts, functions, main_audit = artifact_agent.extract(document_text, source_id)
-        main_audit.update({"cache_hit": False, "cache_key": cache_key})
+        candidate_response = None
+        candidate_status = "candidate_cache_not_configured"
+        if cache and candidate_key:
+            candidate_payload, candidate_status = cache.load_candidate_with_status(
+                candidate_key
+            )
+            if isinstance(candidate_payload, dict):
+                try:
+                    candidate_data = candidate_payload["data"]
+                    if not isinstance(candidate_data, dict):
+                        raise TypeError("candidate data is not an object")
+                    candidate_response = LLMResponse(
+                        data=candidate_data,
+                        model=str(candidate_payload.get("model", cache_material["model"])),
+                        request_id=str(candidate_payload.get("request_id", "")),
+                        usage=dict(candidate_payload.get("usage", {}) or {}),
+                    )
+                    print(
+                        f"[HARA] core candidate cache hit key={candidate_key}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    candidate_response = None
+                    candidate_status = "candidate_payload_invalid"
+                    print(
+                        f"[HARA] core candidate cache ignored key={candidate_key} "
+                        f"reason={candidate_status}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+        def record_candidate(response: LLMResponse) -> None:
+            if cache and candidate_key:
+                cache.save_candidate(candidate_key, {
+                    "schema_version": "raw-core-item-response-v1-quarantine",
+                    "data": response.data,
+                    "model": response.model,
+                    "request_id": response.request_id,
+                    "usage": response.usage,
+                })
+
+        facts, functions, main_audit = artifact_agent.extract(
+            document_text,
+            source_id,
+            blocks,
+            candidate_response=candidate_response,
+            candidate_recorder=record_candidate,
+        )
+        main_audit.update({
+            "cache_hit": False,
+            "cache_key": cache_key,
+            "candidate_cache_key": candidate_key,
+            "candidate_cache_status": candidate_status,
+        })
         cached_payload = {
             "schema_version": ARTIFACT_SCHEMA_VERSION,
             "core": {
@@ -227,7 +319,6 @@ def extract_item_artifacts(
 
     routing_started = time.monotonic()
     missing_before = _missing_core_fields(facts)
-    blocks = list(state.item_definition.get("blocks", []))
     routed = []
     routing_diagnostics = []
     cached_supplements = (
@@ -278,7 +369,8 @@ def extract_item_artifacts(
     merge_elapsed = time.monotonic() - merge_started
 
     project_fact_batches = build_project_fact_spec_batches(
-        (*requested_operating_modes, *facts.operating_modes), required_fact_specs,
+        _speed_extraction_modes(requested_operating_modes, facts.operating_modes),
+        required_fact_specs,
     )
     targeted_audits = []
     targeted_payloads = (

@@ -83,7 +83,6 @@ class ScenarioRiskFactAgent:
             item.get("physically_feasible") is True,
             item.get("functionally_relevant") is True,
             item.get("causally_relevant") is True,
-            bool(item.get("risk_dimensions_changed")),
         ))]
         if not specs or not retained:
             return [], {

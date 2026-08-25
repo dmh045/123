@@ -361,6 +361,20 @@ class OpenAICompatibleClient:
 
     @staticmethod
     def _validate_schema_envelope(data: Any, schema_name: str) -> None:
+        if schema_name == "CoreItemArtifacts":
+            if not isinstance(data, dict):
+                raise LLMSchemaContractError(
+                    "CoreItemArtifacts顶层必须为JSON object"
+                )
+            if not isinstance(data.get("item_definition"), dict):
+                raise LLMSchemaContractError(
+                    "CoreItemArtifacts.item_definition类型必须为dict"
+                )
+            if not isinstance(data.get("functions"), list):
+                raise LLMSchemaContractError(
+                    "CoreItemArtifacts.functions类型必须为list"
+                )
+            return
         required_envelopes = {
             "GuidewordAssessmentList": ("assessments", list),
             "MalfunctionHazardCandidateList": ("candidates", list),

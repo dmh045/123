@@ -40,13 +40,25 @@ def _scenario_json(
     project_registry: FactRegistry | None = None,
 ) -> str:
     registry = build_fact_registry(malfunction, scenario, project_registry)
+    prompt_facts = {
+        key: value for key, value in scenario.facts.items()
+        if not (
+            value is None
+            or (isinstance(value, str) and not value.strip())
+            or (isinstance(value, (list, tuple, dict, set)) and not value)
+            or key.endswith("_source_status")
+            or key in {
+                "engineering_status", "review_reason", "method_scenario_dimensions",
+            }
+        )
+    }
     return json.dumps(
         {
             "scenario_id": scenario.scenario_id,
             "source_scenario_id": scenario.source_scenario_id,
             "atomic_variant": scenario.atomic_variant,
             "semantic_fingerprint": scenario.semantic_fingerprint,
-            "facts": scenario.facts,
+            "facts": prompt_facts,
             "fact_registry": registry.to_prompt_dict(),
         },
         ensure_ascii=False,

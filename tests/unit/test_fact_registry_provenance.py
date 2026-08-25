@@ -5,6 +5,7 @@ from hara_agent.models import (
     ScenarioCandidate, SourceRef,
 )
 from hara_agent.services.semantic.scenario_evidence import build_fact_registry
+from hara_agent.services.semantic.scenario_batching import build_scenario_user_prompt
 
 
 def _malfunction() -> MalfunctionCandidate:
@@ -71,3 +72,26 @@ def test_ttc_is_derived_physics_with_canonical_inputs():
         "derivation_type": "TTC",
         "inputs": ["SCN.relative_distance", "SCN.relative_speed_kph"],
     }
+
+
+def test_internal_bindings_and_blank_values_are_not_executable_scenario_facts():
+    scenario = ScenarioCandidate(
+        "SCN-INTERNAL", "parking", "parking", "candidate",
+        facts={
+            "ego_speed_kph": 5,
+            "road_surface_conditions": "",
+            "method_scenario_dimensions": {
+                "ROAD_SURFACE": {"binding_status": "MISSING"},
+            },
+        },
+    )
+
+    registry = build_fact_registry(_malfunction(), scenario)
+    prompt = build_scenario_user_prompt(_malfunction(), [scenario])
+
+    assert registry.resolve_record("SCN.ego_speed_kph") is not None
+    assert registry.resolve_record("SCN.road_surface_conditions") is None
+    assert registry.resolve_record("SCN.method_scenario_dimensions") is None
+    assert '"ego_speed_kph":5' in prompt
+    assert "road_surface_conditions" not in prompt
+    assert "method_scenario_dimensions" not in prompt

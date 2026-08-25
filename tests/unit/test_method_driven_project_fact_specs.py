@@ -3,6 +3,7 @@ from hara_agent.models import ProjectFactOutputType
 from hara_agent.services.extraction import (
     ProjectFactNormalizer, build_project_fact_spec_batches,
 )
+from hara_agent.workflow.nodes.item_artifacts import _speed_extraction_modes
 
 
 def _required(fact_type, origin, unit="", constraints=()):
@@ -33,6 +34,19 @@ def test_batches_are_compiled_from_modes_and_method_contract_only():
     assert [item.context_hints for item in speed] == [("Garage",), ("Highway",)]
     assert [item.fact_type for item in risk] == ["OCCURRENCE_FREQUENCY"]
     assert all("parking" not in repr(item).casefold() for item in (*speed, *risk))
+
+
+def test_explicit_requested_mode_limits_speed_extraction_scope():
+    assert _speed_extraction_modes(
+        ("Active",),
+        ("OFF", "Standby", "Active", "Override", "Abort", "Finish", "Error"),
+    ) == ("Active",)
+
+
+def test_declared_modes_are_used_when_no_mode_was_requested():
+    assert _speed_extraction_modes((), ("search", "parking")) == (
+        "search", "parking",
+    )
 
 
 def test_method_risk_fact_normalization_is_neutral_and_source_grounded():

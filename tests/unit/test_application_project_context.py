@@ -150,6 +150,34 @@ def test_unmatched_project_dimension_remains_pending_without_synonym_guessing():
         == "UNRESOLVED"
         for item in candidates
     )
+    assert all(
+        item.fact_provenance["weather_conditions"]["approval"] == "FINALIZED"
+        and item.fact_provenance["weather_conditions"]["provenance"] == "PROJECT_INPUT"
+        for item in candidates
+    )
+
+
+def test_missing_unrelated_project_field_does_not_taint_exact_field_evidence():
+    facts = _facts()
+    facts.odd_road_surfaces = []
+    facts.status = ReviewStatus.PENDING
+    app = HARAApplication(_config(), object())
+
+    candidates, audit = app.prepare_scenario_candidates(_state(facts), _service())
+
+    assert audit["unresolved_binding_candidate_count"] == len(candidates)
+    assert all(item.status is ReviewStatus.PENDING for item in candidates)
+    assert all(
+        item.facts["method_scenario_dimensions"]["ROAD_SURFACE"]["binding_status"]
+        == "MISSING"
+        for item in candidates
+    )
+    for candidate in candidates:
+        assert candidate.fact_provenance["road_surface_conditions"]["approval"] == "PENDING"
+        assert candidate.fact_provenance["operating_scenario"]["approval"] == "FINALIZED"
+        assert candidate.fact_provenance["vehicle_state"]["approval"] == "FINALIZED"
+        assert candidate.fact_provenance["weather_conditions"]["approval"] == "FINALIZED"
+        assert candidate.fact_provenance["operating_mode"]["approval"] == "FINALIZED"
 
 
 def test_application_candidate_carries_hash_bound_canonical_risk_fact():

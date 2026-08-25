@@ -3,7 +3,8 @@ import pytest
 from hara_agent.contracts import CausalAssessmentStatus
 from hara_agent.infrastructure.llm import LLMResponse
 from hara_agent.models import (
-    MalfunctionCandidate, ReviewStatus, ScenarioCandidate, SourceRef,
+    MalfunctionCandidate, ReviewStatus, ScenarioCandidate,
+    ScenarioFeasibilityAssessment, SourceRef,
 )
 from hara_agent.services.semantic import ScenarioFeasibilityAgent
 from hara_agent.services.semantic.scenario_batching import ScenarioAdaptiveBatchError
@@ -91,6 +92,117 @@ def test_agent_parser_auto_finalizes_only_after_typed_evidence_validation():
     serialized = result.to_dict()
     assert serialized["causal_assessment"]["status"] == "VALIDATED"
     assert serialized["causal_assessment"]["review_status"] == "FINALIZED"
+
+
+def test_unrelated_pending_scenario_field_does_not_taint_cited_causal_evidence():
+    source = SourceRef("item_definition", "item.docx", "p1", "parking evidence")
+    source_dict = {
+        "source_type": source.source_type,
+        "source_id": source.source_id,
+        "location": source.location,
+        "excerpt": source.excerpt,
+    }
+    malfunction = MalfunctionCandidate(
+        "MF-1", "FUN-1", "unintended", "unintended vehicle control",
+        "vehicle follows an unintended trajectory", "loss of intended trajectory control",
+        ["unintended control", "trajectory deviation"],
+        sources=[source], status=ReviewStatus.FINALIZED,
+    )
+    scenario = ScenarioCandidate(
+        "SCN-1", "Parking", "active at 20 km/h", "parking operation",
+        {
+            "operating_scenario": "parking lot",
+            "vehicle_state": "active",
+            "ego_speed_kph": 20.0,
+            "road_surface_conditions": "",
+        },
+        fact_provenance={
+            key: {
+                "provenance": "PROJECT_INPUT",
+                "approval": "FINALIZED",
+                "source_refs": [source_dict],
+            }
+            for key in ("operating_scenario", "vehicle_state", "ego_speed_kph")
+        } | {
+            "road_surface_conditions": {
+                "provenance": "LLM_INFERENCE",
+                "approval": "PENDING",
+                "source_refs": [],
+            },
+        },
+        status=ReviewStatus.PENDING,
+        sources=[source],
+        semantic_fingerprint="fp-partial",
+    )
+    payload = {
+        "scenario_id": "SCN-1",
+        "physically_feasible": True,
+        "functionally_relevant": True,
+        "causally_relevant": True,
+        "breakpoint": "NONE",
+        "causal_chain": {
+            "m_to_b": {
+                "claim": "unintended control causes trajectory deviation",
+                "basis_type": "DIRECT_FACT",
+                "evidence_refs": ["MF.functional_effect"],
+            },
+            "b_to_i": {
+                "claim": "the deviation occurs while active in a parking lot",
+                "basis_type": "DIRECT_FACT",
+                "evidence_refs": ["SCN.operating_scenario", "SCN.vehicle_state"],
+            },
+            "i_to_h": {
+                "claim": "trajectory is not under intended control at 20 km/h",
+                "basis_type": "DIRECT_FACT",
+                "evidence_refs": ["MF.vehicle_level_hazard", "SCN.ego_speed_kph"],
+            },
+            "h_to_harm": {
+                "claim": "the hazardous vehicle state can cause impact harm",
+                "basis_type": "DIRECT_FACT",
+                "evidence_refs": ["MF.vehicle_level_hazard"],
+            },
+        },
+        "risk_dimension_changes": [],
+        "rationale": "complete source-linked hazardous-state chain",
+        "hazardous_event": "unintended trajectory control while active at 20 km/h",
+        "potential_harm": "impact can cause injury",
+        "confidence": 0.8,
+        "status": "PENDING",
+    }
+
+    result = ScenarioFeasibilityAgent._parse(
+        malfunction, payload, scenario=scenario,
+    )
+
+    assert result.status is ReviewStatus.FINALIZED
+    assert result.causal_assessment is not None
+    assert result.causal_assessment.review_status is ReviewStatus.FINALIZED
+    assert result.retain
+
+
+def test_prompt_distinguishes_hazardous_state_from_realized_collision():
+    prompt = ScenarioFeasibilityAgent.SYSTEM_PROMPT
+
+    assert "缺少具体碰撞对象本身不能作为B_TO_I或I_TO_H断裂的唯一理由" in prompt
+    assert "危险车辆状态与运行场景的组合" in prompt
+    assert "不得写成与特定行人、车辆或设施必然碰撞" in prompt
+
+
+def test_positive_causal_result_is_not_rejected_only_for_empty_dimension_changes():
+    assessment = ScenarioFeasibilityAssessment(
+        malfunction_id="MF-1",
+        scenario_id="SCN-1",
+        physically_feasible=True,
+        functionally_relevant=True,
+        causally_relevant=True,
+        risk_dimensions_changed=[],
+        rationale="causal path is valid; score inputs remain downstream",
+        hazardous_event="unintended vehicle motion",
+        potential_harm="impact injury",
+        status=ReviewStatus.FINALIZED,
+    )
+
+    assert assessment.retain
 
 
 def test_scoring_rejects_legacy_positive_flags_without_typed_contract():

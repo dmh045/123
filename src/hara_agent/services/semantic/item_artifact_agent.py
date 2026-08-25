@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
+import re
 import sys
 import time
-from typing import Any
+from typing import Any, Callable, Sequence
 
-from hara_agent.infrastructure.llm import LLMClient, LLMOutputLimitError, LLMRequest
+from hara_agent.infrastructure.llm import (
+    LLMClient, LLMOutputLimitError, LLMRequest, LLMResponse,
+)
 from hara_agent.models import FunctionDefinition, ItemDefinitionFacts, ReviewStatus
+from hara_agent.services.extraction import block_value, normalize_source_text
 from hara_agent.services.validation import FunctionValidator
 
+from .core_item_artifact_contract import (
+    CORE_ITEM_ARTIFACTS_SCHEMA,
+    CoreItemArtifactsContractError,
+    normalize_core_item_artifacts,
+)
 from .function_agent import FunctionNormalizer
 from .item_definition_agent import ItemDefinitionNormalizer
 from .parsing import CONFIDENCE_PROMPT_CONTRACT
@@ -18,7 +28,7 @@ from .parsing import CONFIDENCE_PROMPT_CONTRACT
 class ItemArtifactExtractionAgent:
     """Extract core Item facts and Functions once from the full document."""
 
-    PROMPT_VERSION = "item-artifacts-v3-exact-source"
+    PROMPT_VERSION = "item-artifacts-v4-typed-contract"
     SYSTEM_PROMPT = """你是汽车功能安全HARA的相关项定义抽取Agent。只提取文档明确陈述的事实。
 一次返回核心Item Definition和车辆级Functions。不得把标题、条件、步骤、后果或质量要求识别为Function；
 不得用常识补写ODD、速度或功能。复杂的性能、驾驶员控制和Exposure证据由后续局部抽取处理，本次不要展开。
@@ -29,32 +39,299 @@ class ItemArtifactExtractionAgent:
         self.validator = validator or FunctionValidator()
 
     @staticmethod
+    def _excerpt_is_present(excerpt: str, document_text: str) -> bool:
+        """Match source text across harmless DOCX/JSON formatting changes only.
+
+        DOCX table cells and paragraphs introduce whitespace boundaries that an
+        LLM JSON response may serialize as a regular space (or omit between CJK
+        characters).  NFKC also reconciles full-width compatibility characters.
+        No punctuation is discarded and no fuzzy similarity is accepted, so a
+        paraphrase or an ellipsis-joined citation still fails closed.
+        """
+
+        if excerpt in document_text:
+            return True
+        normalized_excerpt = normalize_source_text(excerpt)
+        normalized_document = normalize_source_text(document_text)
+        if not normalized_excerpt:
+            return False
+        if normalized_excerpt in normalized_document:
+            return True
+        compact_excerpt = "".join(normalized_excerpt.split())
+        compact_document = "".join(normalized_document.split())
+        return bool(compact_excerpt) and compact_excerpt in compact_document
+
+    @classmethod
+    def _split_grounded_source(
+        cls,
+        source: Any,
+        source_blocks: Sequence[Any],
+    ) -> list[Any]:
+        """Recover independently grounded sentences from a joined citation.
+
+        Providers occasionally concatenate two verbatim sentences from
+        different Item blocks.  The combined string is not a valid citation,
+        but each sentence can be rebound deterministically to its real block.
+        This is deliberately limited to explicit sentence boundaries; ellipsis
+        joins and partial/fuzzy matches are not repaired.
+        """
+
+        fragments = [
+            value.strip()
+            for value in re.findall(r".+?(?:[。！？!?；;]+|$)", source.excerpt, re.DOTALL)
+            if value.strip()
+        ]
+        if len(fragments) < 2:
+            return []
+
+        repaired = []
+        for fragment in fragments:
+            candidates = []
+            for block in source_blocks:
+                text = block_value(block, "text")
+                if cls._excerpt_is_present(fragment, text):
+                    candidates.append(block)
+            if candidates:
+                block = min(
+                    candidates,
+                    key=lambda value: len(normalize_source_text(block_value(value, "text"))),
+                )
+                block_text = block_value(block, "text")
+                exact_excerpt = fragment if fragment in block_text else block_text
+                repaired.append(type(source)(
+                    source_type=source.source_type,
+                    source_id=source.source_id,
+                    location=block_value(block, "location"),
+                    excerpt=exact_excerpt,
+                ))
+                continue
+            fragment_source = type(source)(
+                source_type=source.source_type,
+                source_id=source.source_id,
+                location=source.location,
+                excerpt=fragment,
+            )
+            ordered = cls._ordered_omission_source(
+                fragment_source, source_blocks,
+            )
+            if len(ordered) != 1:
+                return []
+            repaired.extend(ordered)
+
+        unique = []
+        seen = set()
+        for value in repaired:
+            identity = (value.source_id, value.location, value.excerpt)
+            if identity not in seen:
+                seen.add(identity)
+                unique.append(value)
+        return unique
+
+    @classmethod
+    def _ordered_omission_source(
+        cls,
+        source: Any,
+        source_blocks: Sequence[Any],
+    ) -> list[Any]:
+        """Bind a provider-shortened quote to one unambiguous source block.
+
+        Every non-whitespace character in the proposed excerpt must occur in
+        source order.  Strong exact anchors at both ends plus density limits
+        prevent this from becoming fuzzy semantic matching.  The returned
+        citation is the complete original block, never the shortened text.
+        """
+
+        excerpt = "".join(normalize_source_text(source.excerpt).split())
+        if len(excerpt) < 16:
+            return []
+
+        candidates = []
+        for block in source_blocks:
+            block_text = block_value(block, "text")
+            normalized_block = "".join(normalize_source_text(block_text).split())
+            positions = []
+            cursor = 0
+            for character in excerpt:
+                position = normalized_block.find(character, cursor)
+                if position < 0:
+                    positions = []
+                    break
+                positions.append(position)
+                cursor = position + 1
+            if not positions:
+                continue
+            span = positions[-1] - positions[0] + 1
+            span_density = len(excerpt) / span
+            block_coverage = len(excerpt) / max(1, len(normalized_block))
+            prefix_anchor = 0
+            for length in range(1, len(excerpt) + 1):
+                if excerpt[:length] not in normalized_block:
+                    break
+                prefix_anchor = length
+            suffix_anchor = 0
+            for length in range(1, len(excerpt) + 1):
+                if excerpt[-length:] not in normalized_block:
+                    break
+                suffix_anchor = length
+            max_gap = max(
+                (right - left - 1 for left, right in zip(positions, positions[1:])),
+                default=0,
+            )
+            if (
+                prefix_anchor < 6
+                or suffix_anchor < 4
+                or prefix_anchor + suffix_anchor < 14
+                or span_density < 0.45
+                or block_coverage < 0.30
+                or max_gap > 40
+            ):
+                continue
+            candidates.append((
+                prefix_anchor + suffix_anchor,
+                span_density,
+                block_coverage,
+                block,
+            ))
+
+        if not candidates:
+            return []
+        candidates.sort(key=lambda value: (value[0], value[1], value[2]), reverse=True)
+        if len(candidates) > 1 and (
+            candidates[0][0] == candidates[1][0]
+            and abs(candidates[0][1] - candidates[1][1]) < 0.02
+            and abs(candidates[0][2] - candidates[1][2]) < 0.02
+        ):
+            return []
+        block = candidates[0][3]
+        return [type(source)(
+            source_type=source.source_type,
+            source_id=source.source_id,
+            location=block_value(block, "location"),
+            excerpt=block_value(block, "text"),
+        )]
+
+    @classmethod
+    def _explicit_ellipsis_range_source(
+        cls,
+        source: Any,
+        source_blocks: Sequence[Any],
+    ) -> list[Any]:
+        """Expand an explicitly abbreviated multi-block citation.
+
+        The text before and after an ellipsis must provide exact, sufficiently
+        long boundary anchors in an unambiguous, short, forward block range.
+        Every block in that range is then cited verbatim.  This supports Item
+        lists split by DOCX paragraph boundaries without treating the model's
+        abbreviated text as evidence.
+        """
+
+        parts = re.split(r"(?:\.{3,}|…+)", source.excerpt)
+        if len(parts) != 2:
+            return []
+        prefix, suffix = (value.strip() for value in parts)
+        leading_match = re.match(r".+?(?:[：:。！？!?；;])", prefix, re.DOTALL)
+        leading_anchor = leading_match.group(0).strip() if leading_match else prefix
+        trailing_anchor = suffix
+        if len(normalize_source_text(leading_anchor)) < 8:
+            return []
+        if len(normalize_source_text(trailing_anchor)) < 8:
+            return []
+
+        starts = [
+            index for index, block in enumerate(source_blocks)
+            if cls._excerpt_is_present(leading_anchor, block_value(block, "text"))
+        ]
+        ends = [
+            index for index, block in enumerate(source_blocks)
+            if cls._excerpt_is_present(trailing_anchor, block_value(block, "text"))
+        ]
+        ranges = [
+            (start, end)
+            for start in starts
+            for end in ends
+            if start < end and end - start + 1 <= 20
+        ]
+        if len(ranges) != 1:
+            return []
+        start, end = ranges[0]
+        selected = source_blocks[start:end + 1]
+        kinds = {block_value(block, "kind") for block in selected}
+        if len(kinds) != 1:
+            return []
+        return [type(source)(
+            source_type=source.source_type,
+            source_id=source.source_id,
+            location=block_value(block, "location"),
+            excerpt=block_value(block, "text"),
+        ) for block in selected if block_value(block, "text").strip()]
+
+    @staticmethod
     def _ensure_source_grounded(
         facts: ItemDefinitionFacts,
         functions: list[FunctionDefinition],
         document_text: str,
-    ) -> None:
+        source_blocks: Sequence[Any] = (),
+    ) -> list[dict[str, Any]]:
         """Require exact evidence from the approved Item Definition input."""
 
-        records = [("item_definition", facts.sources)] + [
-            (function.function_id, function.sources) for function in functions
+        records = [("item_definition", facts)] + [
+            (function.function_id, function) for function in functions
         ]
-        for identity, sources in records:
+        repairs: list[dict[str, Any]] = []
+        for identity, record in records:
+            sources = record.sources
             if not sources:
                 raise ValueError(f"{identity} missing Item Definition SourceRef")
+            grounded_sources = []
             for source in sources:
                 excerpt = source.excerpt.strip()
                 if source.source_type != "item_definition":
                     raise ValueError(f"{identity} has non-Item source authority")
                 if not source.location.strip() or not excerpt:
                     raise ValueError(f"{identity} has incomplete Item Definition SourceRef")
-                if excerpt not in document_text:
-                    raise ValueError(
-                        f"{identity} source excerpt is not present in Item Definition"
+                if ItemArtifactExtractionAgent._excerpt_is_present(
+                    excerpt, document_text,
+                ):
+                    grounded_sources.append(source)
+                    continue
+                repaired = ItemArtifactExtractionAgent._split_grounded_source(
+                    source, source_blocks,
+                )
+                repair_kind = "sentence_split"
+                if not repaired:
+                    repaired = ItemArtifactExtractionAgent._ordered_omission_source(
+                        source, source_blocks,
                     )
+                    repair_kind = "ordered_omission"
+                if not repaired:
+                    repaired = ItemArtifactExtractionAgent._explicit_ellipsis_range_source(
+                        source, source_blocks,
+                    )
+                    repair_kind = "explicit_ellipsis_range"
+                if repaired:
+                    grounded_sources.extend(repaired)
+                    repairs.append({
+                        "identity": identity,
+                        "repair_kind": repair_kind,
+                        "original_location": source.location,
+                        "repaired_locations": [value.location for value in repaired],
+                        "source_count": len(repaired),
+                    })
+                    continue
+                raise ValueError(
+                    f"{identity} source excerpt is not present in Item Definition; "
+                    f"location={source.location!r} excerpt={excerpt[:160]!r}"
+                )
+            record.sources = grounded_sources
+        return repairs
 
     def extract(
-        self, document_text: str, source_id: str,
+        self,
+        document_text: str,
+        source_id: str,
+        source_blocks: Sequence[Any] = (),
+        candidate_response: LLMResponse | None = None,
+        candidate_recorder: Callable[[LLMResponse], None] | None = None,
     ) -> tuple[ItemDefinitionFacts, list[FunctionDefinition], dict[str, Any]]:
         if not document_text.strip():
             raise ValueError("Item Definition文本为空")
@@ -75,6 +352,8 @@ class ItemArtifactExtractionAgent:
                 "weather_conditions、road_surfaces、speed_range_kph。functions每项包含function_id、name、"
                 "output、description、preconditions、triggers、odd_constraints、fallback_behavior、"
                 "consequences、source_location、source_excerpt、confidence、status。最多20个Function；"
+                "operating_modes、preconditions、triggers、odd_constraints、consequences必须是JSON array"
+                "或null，即使只有一条也不得返回string；fallback_behavior必须是string或null。"
                 "每项列表最多10条，所有source_excerpt最多120字符，且必须是输入原文中连续、逐字相同的摘录。"
                 "不得省略、改写或使用省略号。不得输出Markdown、解释或额外字段。\n\n"
                 + CONFIDENCE_PROMPT_CONTRACT + "\n"
@@ -84,33 +363,82 @@ class ItemArtifactExtractionAgent:
             prompt_version=self.PROMPT_VERSION,
             metadata={"source_id": source_id},
             max_tokens=initial_budget,
+            response_schema=CORE_ITEM_ARTIFACTS_SCHEMA,
         )
         started = time.monotonic()
         output_limit_retry = False
-        llm_call_count = 1
+        candidate_cache_hit = candidate_response is not None
+        llm_call_count = 0
+        if candidate_response is not None:
+            response = candidate_response
+        else:
+            llm_call_count = 1
+            try:
+                response = self.client.complete_json(request)
+            except LLMOutputLimitError:
+                first_attempt_elapsed = time.monotonic() - started
+                if initial_budget >= configured_limit:
+                    raise
+                output_limit_retry = True
+                print(
+                    "[HARA] core item artifact output limit "
+                    f"old_max_tokens={initial_budget} new_max_tokens={configured_limit} "
+                    f"first_attempt_elapsed={first_attempt_elapsed:.1f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                request = replace(request, max_tokens=configured_limit)
+                llm_call_count += 1
+                response = self.client.complete_json(request)
+            if candidate_recorder is not None:
+                candidate_recorder(response)
+        primary_response = response
+        schema_repair_response = None
+        schema_repair_count = 0
         try:
-            response = self.client.complete_json(request)
-        except LLMOutputLimitError:
-            first_attempt_elapsed = time.monotonic() - started
-            if initial_budget >= configured_limit:
-                raise
-            output_limit_retry = True
+            normalized_data, contract_normalizations = normalize_core_item_artifacts(
+                response.data
+            )
+        except CoreItemArtifactsContractError as error:
             print(
-                "[HARA] core item artifact output limit "
-                f"old_max_tokens={initial_budget} new_max_tokens={configured_limit} "
-                f"first_attempt_elapsed={first_attempt_elapsed:.1f}s",
+                "[HARA] core item schema repair "
+                f"error_count={len(error.errors)} attempt=1/1",
                 file=sys.stderr,
                 flush=True,
             )
-            request = replace(request, max_tokens=configured_limit)
+            repair_request = LLMRequest(
+                task="repair_core_item_artifact_schema",
+                system_prompt=(
+                    "You repair JSON representation only. Preserve every engineering "
+                    "statement, identifier, source location, source excerpt, confidence, "
+                    "and status. Do not add, remove, merge, or reinterpret Functions. "
+                    "Return exactly one raw JSON object matching CoreItemArtifacts."
+                ),
+                user_prompt=json.dumps({
+                    "contract_errors": error.errors,
+                    "invalid_payload": response.data,
+                }, ensure_ascii=False),
+                schema_name="CoreItemArtifacts",
+                prompt_version="item-artifacts-schema-repair-v1",
+                metadata={
+                    "source_id": source_id,
+                    "strict_no_format_retry": True,
+                },
+                max_tokens=request.max_tokens,
+                response_schema=CORE_ITEM_ARTIFACTS_SCHEMA,
+            )
+            schema_repair_response = self.client.complete_json(repair_request)
             llm_call_count += 1
-            response = self.client.complete_json(request)
-        item_raw = response.data.get("item_definition")
-        function_raw = response.data.get("functions")
-        if not isinstance(item_raw, dict):
-            raise ValueError("主抽取缺少item_definition对象")
-        if not isinstance(function_raw, list):
-            raise ValueError("主抽取缺少functions数组")
+            if candidate_recorder is not None:
+                candidate_recorder(schema_repair_response)
+            normalized_data, contract_normalizations = normalize_core_item_artifacts(
+                schema_repair_response.data
+            )
+            response = schema_repair_response
+            schema_repair_count = 1
+
+        item_raw = normalized_data["item_definition"]
+        function_raw = normalized_data["functions"]
 
         facts, warnings = ItemDefinitionNormalizer._parse_with_warnings(
             item_raw, source_id
@@ -119,7 +447,9 @@ class ItemArtifactExtractionAgent:
         FunctionNormalizer._validate_unique(functions)
         self.validator.ensure_valid(functions)
 
-        self._ensure_source_grounded(facts, functions, document_text)
+        source_reference_repairs = self._ensure_source_grounded(
+            facts, functions, document_text, source_blocks,
+        )
 
         # Provider labels are not approval authority.  The approved input plus
         # the deterministic schema/role/exact-source checks above are the gate.
@@ -133,8 +463,24 @@ class ItemArtifactExtractionAgent:
             "model": response.model,
             "request_id": response.request_id,
             "usage": response.usage,
+            "primary_model": primary_response.model,
+            "primary_request_id": primary_response.request_id,
+            "primary_usage": primary_response.usage,
+            "schema_repair_model": (
+                schema_repair_response.model if schema_repair_response else ""
+            ),
+            "schema_repair_request_id": (
+                schema_repair_response.request_id if schema_repair_response else ""
+            ),
+            "schema_repair_usage": (
+                schema_repair_response.usage if schema_repair_response else {}
+            ),
+            "schema_repair_count": schema_repair_count,
+            "contract_normalizations": contract_normalizations,
+            "candidate_cache_hit": candidate_cache_hit,
             "function_count": len(functions),
             "normalization_warnings": warnings,
+            "source_reference_repairs": source_reference_repairs,
             "output_limit_retry": output_limit_retry,
             "max_tokens": request.max_tokens,
             "elapsed_seconds": round(elapsed_seconds, 3),

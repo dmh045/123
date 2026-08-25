@@ -128,3 +128,17 @@ def test_scenario_risk_fact_single_item_is_wrapped():
     assert response.data == {"results": [item]}
     assert response.usage["schema_repair_count"] == 1
     assert len(calls) == 1
+
+
+def test_core_item_artifacts_rejects_wrong_top_level_field_types():
+    calls: list[bytes] = []
+
+    with pytest.raises(LLMSchemaContractError, match="functions"):
+        _client({
+            "item_definition": {},
+            "functions": "not-an-array",
+        }, calls).complete_json(_schema_request(
+            "extract_core_item_artifacts", "CoreItemArtifacts",
+        ))
+
+    assert len(calls) == 1

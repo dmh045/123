@@ -117,7 +117,6 @@ def score_structured_scenarios(
         item.get("physically_feasible") is True,
         item.get("functionally_relevant") is True,
         causal.is_validated,
-        bool(causal.risk_dimension_changes),
     ))]
     risks: list[RiskAssessment] = []
     pending: list[dict[str, Any]] = []

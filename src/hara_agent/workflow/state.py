@@ -101,8 +101,42 @@ class HARAState:
             state.risk_results = []
             state.safety_goals = []
             state.item_definition.pop("scenario_assessments", None)
+            typed = state.item_definition.get("typed")
+            if isinstance(typed, dict):
+                scenario_fact_ids = {
+                    str(item.get("fact_id", ""))
+                    for item in typed.get("risk_facts", [])
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get("produced_by", "")).startswith(
+                            "scenario-risk-facts-"
+                        )
+                    )
+                }
+                typed["risk_facts"] = [
+                    item for item in typed.get("risk_facts", [])
+                    if not (
+                        isinstance(item, dict)
+                        and str(item.get("fact_id", "")) in scenario_fact_ids
+                    )
+                ]
+                typed["method_risk_fact_bindings"] = [
+                    item for item in typed.get("method_risk_fact_bindings", [])
+                    if not (
+                        isinstance(item, dict)
+                        and str(item.get("source_fact_id", "")) in scenario_fact_ids
+                    )
+                ]
             state.pending_reviews = [
-                item for item in state.pending_reviews if item.get("field") != "scenarios"
+                item for item in state.pending_reviews
+                if not (
+                    item.get("field") in {
+                        "scenarios", "scenario_risk_facts", "severity", "exposure",
+                        "controllability", "asil", "safety_goal",
+                    }
+                    or "assessment_id" in item
+                    or "safety_goal_id" in item
+                )
             ]
             state.stage = WorkflowStage.MALFUNCTIONS
             state.audit_trail.append({

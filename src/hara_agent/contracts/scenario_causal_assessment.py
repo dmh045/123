@@ -11,7 +11,7 @@ from .causal_graph import CausalGraph, CausalNodeType
 from .evidence_binding import EvidenceBinding
 
 
-SCENARIO_CAUSAL_ASSESSMENT_VERSION = "scenario-causal-assessment-v1"
+SCENARIO_CAUSAL_ASSESSMENT_VERSION = "scenario-causal-assessment-v2"
 
 
 class CausalBreakpoint(str, Enum):

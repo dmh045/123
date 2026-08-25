@@ -180,9 +180,15 @@ def build_fact_registry(
             {"extracted_by": "LLM"},
         ))
     for key, value in sorted(scenario.facts.items()):
-        if value is None or key.endswith("_source_status") or key in {
-            "engineering_status", "review_reason",
-        }:
+        if (
+            value is None
+            or (isinstance(value, str) and not value.strip())
+            or (isinstance(value, (list, tuple, dict, set)) and not value)
+            or key.endswith("_source_status")
+            or key in {
+                "engineering_status", "review_reason", "method_scenario_dimensions",
+            }
+        ):
             continue
         metadata = scenario.fact_provenance.get(key, {})
         if not isinstance(metadata, dict):
@@ -408,11 +414,6 @@ def validate_evidence_contract(
                      code=ScenarioEvidenceErrorCode.CAUSAL_FALSE_WITH_DIMENSIONS,
                      hop="risk_dimension_changes", claim="", basis_type="", invalid_refs=[],
                      reason="causal=false requires no dimension changes")
-    if causal and not dimensions:
-        raise _error(malfunction, scenario, prompt_version, batch, split_path, split_depth,
-                     code=ScenarioEvidenceErrorCode.CAUSAL_TRUE_WITHOUT_DIMENSIONS,
-                     hop="risk_dimension_changes", claim="", basis_type="", invalid_refs=[],
-                     reason="causal=true requires dimension evidence")
     return dimensions, {"assumption_hop_count": assumption_hops}
 
 
@@ -554,7 +555,6 @@ def compile_causal_assessment(
         ReviewStatus.FINALIZED
         if (
             malfunction.status is ReviewStatus.FINALIZED
-            and scenario.status is ReviewStatus.FINALIZED
             and all(item.status is ReviewStatus.FINALIZED for item in bindings)
             and all(
                 record is not None

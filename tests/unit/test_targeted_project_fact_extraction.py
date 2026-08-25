@@ -66,3 +66,26 @@ def test_targeted_project_fact_calls_use_extraction_thinking_policy():
     assert OpenAICompatibleClient._is_extraction_task(
         "extract_targeted_project_facts:speed"
     )
+
+
+def test_speed_prompt_accepts_mode_transition_as_direct_evidence():
+    client = TargetedClient()
+    routed = RoutedDocumentBlocks(
+        "project_evidence", ["B1"],
+        "[B1] table[9].row[4]: Standby to Active | vehicle speed <=20km/h",
+        [{
+            "block_id": "B1",
+            "location": "table[9].row[4]",
+            "kind": "table_row",
+            "text": "Standby to Active | vehicle speed <=20km/h",
+        }],
+    )
+
+    TargetedProjectFactExtractionAgent(client).extract(
+        "speed", (SPEED_PROJECT_FACT_SPECS[0],), routed, "ItemDef.docx"
+    )
+
+    assert "activation, entry, transition" in client.request.system_prompt
+    assert TargetedProjectFactExtractionAgent.PROMPT_VERSION.endswith(
+        "mode-transition-evidence"
+    )

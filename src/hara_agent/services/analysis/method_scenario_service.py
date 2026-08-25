@@ -203,15 +203,26 @@ class MethodScenarioCandidateService:
                     dimension.source_ref.raw_text,
                 )
                 binding = bindings.get(dimension_name, {})
+                project_value = str(binding.get("project_value", "")).strip()
+                exact_binding = binding.get("binding_status") == "EXACT"
                 binding_approval = (
-                    project_facts.status
-                    if binding.get("binding_status") == "EXACT"
+                    ReviewStatus.FINALIZED
+                    if (
+                        project_value
+                        and bool(project_sources)
+                    )
                     else ReviewStatus.PENDING
                 )
                 fact_provenance[key] = self._fact_metadata(
-                    FactProvenance.DERIVED,
+                    (
+                        FactProvenance.DERIVED
+                        if exact_binding else FactProvenance.PROJECT_INPUT
+                    ),
                     binding_approval,
-                    [*project_sources, method_source],
+                    (
+                        [*project_sources, method_source]
+                        if exact_binding else project_sources
+                    ),
                 )
             fact_provenance["ego_speed_kph"] = self._fact_metadata(
                 speed_resolution.provenance,
@@ -240,7 +251,6 @@ class MethodScenarioCandidateService:
             )
             finalized = (
                 not unresolved
-                and project_facts.status is ReviewStatus.FINALIZED
                 and speed_resolution.approval is ReviewStatus.FINALIZED
                 and bool(project_sources)
             )
@@ -255,7 +265,11 @@ class MethodScenarioCandidateService:
             ]
             fact_provenance["operating_mode"] = self._fact_metadata(
                 FactProvenance.PROJECT_INPUT,
-                project_facts.status,
+                (
+                    ReviewStatus.FINALIZED
+                    if operating_mode.strip() and project_sources
+                    else ReviewStatus.PENDING
+                ),
                 project_sources,
             )
             fact_provenance["method_scenario_dimensions"] = self._fact_metadata(
