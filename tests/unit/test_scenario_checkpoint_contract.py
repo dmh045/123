@@ -37,7 +37,7 @@ def test_old_causal_assessment_checkpoint_is_invalidated_without_losing_malfunct
 
     state = HARAState.from_dict(value)
 
-    assert SCENARIO_ASSESSMENT_CONTRACT_VERSION == "scenario-causal-assessment-v2"
+    assert SCENARIO_ASSESSMENT_CONTRACT_VERSION == "scenario-causal-assessment-v4"
     assert state.stage is WorkflowStage.MALFUNCTIONS
     assert state.functions == [{"function_id": "F01"}]
     assert state.malfunctions == [{"malfunction_id": "MF-F01-001"}]

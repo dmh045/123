@@ -1,0 +1,37 @@
+# skills/hara/c_iso26262.yaml
+source: "ISO 26262-3:2018 §6.4.3"
+spec_version: "2nd Edition 2018"
+
+definitions:
+  C0:
+    name: "Controllable in general"
+    text: "The damage is always avoidable through normal driver reaction"
+  C1:
+    name: "Simply controllable"
+    text: "Less than 1% of average drivers or other road users usually cannot avert the damage"
+  C2:
+    name: "Normally controllable"
+    text: "Less than 10% of average drivers or other road users usually cannot avert the damage"
+  C3:
+    name: "Difficult to control or uncontrollable"
+    text: "The average driver or other road user can usually hardly fend off the damage"
+
+# ISO 26262-3 §6.4.3.9 明文给的 C0 硬规则 —— 这是唯一标准级的 C 硬规则
+c0_official_rules:
+  - id: c0_no_safety_impact
+    condition: "失效不影响车辆安全运行（如某些驾驶员辅助系统）"
+    note: "分配 C0 后无需 ASIL 分配"
+  - id: c0_avoidable_by_normal_behavior
+    condition: "事故可被常规驾驶员行为避免"
+    note: "分配 C0 后无需 ASIL 分配"
+
+# ISO 26262-3 §6.4.3 Note 4/5 的方法论提示 —— 给 LLM 当软约束用
+methodology_notes:
+  - "可控性涉及多个交通参与者时，可基于故障车辆 + 其他参与者的假设操作综合评估"
+  - "若危害与车辆方向/速度控制无关（如肢体陷附），评估的是受险人能自行脱离/被脱离的概率"
+  - "选择 C 等级时可用专用法规 + 实际使用证据作为支持"
+
+driver_assumptions:
+  - "驾驶员未疲劳"
+  - "持有相应驾照、受过训练"
+  - "遵守所有适用法律法规"

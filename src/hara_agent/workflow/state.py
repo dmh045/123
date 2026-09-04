@@ -38,6 +38,7 @@ class HARAState:
     method_contract: dict[str, Any] = field(default_factory=dict)
     item_definition: dict[str, Any] = field(default_factory=dict)
     functions: list[dict[str, Any]] = field(default_factory=list)
+    guideword_assessments: list[dict[str, Any]] = field(default_factory=list)
     malfunctions: list[dict[str, Any]] = field(default_factory=list)
     scenarios: list[ScenarioCandidate] = field(default_factory=list)
     risk_results: list[RiskAssessment] = field(default_factory=list)
@@ -70,6 +71,7 @@ class HARAState:
             method_contract=dict(value.get("method_contract", {})),
             item_definition=dict(value.get("item_definition", {})),
             functions=list(value.get("functions", [])),
+            guideword_assessments=list(value.get("guideword_assessments", [])),
             malfunctions=list(value.get("malfunctions", [])),
             pending_reviews=list(value.get("pending_reviews", [])),
             audit_trail=list(value.get("audit_trail", [])),
@@ -189,6 +191,7 @@ class HARAState:
             atomic_variant=str(value.get("atomic_variant", "")),
             semantic_fingerprint=str(value.get("semantic_fingerprint", "")),
             scenario_contract_version=str(value.get("scenario_contract_version", "")),
+            exposure_context=list(value.get("exposure_context", [])),
         )
 
     @classmethod

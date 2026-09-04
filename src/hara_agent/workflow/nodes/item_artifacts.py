@@ -21,6 +21,7 @@ from hara_agent.services.semantic import (
 )
 from hara_agent.services.semantic.item_definition_agent import ItemDefinitionNormalizer
 from hara_agent.workflow.state import HARAState, WorkflowStage
+from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
 from .parallel import ordered_parallel_map
 
@@ -148,6 +149,7 @@ def extract_item_artifacts(
     cache: ValidatedArtifactCache | None = None,
     required_fact_specs: Sequence[RequiredFactSpec] = (),
     requested_operating_modes: Sequence[str] = (),
+    review_artifact_writer: ReviewArtifactWriter | None = None,
 ) -> HARAState:
     """Run one full-document extraction, then only targeted repair calls."""
     stage_started = time.monotonic()
@@ -463,6 +465,9 @@ def extract_item_artifacts(
 
     state.item_definition["typed"] = asdict(facts)
     state.functions = [asdict(item) for item in functions]
+    if review_artifact_writer is not None:
+        for function in functions:
+            review_artifact_writer.record_function(function)
     state.record(
         "item_artifacts_extracted",
         **main_audit,

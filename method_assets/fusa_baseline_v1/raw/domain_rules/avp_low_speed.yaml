@@ -1,0 +1,82 @@
+# skills/hara/domain_rules/avp_low_speed.yaml
+#
+# Domain plugin: AVP（代客泊车 / 自动泊车）低速场景
+#
+# 适用条件：
+#   - item_purpose 包含 "AVP" / "代客泊车" / "自动泊车" 等关键词
+#   - ODD 最高速度 ≤ 30 km/h（停车场 / 低速园区场景）
+#
+# 数据来源：
+#   exposure.*                ← IAV EHYREEV 项目 Sheet 6 反推（具体值有 IAV 项目特色）
+#   controllability.modifiers ← IAV C选择原因表（驾驶员不在车内场景）
+#   severity.pedestrian       ← IAV Sheet 6 反推 + 业界共识
+#   triggering_state_mapping  ← fusa_agent 项目内部翻译层（不是 ISO 26262 标准）
+#   standard_kinematic_values ← IAV 附录运动学表的输入参数标准取值
+#   fallback_scenario_dimensions ← IAV Sheet 4 场景库（ODD 缺维度时兜底）
+#
+# 更换 domain 时：替换此文件（或新增同目录其他文件），iso26262_spec.yaml 不动。
+
+exposure:
+  combine_method: min  # 多维度组合时取最小值（ISO 26262-3 §6.4.3.5）
+
+  road_type:
+    停车场: E4
+    城市道路: E3
+    城市快速路: E3
+    高速公路: E2
+    乡村道路: E2
+
+  weather:
+    正常天气条件: E4
+    小雨: E3
+    大雨: E2
+    暴风雨: E1
+    冰雹: E1
+
+  # 来自 IAV Sheet 6 反推的具体取值
+  triggering_state:
+    后方有静止车辆: E4
+    后方有运动车辆_10kmh: E4
+    后方有运动车辆_30kmh: E2
+    侧方有静止车辆: E3
+    前方有静止车辆: E3
+    前方有行人: E3
+    前方有运动行人: E2
+
+controllability:
+  # Domain 级修正规则（叠加在 iso26262_spec.yaml ttc_thresholds 之上）
+  modifiers:
+    # AVP 场景：驾驶员不在车内一律 C3（ISO 26262 §6.4.3.6 可控性前提不成立）
+    driver_out_of_seat: C3
+
+severity:
+  # 行人特殊规则：与行人相撞至少 S2
+  # 来源：IAV Sheet 6 反推（自车 7 km/h 撞静止行人 → S2）+ 业界共识
+  pedestrian:
+    minimum: S2
+
+# kinematic_inputs → triggering_state key 的翻译规则
+# 这是项目内部翻译层，不是 ISO 26262 标准
+triggering_state_mapping:
+  rules:
+    - { collision_type: rear,  target: vehicle,    v_other_kmh: { min: 0,  max: 0  }, key: 后方有静止车辆 }
+    - { collision_type: rear,  target: vehicle,    v_other_kmh: { min: 5,  max: 15 }, key: 后方有运动车辆_10kmh }
+    - { collision_type: rear,  target: vehicle,    v_other_kmh: { min: 25, max: 35 }, key: 后方有运动车辆_30kmh }
+    - { collision_type: side,  target: vehicle,    v_other_kmh: { min: 0,  max: 0  }, key: 侧方有静止车辆 }
+    - { collision_type: front, target: vehicle,    v_other_kmh: { min: 0,  max: 0  }, key: 前方有静止车辆 }
+    - { collision_type: front, target: pedestrian, v_other_kmh: { min: 0,  max: 0  }, key: 前方有行人 }
+    - { collision_type: front, target: pedestrian, v_other_kmh: { min: 1,  max: 10 }, key: 前方有运动行人 }
+
+# 来自 IAV 附录运动学表的标准输入参数
+standard_kinematic_values:
+  v_other_kmh: [0, 10, 30]
+  gap_m:
+    front: 0.3
+    side: 1.75
+    rear: 3.0
+  default_reaction_delay_s: 0.5
+
+# 当 docx ODD 章节缺某维度时使用（来自 IAV Sheet 4 场景库）
+fallback_scenario_dimensions:
+  road_state: [直道, T字路口, 十字路口, 弯道, 辅路, 坡道]
+  surrounding: [静止车辆, 运动车辆, 行人横跨道路, 行人路边行走, 路面障碍物]

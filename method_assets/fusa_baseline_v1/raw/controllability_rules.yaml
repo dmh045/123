@@ -1,0 +1,23 @@
+version: "1.0-baseline"
+source: "ISO 26262 Part 3 Annex B"
+
+c_iso26262_definitions:
+  source: "SCE sheet, all MQB files (B10..E12, B11..E12)"
+  C0: "Always controllable: damage always avoidable through normal driver reaction"
+  C1: "Easily controllable: <1% of drivers cannot avert damage"
+  C2: "Usually controllable: <10% of drivers cannot avert damage"
+  C3: "Difficult/uncontrollable: average driver can usually hardly fend off damage"
+
+c_iav_threshold_table:
+  source: "IAV C选择原因!B1..E2"
+  applies_to: "forward collision direction only (后/边 unspecified in source)"
+  thresholds:
+    C0: null    # 原表未填
+    C1: "3s - 5s"
+    C2: "1.5s - 3s"
+    C3: "0 - 1.5s"
+
+c_mqb_assumption_layer_rules:
+  - source: "MQBEvo Prerequisite & Assumptions park!D17, cite REF_19 FuSi validation study"
+    condition: "steering intervention AND v < 15 kph"
+    result: C1

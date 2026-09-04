@@ -14,6 +14,7 @@ def ordered_parallel_map(
     *,
     max_workers: int,
     on_progress: Callable[[int, int], None] | None = None,
+    on_result: Callable[[InputT, OutputT], None] | None = None,
 ) -> list[OutputT]:
     """Run independent LLM tasks concurrently while preserving input order."""
     if max_workers < 1:
@@ -24,7 +25,10 @@ def ordered_parallel_map(
     if max_workers == 1 or total == 1:
         results = []
         for completed, item in enumerate(items, start=1):
-            results.append(worker(item))
+            result = worker(item)
+            results.append(result)
+            if on_result:
+                on_result(item, result)
             if on_progress:
                 on_progress(completed, total)
         return results
@@ -37,7 +41,11 @@ def ordered_parallel_map(
         completed = 0
         try:
             for future in as_completed(futures):
-                results[futures[future]] = future.result()
+                index = futures[future]
+                result = future.result()
+                results[index] = result
+                if on_result:
+                    on_result(items[index], result)
                 completed += 1
                 if on_progress:
                     on_progress(completed, total)

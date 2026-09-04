@@ -149,10 +149,36 @@ def test_exposure_method_requires_its_own_grounded_provenance():
     assert "exposure_method" in scored["exposure"]["engineering_basis"]
 
 
+def test_unresolved_exposure_and_controllability_use_engineering_paths_not_item_guesses():
+    method = _method()
+    facts = {
+        "collision_type": "FRONTAL",
+        "speed_unspecified_kph": 20.0,
+        "_fact_provenance": {
+            "collision_type": _source("collision_type"),
+            "speed_unspecified_kph": _source("speed_unspecified_kph"),
+        },
+    }
+
+    scored = MethodRuleScoringService(method).score(facts, "hazard")
+
+    assert scored["exposure"]["engineering_status"] == "PENDING"
+    assert "no T/F project fact is requested" in scored["exposure"]["engineering_basis"]
+    assert scored["exposure"]["reference_mapping_count"] == 376
+    assert "exposure_situation_mapping" in scored["exposure"]["calculation_path"]
+    assert scored["controllability"]["engineering_status"] == "PENDING"
+    assert "not extracted or guessed" in scored["controllability"]["engineering_basis"]
+    assert "avoidability_executor" in scored["controllability"]["calculation_path"]
+
+
 def test_synthetic_causal_hara_regression_preserves_scoring_goal_gate_and_draft():
     method = _method()
     facts, provenance = _canonical_facts()
     facts["avoidability_percent"] = 80.0
+    facts["relative_distance"] = "10 m"
+    facts["relative_speed_kph"] = 18.0
+    provenance["relative_distance"] = _source("relative_distance")
+    provenance["relative_speed_kph"] = _source("relative_speed_kph")
     state = HARAState(run_id="method-scoring", stage=WorkflowStage.SCORING)
     state.functions = [{"function_id": "FUN-1", "name": "braking control"}]
     state.scenarios = [ScenarioCandidate(
@@ -198,6 +224,15 @@ def test_synthetic_causal_hara_regression_preserves_scoring_goal_gate_and_draft(
     assert risk.asil.value == "B"
     assert risk.asil.status is ReviewStatus.PENDING
     assert risk.asil.sources[0].source_type == "method_contract"
+    calculation_event = next(
+        item for item in result.audit_trail
+        if item["event"] == "structured_risk_scoring_completed"
+    )
+    calculation = calculation_event["risk_calculation_inputs"][0]
+    assert calculation["controllability_input"]["ttc_s"] == 2.0
+    assert "ttc_s" in calculation["controllability_input"]["inputs_used"]
+    assert calculation["ftti_input"]["asil"] == "B"
+    assert calculation["ftti_input"]["status"] == "PENDING_METHOD_SEMANTICS"
 
     aggregate_safety_goals(result, MethodSafetyGoalService(method))
     pass_quality_gate(result)

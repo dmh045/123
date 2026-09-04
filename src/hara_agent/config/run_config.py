@@ -8,9 +8,11 @@ from typing import Optional
 @dataclass(frozen=True)
 class RunConfig:
     item_path: Path
-    template_path: Path
+    template_path: Optional[Path]
     output_path: Path
     run_dir: Path
+    method_baseline_path: Path = Path("method_assets/fusa_baseline_v1/manifest.yaml")
+    report_template_path: Path = Path("references/HARA_Template_AI_20260327.xlsx")
     allow_draft: bool = False
     resume: bool = False
     run_id: str = "hara-run"
@@ -23,10 +25,22 @@ class RunConfig:
     def validate(self) -> None:
         if not self.item_path.is_file():
             raise FileNotFoundError(f"Item Definition不存在: {self.item_path}")
-        if not self.template_path.is_file():
-            raise FileNotFoundError(f"HARA模板不存在: {self.template_path}")
-        if self.template_path.suffix.lower() != ".xlsx":
-            raise ValueError("HARA模板必须为.xlsx文件")
+        if self.template_path is not None:
+            if not self.template_path.is_file():
+                raise FileNotFoundError(f"HARA模板不存在: {self.template_path}")
+            if self.template_path.suffix.lower() != ".xlsx":
+                raise ValueError("HARA模板必须为.xlsx文件")
+        else:
+            if not self.method_baseline_path.is_file():
+                raise FileNotFoundError(
+                    f"HARA YAML baseline manifest不存在: {self.method_baseline_path}"
+                )
+            if not self.report_template_path.is_file():
+                raise FileNotFoundError(
+                    f"HARA报告模板不存在: {self.report_template_path}"
+                )
+            if self.report_template_path.suffix.lower() != ".xlsx":
+                raise ValueError("HARA报告模板必须为.xlsx文件")
         if self.output_path.suffix.lower() != ".xlsx":
             raise ValueError("输出报告必须为.xlsx文件")
         if not self.run_id or any(not (char.isalnum() or char in "-_") for char in self.run_id):

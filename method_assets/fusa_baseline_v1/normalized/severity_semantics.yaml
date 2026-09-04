@@ -1,0 +1,12 @@
+schema_version: "1.0"
+source: "canonical HARA RiskFact vocabulary mapped to severity_table.yaml"
+road_user_groups:
+  VEHICLE: vehicle
+  PEDESTRIAN: pedestrian
+  CYCLIST: cyclist
+  MOTORCYCLIST: motorcycle
+collision_types:
+  FRONTAL: frontal
+  REAR_END: rear
+  SIDE: side
+  VEHICLE_TO_ROAD_USER: any

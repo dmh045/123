@@ -5,14 +5,21 @@ import json
 import os
 import re
 from dataclasses import asdict
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
-from hara_agent.contracts import FactOrigin, RequiredFactSpec
+from hara_agent.contracts import (
+    FactOrigin, FactType, RequiredFactSpec, RiskFactResolution,
+    RiskFactResolutionStatus,
+)
 from hara_agent.infrastructure.llm import LLMClient, LLMRequest
 from hara_agent.models import (
     FactProvenance, MalfunctionCandidate, ReviewStatus, RiskFact,
     ScenarioCandidate, SourceRef,
 )
+from hara_agent.models.project_facts import risk_fact_from_dict
+
+
+SCENARIO_RISK_FACT_BATCH_CACHE_VERSION = "scenario-risk-fact-batch-v2"
 
 
 class ScenarioRiskFactAgent:
@@ -23,7 +30,7 @@ class ScenarioRiskFactAgent:
     HUMAN_EVIDENCE and DERIVED_FACT requirements are never guessed here.
     """
 
-    PROMPT_VERSION = "scenario-risk-facts-v2"
+    PROMPT_VERSION = "scenario-risk-facts-v4-dependent-resolution"
 
     def __init__(self, client: LLMClient, *, batch_max_results: int | None = None):
         self.client = client
@@ -70,12 +77,54 @@ class ScenarioRiskFactAgent:
             for evidence_id, source in registry.items()
         ], registry)
 
+    @staticmethod
+    def _allowed_evidence_ids(
+        pairs: Sequence[dict[str, Any]],
+        registry: dict[str, SourceRef],
+    ) -> dict[tuple[str, str], set[str]]:
+        """Scope batch evidence to the malfunction/scenario pair that supplied it.
+
+        The Provider receives a compact batch-wide evidence catalog for efficiency,
+        but a fact for one pair must never cite an excerpt introduced only by another
+        pair in the same batch.  Source identity is exact; no prose or domain
+        inference is performed here.
+        """
+        evidence_id_by_source = {
+            source: evidence_id for evidence_id, source in registry.items()
+        }
+        allowed: dict[tuple[str, str], set[str]] = {}
+        for pair in pairs:
+            pair_id = (
+                str(pair["malfunction_id"]),
+                str(pair["scenario_id"]),
+            )
+            sources = list(dict.fromkeys(
+                source
+                for item in (
+                    pair["candidate"], pair["malfunction_candidate"],
+                )
+                for source in item.sources
+                if (
+                    source.source_type == "item_definition"
+                    and source.source_id
+                    and source.excerpt
+                )
+            ))
+            allowed[pair_id] = {
+                evidence_id_by_source[source]
+                for source in sources if source in evidence_id_by_source
+            }
+        return allowed
+
     def interpret(
         self,
         assessments: Sequence[dict[str, Any]],
         candidates: Sequence[ScenarioCandidate],
         malfunctions: Sequence[MalfunctionCandidate],
         required_specs: Sequence[RequiredFactSpec],
+        *,
+        batch_cache: dict[str, Any] | None = None,
+        on_batch: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> tuple[list[RiskFact], dict[str, Any]]:
         specs = [item for item in required_specs if item.origin is FactOrigin.SCENARIO_FACT]
         retained = [item for item in assessments if all((
@@ -92,6 +141,7 @@ class ScenarioRiskFactAgent:
                 "found_fact_count": 0,
                 "missing_fact_count": len(retained) * len(specs),
                 "llm_call_count": 0,
+                "fact_resolutions": [],
             }
 
         candidate_by_id = {item.scenario_id: item for item in candidates}
@@ -118,16 +168,112 @@ class ScenarioRiskFactAgent:
                 "candidate": candidate,
                 "malfunction_candidate": malfunction,
             })
-        pairs_per_batch = max(1, self.batch_max_results // len(specs))
-        facts: list[RiskFact] = []
-        batch_audits = []
-        for start in range(0, len(pair_material), pairs_per_batch):
-            batch_facts, batch_audit = self._interpret_batch(
-                pair_material[start:start + pairs_per_batch], specs,
+        speed_specs = [
+            item for item in specs if item.fact_type is FactType.SPEED_UNSPECIFIED
+        ]
+        road_user_specs = [
+            item for item in specs if item.fact_type is FactType.ROAD_USER_TYPE
+        ]
+        primary_specs = [
+            item for item in specs
+            if item.fact_type not in {
+                FactType.SPEED_UNSPECIFIED, FactType.ROAD_USER_TYPE,
+            }
+        ]
+        facts, batch_audits, cache_hits = self._interpret_specs(
+            pair_material, primary_specs, batch_cache=batch_cache, on_batch=on_batch,
+        )
+        collision_by_pair = {
+            (
+                item.context.get("malfunction_id", ""),
+                item.context.get("scenario_id", ""),
+            ): str(item.value).upper()
+            for item in facts if item.parameter == FactType.COLLISION_TYPE.value
+        }
+        road_user_pairs = [
+            pair for pair in pair_material
+            if collision_by_pair.get((
+                str(pair["malfunction_id"]), str(pair["scenario_id"]),
+            )) == "VEHICLE_TO_ROAD_USER"
+        ]
+        road_facts, road_audits, road_cache_hits = self._interpret_specs(
+            road_user_pairs, road_user_specs,
+            batch_cache=batch_cache, on_batch=on_batch,
+        )
+        facts.extend(road_facts)
+        batch_audits.extend(road_audits)
+        cache_hits += road_cache_hits
+
+        fact_by_key = {
+            (
+                item.context.get("malfunction_id", ""),
+                item.context.get("scenario_id", ""),
+                item.parameter,
+            ): item for item in facts
+        }
+        not_found_keys = {
+            tuple(key) for item in batch_audits
+            for key in item.get("not_found_keys", [])
+        }
+        unresolved_keys = {
+            tuple(key) for item in batch_audits
+            for key in item.get("unresolved_contract_keys", [])
+        }
+        resolutions: list[RiskFactResolution] = []
+        for pair in pair_material:
+            pair_id = (
+                str(pair["malfunction_id"]), str(pair["scenario_id"]),
             )
-            facts.extend(batch_facts)
-            batch_audits.append(batch_audit)
+            collision = collision_by_pair.get(pair_id, "")
+            for spec in specs:
+                key = (*pair_id, spec.fact_type.value)
+                fact = fact_by_key.get(key)
+                if fact is not None:
+                    status = RiskFactResolutionStatus.FOUND
+                    reason = "A source-grounded fact passed the bounded schema contract."
+                    fact_id = fact.fact_id
+                elif spec in speed_specs:
+                    status = RiskFactResolutionStatus.UNRESOLVED_METHOD_SEMANTICS
+                    reason = (
+                        "The template speed variable is explicitly unresolved; an ego, "
+                        "relative, impact, or delta-V meaning must be approved before binding."
+                    )
+                    fact_id = ""
+                elif spec in road_user_specs and collision != "VEHICLE_TO_ROAD_USER":
+                    if collision:
+                        status = RiskFactResolutionStatus.NOT_APPLICABLE
+                        reason = (
+                            "ROAD_USER_TYPE is not required for the resolved non-road-user "
+                            "collision configuration."
+                        )
+                    else:
+                        status = RiskFactResolutionStatus.UNRESOLVED_DEPENDENCY
+                        reason = (
+                            "ROAD_USER_TYPE was not requested because COLLISION_TYPE is unresolved."
+                        )
+                    fact_id = ""
+                elif key in not_found_keys:
+                    status = RiskFactResolutionStatus.ABSENT_IN_EVIDENCE
+                    reason = "No exact supporting excerpt was present in the supplied evidence."
+                    fact_id = ""
+                elif key in unresolved_keys:
+                    status = RiskFactResolutionStatus.EXTRACTION_FAILED
+                    reason = "The Provider result remained invalid after one bounded repair."
+                    fact_id = ""
+                else:
+                    status = RiskFactResolutionStatus.UNRESOLVED_DEPENDENCY
+                    reason = "A prerequisite fact required to request this fact is unresolved."
+                    fact_id = ""
+                resolutions.append(RiskFactResolution(
+                    malfunction_id=pair_id[0], scenario_id=pair_id[1],
+                    fact_type=spec.fact_type.value, status=status,
+                    reason=reason, fact_id=fact_id,
+                ))
         expected_count = len(pair_material) * len(specs)
+        resolution_counts = {
+            status.value: sum(item.status is status for item in resolutions)
+            for status in RiskFactResolutionStatus
+        }
         return facts, {
             "prompt_version": self.PROMPT_VERSION,
             "models": [item["model"] for item in batch_audits],
@@ -135,6 +281,11 @@ class ScenarioRiskFactAgent:
             "usage": {"batches": [item["usage"] for item in batch_audits]},
             "requested_pair_count": len(retained),
             "requested_fact_type_count": len(specs),
+            "candidate_fact_pair_count": expected_count,
+            "llm_requested_fact_pair_count": (
+                len(pair_material) * len(primary_specs)
+                + len(road_user_pairs) * len(road_user_specs)
+            ),
             "found_fact_count": len(facts),
             "missing_fact_count": expected_count - len(facts),
             "batch_count": len(batch_audits),
@@ -142,8 +293,119 @@ class ScenarioRiskFactAgent:
                 item["coverage_repair_count"] for item in batch_audits
             ),
             "llm_call_count": sum(item["llm_call_count"] for item in batch_audits),
+            "batch_cache_hit_count": cache_hits,
+            "validation_failure_count": sum(
+                item.get("validation_failure_count", 0) for item in batch_audits
+            ),
+            "unresolved_contract_count": sum(
+                item.get("unresolved_contract_count", 0) for item in batch_audits
+            ),
+            "unresolved_contract_keys": [
+                key for item in batch_audits
+                for key in item.get("unresolved_contract_keys", [])
+            ],
+            "resolution_counts": resolution_counts,
+            "fact_resolutions": [item.to_dict() for item in resolutions],
             "facts": [asdict(item) for item in facts],
         }
+
+    def _interpret_specs(
+        self,
+        pair_material: Sequence[dict[str, Any]],
+        specs: Sequence[RequiredFactSpec],
+        *,
+        batch_cache: dict[str, Any] | None,
+        on_batch: Callable[[str, dict[str, Any]], None] | None,
+    ) -> tuple[list[RiskFact], list[dict[str, Any]], int]:
+        if not pair_material or not specs:
+            return [], [], 0
+        pairs_per_batch = max(1, self.batch_max_results // len(specs))
+        facts: list[RiskFact] = []
+        audits: list[dict[str, Any]] = []
+        cache_hits = 0
+        for start in range(0, len(pair_material), pairs_per_batch):
+            batch_pairs = pair_material[start:start + pairs_per_batch]
+            cache_key = self._batch_cache_key(batch_pairs, specs)
+            cached = self._load_batch_cache(
+                (batch_cache or {}).get(cache_key), batch_pairs,
+            )
+            if cached is not None:
+                batch_facts, batch_audit = cached
+                cache_hits += 1
+            else:
+                batch_facts, batch_audit = self._interpret_batch(batch_pairs, specs)
+                entry = {
+                    "cache_version": SCENARIO_RISK_FACT_BATCH_CACHE_VERSION,
+                    "cache_key": cache_key,
+                    "facts": [asdict(item) for item in batch_facts],
+                    "audit": batch_audit,
+                }
+                if batch_cache is not None:
+                    batch_cache[cache_key] = entry
+                if on_batch is not None:
+                    on_batch(cache_key, entry)
+            facts.extend(batch_facts)
+            audits.append(batch_audit)
+        return facts, audits, cache_hits
+
+    def _batch_cache_key(
+        self,
+        pairs: Sequence[dict[str, Any]],
+        specs: Sequence[RequiredFactSpec],
+    ) -> str:
+        config = getattr(self.client, "config", None)
+        material = {
+            "cache_version": SCENARIO_RISK_FACT_BATCH_CACHE_VERSION,
+            "prompt_version": self.PROMPT_VERSION,
+            "provider": getattr(config, "provider", type(self.client).__name__),
+            "base_url": getattr(config, "base_url", ""),
+            "model": getattr(config, "model", type(self.client).__name__),
+            "pairs": [{
+                **{
+                    key: value for key, value in pair.items()
+                    if key not in {"candidate", "malfunction_candidate"}
+                },
+                "candidate": asdict(pair["candidate"]),
+                "malfunction_candidate": asdict(pair["malfunction_candidate"]),
+            } for pair in pairs],
+            "specs": [asdict(item) for item in specs],
+        }
+        serialized = json.dumps(
+            material, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _load_batch_cache(
+        self,
+        entry: object,
+        pairs: Sequence[dict[str, Any]],
+    ) -> tuple[list[RiskFact], dict[str, Any]] | None:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("cache_version") != SCENARIO_RISK_FACT_BATCH_CACHE_VERSION
+        ):
+            return None
+        try:
+            facts = [risk_fact_from_dict(item) for item in entry.get("facts", [])]
+            audit = dict(entry["audit"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        expected_pairs = {
+            (str(item["malfunction_id"]), str(item["scenario_id"]))
+            for item in pairs
+        }
+        if any(
+            (
+                item.context.get("malfunction_id", ""),
+                item.context.get("scenario_id", ""),
+            ) not in expected_pairs
+            or item.produced_by != self.PROMPT_VERSION
+            or item.approval is not ReviewStatus.FINALIZED
+            for item in facts
+        ):
+            return None
+        return facts, audit
 
     def _interpret_batch(
         self,
@@ -153,6 +415,7 @@ class ScenarioRiskFactAgent:
         candidates = [item["candidate"] for item in pairs]
         malfunctions = [item["malfunction_candidate"] for item in pairs]
         evidence, registry = self._evidence(candidates, malfunctions)
+        allowed_evidence_ids = self._allowed_evidence_ids(pairs, registry)
         fact_requests = []
         expected: set[tuple[str, str, str]] = set()
         spec_by_type = {item.fact_type.value: item for item in specs}
@@ -177,8 +440,9 @@ class ScenarioRiskFactAgent:
                 })
         request = self._request(fact_requests, evidence, coverage_repair=False)
         response = self.client.complete_json(request)
-        facts, seen = self._parse_results(
+        facts, seen, not_found, validation_failures = self._parse_results(
             response.data, expected, spec_by_type, registry,
+            allowed_evidence_ids,
         )
         missing = sorted(expected - seen)
         repair_response = None
@@ -196,16 +460,15 @@ class ScenarioRiskFactAgent:
                 repair_requests, evidence, coverage_repair=True,
             )
             repair_response = self.client.complete_json(repair_request)
-            repaired, repair_seen = self._parse_results(
+            repaired, repair_seen, repair_not_found, repair_failures = self._parse_results(
                 repair_response.data, missing_set, spec_by_type, registry,
+                allowed_evidence_ids,
             )
             facts.extend(repaired)
             seen.update(repair_seen)
+            not_found.update(repair_not_found)
+            validation_failures.extend(repair_failures)
         unresolved = sorted(expected - seen)
-        if unresolved:
-            raise ValueError(
-                f"Scenario risk fact response is incomplete after bounded repair: {unresolved[:5]}"
-            )
         return facts, {
             "model": response.model,
             "request_id": response.request_id,
@@ -215,6 +478,11 @@ class ScenarioRiskFactAgent:
             },
             "coverage_repair_count": int(repair_response is not None),
             "llm_call_count": 1 + int(repair_response is not None),
+            "validation_failure_count": len(validation_failures),
+            "validation_failures": validation_failures,
+            "unresolved_contract_count": len(unresolved),
+            "unresolved_contract_keys": [list(item) for item in unresolved],
+            "not_found_keys": [list(item) for item in sorted(not_found)],
         }
 
     def _request(
@@ -261,47 +529,74 @@ class ScenarioRiskFactAgent:
         expected: set[tuple[str, str, str]],
         spec_by_type: dict[str, RequiredFactSpec],
         registry: dict[str, SourceRef],
-    ) -> tuple[list[RiskFact], set[tuple[str, str, str]]]:
+        allowed_evidence_ids: dict[tuple[str, str], set[str]],
+    ) -> tuple[
+        list[RiskFact], set[tuple[str, str, str]], set[tuple[str, str, str]],
+        list[str],
+    ]:
         raw_results = data.get("results")
         if not isinstance(raw_results, list):
-            raise ValueError("Scenario risk fact response.results must be an array")
+            return [], set(), set(), ["response.results must be an array"]
         seen: set[tuple[str, str, str]] = set()
+        not_found: set[tuple[str, str, str]] = set()
         facts: list[RiskFact] = []
+        failures: list[str] = []
+        grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for raw in raw_results:
             if not isinstance(raw, dict):
-                raise ValueError("Scenario risk fact result must be an object")
+                failures.append("result must be an object")
+                continue
             key = (
                 str(raw.get("malfunction_id", "")),
                 str(raw.get("scenario_id", "")),
                 str(raw.get("fact_type", "")),
             )
-            if key not in expected or key in seen:
-                raise ValueError(f"Unexpected or duplicate scenario risk fact result: {key}")
-            seen.add(key)
+            if key not in expected:
+                failures.append(f"unexpected result identity: {key}")
+                continue
+            grouped.setdefault(key, []).append(raw)
+        for key, items in grouped.items():
+            if len(items) != 1:
+                failures.append(f"duplicate result identity: {key}")
+                continue
+            raw = items[0]
             status = str(raw.get("status", "")).upper()
             if status == "NOT_FOUND":
+                seen.add(key)
+                not_found.add(key)
                 continue
-            if status != "FOUND":
-                raise ValueError(f"Invalid scenario risk fact status: {status!r}")
-            spec = spec_by_type[key[2]]
-            value = raw.get("value")
-            allowed = self._allowed_values(spec)
-            if allowed:
-                value = str(value).strip().upper()
-                if value not in allowed:
-                    raise ValueError(f"Risk fact value is outside the compiled ontology: {key}")
-            elif isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f"Numeric scenario risk fact requires a JSON number: {key}")
-            unit = str(raw.get("unit", ""))
-            if unit != spec.unit:
-                raise ValueError(f"Scenario risk fact unit mismatch: {key}")
-            evidence_ids = raw.get("evidence_ids")
-            if not isinstance(evidence_ids, list) or not evidence_ids:
-                raise ValueError(f"Scenario risk fact requires evidence IDs: {key}")
             try:
-                sources = list(dict.fromkeys(registry[str(item)] for item in evidence_ids))
-            except KeyError as exc:
-                raise ValueError(f"Unknown scenario risk fact evidence ID: {exc.args[0]}") from exc
+                if status != "FOUND":
+                    raise ValueError(f"invalid status: {status!r}")
+                spec = spec_by_type[key[2]]
+                value = raw.get("value")
+                allowed = self._allowed_values(spec)
+                if allowed:
+                    value = str(value).strip().upper()
+                    if value not in allowed:
+                        raise ValueError("value is outside the compiled ontology")
+                elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ValueError("numeric value must be a JSON number")
+                unit = str(raw.get("unit", ""))
+                if unit != spec.unit:
+                    raise ValueError("unit does not match the compiled contract")
+                evidence_ids = raw.get("evidence_ids")
+                if not isinstance(evidence_ids, list) or not evidence_ids:
+                    raise ValueError("FOUND requires evidence_ids")
+                evidence_ids = [str(item) for item in evidence_ids]
+                pair_allowed = allowed_evidence_ids.get((key[0], key[1]), set())
+                disallowed = sorted(set(evidence_ids) - pair_allowed)
+                if disallowed:
+                    raise ValueError(
+                        "evidence_ids are not scoped to this malfunction/scenario pair: "
+                        f"{disallowed}"
+                    )
+                sources = list(dict.fromkeys(
+                    registry[item] for item in evidence_ids
+                ))
+            except (KeyError, TypeError, ValueError) as error:
+                failures.append(f"invalid result {key}: {error}")
+                continue
             material = json.dumps(
                 {"key": key, "value": value, "unit": unit},
                 ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -317,4 +612,5 @@ class ScenarioRiskFactAgent:
                 approval=ReviewStatus.FINALIZED,
                 produced_by=self.PROMPT_VERSION,
             ))
-        return facts, seen
+            seen.add(key)
+        return facts, seen, not_found, failures

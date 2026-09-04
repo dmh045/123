@@ -1,5 +1,6 @@
 openpyxl>=3.0.0
 PyPDF2>=2.0.0
 python-docx>=0.8.11
+PyYAML>=6.0
 pytest>=7.0.0
 pytest-cov>=4.0.0

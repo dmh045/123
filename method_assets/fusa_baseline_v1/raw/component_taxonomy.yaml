@@ -1,0 +1,37 @@
+version: "1.0"
+source: "ISO 26262 Part 5 Annex D + IEC 61508"
+
+categories:
+  - id: actuator_longitudinal
+    description: "影响纵向控制的执行器（行车制动 / 驻车制动 / 挡位）"
+  - id: actuator_lateral
+    description: "影响横向控制的执行器（转向）"
+  - id: actuator_propulsion
+    description: "驱动执行器"
+
+  - id: sensor_camera
+    description: "摄像头"
+  - id: sensor_radar
+    description: "毫米波雷达"
+  - id: sensor_lidar
+    description: "激光雷达"
+  - id: sensor_ultrasonic
+    description: "超声波"
+  - id: sensor_imu
+    description: "惯导 / IMU"
+
+  - id: hmi
+    description: "人机交互（显示 / 输入 / 按键）"
+  - id: lighting
+    description: "灯光（转向灯 / 报警灯 / 倒车灯）"
+  - id: wiper
+    description: "雨刮"
+
+  - id: communication
+    description: "通信（CAN / Ethernet 报文）"
+  - id: power
+    description: "供电"
+  - id: computing
+    description: "域控本身（程序崩溃 / 内部诊断 / 状态机）"
+  - id: localization
+    description: "定位 / 自构图 / 地图"

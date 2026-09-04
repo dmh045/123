@@ -1,0 +1,61 @@
+schema_version: "1.0"
+method_id: fusa_hara_baseline_v1
+method_version: "1.0"
+source_kind: YAML_BASELINE
+governance_status: USER_SELECTED_BASELINE
+
+sources:
+  asil: raw/iso26262_spec.yaml
+  severity: raw/severity_table.yaml
+  exposure_atoms: raw/vda702_atoms.yaml
+  exposure_domain: raw/e_dimension_rules.yaml
+  scenario_structure: raw/dimension_structure.yaml
+  atom_spec: raw/atom_spec.yaml
+  controllability_profile: raw/c_profiles/iav_avp.yaml
+  ftti_formulas: raw/ftti_formulas.yaml
+  ftti_budgets: raw/ftti_budgets.yaml
+  component_taxonomy: raw/component_taxonomy.yaml
+  failure_type_taxonomy: raw/failure_type_taxonomy.yaml
+
+normalized_sources:
+  guidewords: normalized/guidewords.yaml
+  scenario_constraints: normalized/scenario_constraints.yaml
+  derivation_rules: normalized/derivation_rules.yaml
+  exposure_policy: normalized/exposure_policy.yaml
+  controllability_aliases: normalized/controllability_aliases.yaml
+  severity_semantics: normalized/severity_semantics.yaml
+
+excluded_numeric_authorities:
+  - raw/controllability_rules.yaml
+  - raw/c_iso26262.yaml
+  - raw/domain_rules/avp_low_speed.yaml
+
+policies:
+  asil_zero_short_circuit: QM
+  exposure_aggregation: fusa_v1
+  exposure_dimension_fallback: scenario_level
+  controllability_override_precedence: before_ttc
+  severity_primary_method: relative_velocity
+  severity_fallback_method: traffic_domain
+  ftti_formula_selection: collision_type_first
+
+asset_hashes:
+  raw/atom_spec.yaml: b014c18803e38701dfa4bdaf901f400866f733b5d2276419e6ba3b44b78e5332
+  raw/c_iso26262.yaml: 9a16b41a16ecb5c776af69886ccdf6cb6261b289482335bd09c14ed04b0f8255
+  raw/c_profiles/iav_avp.yaml: d37014506310f3b27250efe13542ea1b4f2fccb7e926146c77f7bef29c543304
+  raw/component_taxonomy.yaml: 01be21449406ff324898cc7ebcb080c7f031df483f4c89e8cd56bce46a443d78
+  raw/controllability_rules.yaml: 8917ebcb0aa32416c6558d643f2a7372bfc7265f9277056f80387a3fa85535d1
+  raw/coupling_examples.yaml: 2eb9b877cbe2295d63ab4d256a8069b2af1c3177cea5506ca4d0d2a777cd1718
+  raw/dimension_structure.yaml: c48df4cd86dfb5dfb4c1b2225fd56576285a9036ca827ebfd849cdaec71cc5de
+  raw/domain_rules/avp_low_speed.yaml: 076fc6bbf5ce51e25913ec5706dd7cf8f6980b203dcc7a85e91d1be3ac906da8
+  raw/e_dimension_rules.yaml: a0aafd99207c7b964db07d1eab5fc22caca14f7be80541dc3cc92e65163c08b3
+  raw/failure_type_taxonomy.yaml: f7807f988a2d03f21dead79f5871a7fcbd30ee25aefb8364d6fc8969f105ff1f
+  raw/fm_layer_classification.yaml: cc3ce0b78e2dc322d7b8165563933869a78de193c16b0068bd8963770ff65ec0
+  raw/fm_scenario_templates.yaml: a21a79bc3177d5739f604e0560c383e9c3f290295cb60ebb6f04f19cc56499aa
+  raw/ftti_budgets.yaml: fc347389e6989752e377b11c26bf085f35fc0f4bd467e9b02b86837c033a27ff
+  raw/ftti_formulas.yaml: feba1109d7337a15c4db4f05a913e6393a8c9665698bec37ef1b7bb82d4cc6ad
+  raw/infeasible_examples.yaml: 723a1721a3d3f76e1c555fbbd9a141a88a0ede7f46145285e0305750a14d173f
+  raw/iso26262_spec.yaml: 44808816f63a2b139e427a99fe89986fa6acaaa9dc05eeee3d54620256159eab
+  raw/kb_retrieval.yaml: b2c379c6397424f765f6438d7adbcb14572321caa57f94bed56f3906897bfee8
+  raw/severity_table.yaml: 1c2797d399874125d05c2c3cbe27865dc17dc03efb52dbfabdd99f092a8481d2
+  raw/vda702_atoms.yaml: 5c76536491dc8795007f7dbad9a29f37a5ebb974e42d40f717276767fccfeb5c

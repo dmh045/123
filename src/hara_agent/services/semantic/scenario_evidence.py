@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from typing import Any
 
@@ -16,6 +18,9 @@ from hara_agent.models import (
     EvidenceKind, EvidenceRecord, FactProvenance, MalfunctionCandidate,
     ReviewStatus, ScenarioCandidate, SourceRef,
 )
+from hara_agent.services.analysis.scenario_physics import (
+    DerivedPhysicsType, derive_scenario_physics,
+)
 
 from .scenario_contract import RISK_DIMENSION_VALUES, SCENARIO_CONTRACT_VERSION
 
@@ -26,11 +31,6 @@ SCENARIO_ASSESSMENT_CONTRACT_VERSION = SCENARIO_CAUSAL_ASSESSMENT_VERSION
 # v1 hop basis values and Registry evidence kinds intentionally share values,
 # while kind and provenance remain separate axes.
 EvidenceBasisType = EvidenceKind
-
-
-class DerivedPhysicsType(str, Enum):
-    TTC = "TTC"
-    RELATIVE_MOTION = "RELATIVE_MOTION"
 
 
 class ScenarioEvidenceErrorCode(str, Enum):
@@ -54,6 +54,7 @@ class ScenarioEvidenceErrorCode(str, Enum):
     MISSING_RISK_DIMENSION_REASON = "MISSING_RISK_DIMENSION_REASON"
     CAUSAL_FALSE_WITH_DIMENSIONS = "CAUSAL_FALSE_WITH_DIMENSIONS"
     CAUSAL_TRUE_WITHOUT_DIMENSIONS = "CAUSAL_TRUE_WITHOUT_DIMENSIONS"
+    SELF_REFERENTIAL_CAUSAL_EVIDENCE = "SELF_REFERENTIAL_CAUSAL_EVIDENCE"
 
 
 class ScenarioEvidenceContractError(ValueError):
@@ -97,17 +98,32 @@ class FactRegistry:
             self.register(record)
 
     def to_prompt_dict(self) -> dict[str, dict[str, Any]]:
-        # scenario-evidence-v1 intentionally remains provenance-unaware.
+        def value_of(value: Any) -> Any:
+            return asdict(value) if is_dataclass(value) else value
+
         return {
             ref: {
-                "value": record.value,
+                "value": value_of(record.value),
                 "kind": record.kind.value,
+                "provenance": record.provenance.value,
+                "approval_status": record.approval_status.value,
+                **{
+                    key: record.metadata[key]
+                    for key in (
+                        "evidence_role", "rule_id", "method_source_hash",
+                        "source_rule_id", "semantic_fingerprint",
+                    ) if key in record.metadata
+                },
                 **(
                     {
                         "derivation_type": record.metadata.get("derivation_type"),
                         "inputs": record.metadata.get("inputs", []),
                     }
                     if record.kind is EvidenceKind.DERIVED_PHYSICS else {}
+                ),
+                **(
+                    {"evidence_role": record.metadata["evidence_role"]}
+                    if record.metadata.get("evidence_role") else {}
                 ),
             }
             for ref, record in self._records.items()
@@ -152,6 +168,194 @@ class FactRegistry:
         }
 
 
+DEFAULT_CAUSAL_EVIDENCE_BUDGET = 10
+
+
+@dataclass(frozen=True)
+class CausalEvidenceSelection:
+    """A compact, causal-only view over the complete FactRegistry.
+
+    The complete records remain available to the validator and audit dump.  This
+    object is deliberately presentation-only: it contains no source excerpts,
+    provenance, or method metadata for the LLM prompt.
+    """
+
+    selected_refs: tuple[str, ...]
+    mandatory_evidence_refs: tuple[str, ...]
+    selected_context_evidence_refs: tuple[str, ...]
+    candidate_evidence_count: int
+    dropped_evidence_count: int
+    evidence_selection_reason: str
+    compact_view: str
+
+    @property
+    def selected_evidence_count(self) -> int:
+        return len(self.selected_context_evidence_refs)
+
+    @property
+    def total_prompt_evidence_count(self) -> int:
+        return len(self.selected_refs)
+
+    @property
+    def compact_chars(self) -> int:
+        return len(self.compact_view)
+
+    @property
+    def compact_tokens(self) -> int:
+        # A stable audit estimate is sufficient here; provider tokenizers are
+        # provider-specific and must not influence semantic selection.
+        return (self.compact_chars + 3) // 4
+
+
+class CausalEvidenceSelector:
+    """Select bounded causal context without changing evidence authority."""
+
+    _P1_TERMS = (
+        "relative_distance", "relative_speed", "ttc", "delta_v",
+        "impact_speed", "ego_speed", "collision", "traffic_object", "road_user",
+        "stopping_margin", "geometry", "braking_distance",
+    )
+    _P2_TERMS = (
+        "driver_in_vehicle", "direct_control", "remote_intervention",
+        "other_road_user_avoidance", "vehicle_stability", "intervention",
+        "control_available", "avoidance_possible",
+    )
+    _P3_TERMS = (
+        "operating_mode", "road", "weather", "surface", "ego_action",
+        "ego_dynamics", "dynamics", "location", "driver_position",
+    )
+    _P4_TERMS = (
+        "exposure", "e_z", "e_f", "asil", "ftti", "severity",
+        "controllability", "combination",
+    )
+
+    def __init__(self, *, max_evidence: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET):
+        if not isinstance(max_evidence, int) or isinstance(max_evidence, bool):
+            raise ValueError("causal evidence budget must be an integer")
+        if max_evidence <= 0:
+            raise ValueError("causal evidence budget must be greater than zero")
+        self.max_evidence = max_evidence
+
+    @classmethod
+    def _rank(cls, record: EvidenceRecord) -> tuple[int, str] | None:
+        ref = record.evidence_ref
+        lower = ref.casefold()
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        # Malfunction semantics are already presented in the fixed prompt
+        # header; repeating MF records in every item is not useful causal
+        # context and would invite self-referential proof.
+        if record.namespace == "MF":
+            return None
+        if record.namespace == "METHOD" and metadata.get("causal_relevance") is not True:
+            return None
+        if record.namespace == "APPROVED_RULE" and metadata.get("causal_relevance") is not True:
+            return None
+        # Exposure/S/E/C/ASIL/FTTI records are downstream method context.  An
+        # explicitly causal approved rule is the only opt-in exception.
+        if metadata.get("causal_relevance") is not True and any(
+            term in lower for term in cls._P4_TERMS
+        ):
+            return None
+        for priority, terms, reason in (
+            (1, cls._P1_TERMS, "P1 direct physical/interaction evidence"),
+            (2, cls._P2_TERMS, "P2 intervention/control context"),
+            (3, cls._P3_TERMS, "P3 scenario operating context"),
+        ):
+            if any(term in lower for term in terms):
+                return priority, reason
+        if metadata.get("causal_relevance") is True:
+            return 3, "approved rule explicitly marked causal_relevance"
+        return None
+
+    @staticmethod
+    def _compact_value(value: Any) -> str:
+        if is_dataclass(value):
+            value = asdict(value)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    @staticmethod
+    def _mandatory_records(registry: FactRegistry) -> list[EvidenceRecord]:
+        """Return finalized malfunction definition anchors in stable order."""
+
+        records = []
+        for ref in ("MF.description", "MF.functional_effect"):
+            record = registry.resolve_record(ref)
+            if record is not None and record.approval_status is ReviewStatus.FINALIZED:
+                records.append(record)
+        return records
+
+    @staticmethod
+    def _semantic_key(record: EvidenceRecord) -> str:
+        """Identify a derived canonical copy of a direct Scenario fact."""
+
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        inputs = metadata.get("inputs", [])
+        if (
+            record.kind is EvidenceKind.DERIVED_PHYSICS
+            and metadata.get("derivation_type") == "CANONICAL_INPUT_NORMALIZATION"
+            and len(inputs) == 1
+            and str(inputs[0]).startswith("SCN.")
+        ):
+            return str(inputs[0]).casefold()
+        return record.evidence_ref.casefold()
+
+    def select(self, registry: FactRegistry) -> CausalEvidenceSelection:
+        mandatory = self._mandatory_records(registry)
+        ranked: list[tuple[int, str, EvidenceRecord, str]] = []
+        for record in registry.records:
+            ranked_value = self._rank(record)
+            if ranked_value is None:
+                continue
+            priority, reason = ranked_value
+            ranked.append((priority, record.evidence_ref, record, reason))
+        ranked.sort(key=lambda item: (
+            item[0],
+            self._semantic_key(item[2]),
+            0 if item[2].kind is EvidenceKind.DIRECT_FACT else 1,
+            item[1],
+        ))
+        deduplicated: list[tuple[int, str, EvidenceRecord, str]] = []
+        seen_semantic_keys: set[str] = set()
+        for item in ranked:
+            semantic_key = self._semantic_key(item[2])
+            if semantic_key in seen_semantic_keys:
+                continue
+            seen_semantic_keys.add(semantic_key)
+            deduplicated.append(item)
+        selected = deduplicated[:self.max_evidence]
+        mandatory_refs = tuple(record.evidence_ref for record in mandatory)
+        selected_context_refs = tuple(item[1] for item in selected)
+        selected_refs = tuple(dict.fromkeys(mandatory_refs + selected_context_refs))
+        compact_view = "\n".join(
+            f"{record.evidence_ref} [kind={record.kind.value}] = {self._compact_value(record.value)}"
+            for record in mandatory
+        )
+        if compact_view and selected:
+            compact_view += "\n"
+        compact_view += "\n".join(
+            f"{ref} [kind={record.kind.value}] = {self._compact_value(record.value)}"
+            for _, ref, record, _ in selected
+        )
+        reason_counts: dict[str, int] = {}
+        for _, _, _, reason in selected:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if mandatory:
+            reason_counts["mandatory finalized malfunction anchors"] = len(mandatory)
+        reason = "; ".join(
+            f"{name}: {count}"
+            for name, count in sorted(reason_counts.items())
+        ) or "no P1-P3 causal evidence selected"
+        return CausalEvidenceSelection(
+            selected_refs=selected_refs,
+            mandatory_evidence_refs=mandatory_refs,
+            selected_context_evidence_refs=selected_context_refs,
+            candidate_evidence_count=len(ranked),
+            dropped_evidence_count=max(0, len(ranked) - len(selected)),
+            evidence_selection_reason=reason,
+            compact_view=compact_view,
+        )
+
+
 class DuplicateEvidenceRefError(ValueError):
     def __init__(self, evidence_ref: str):
         self.evidence_ref = evidence_ref
@@ -177,7 +381,13 @@ def build_fact_registry(
         registry.register(EvidenceRecord(
             f"MF.{name}", value, EvidenceKind.DIRECT_FACT,
             malfunction_provenance, malfunction.status, tuple(malfunction.sources),
-            {"extracted_by": "LLM"},
+            {
+                "extracted_by": "LLM",
+                **(
+                    {"evidence_role": "UPSTREAM_CAUSAL_CLAIM"}
+                    if name == "vehicle_level_hazard" else {}
+                ),
+            },
         ))
     for key, value in sorted(scenario.facts.items()):
         if (
@@ -201,54 +411,44 @@ def build_fact_registry(
             item if isinstance(item, SourceRef) else SourceRef(**item)
             for item in metadata.get("source_refs", [])
         )
+        fact_metadata = {name: item for name, item in metadata.items() if name not in {
+            "provenance", "approval", "source_refs",
+        }}
+        if scenario.semantic_fingerprint:
+            fact_metadata.setdefault("semantic_fingerprint", scenario.semantic_fingerprint)
         registry.register(EvidenceRecord(
             f"SCN.{key}", value, EvidenceKind.DIRECT_FACT,
-            provenance, approval, sources,
-            {name: item for name, item in metadata.items() if name not in {
-                "provenance", "approval", "source_refs",
-            }},
+            provenance, approval, sources, fact_metadata,
         ))
-    distance_m = _distance_m(scenario.facts.get("relative_distance"))
-    relative_speed = scenario.facts.get("relative_speed_kph")
-    if distance_m is not None and isinstance(relative_speed, (int, float)) and relative_speed > 0:
-        input_records = [
-            registry.resolve_record("SCN.relative_distance"),
-            registry.resolve_record("SCN.relative_speed_kph"),
-        ]
-        derived_sources = tuple(dict.fromkeys(
-            source
-            for record in input_records if record is not None
-            for source in record.source_refs
-        ))
-        derived_status = (
-            ReviewStatus.FINALIZED
-            if all(
-                record is not None
-                and record.approval_status is ReviewStatus.FINALIZED
-                for record in input_records
-            )
-            else ReviewStatus.PENDING
-        )
-        registry.register(EvidenceRecord(
-            "DERIVED.ttc_s",
-            round(distance_m / (float(relative_speed) / 3.6), 6),
-            EvidenceKind.DERIVED_PHYSICS,
-            FactProvenance.DERIVED,
-            derived_status,
-            derived_sources,
-            {
-                "derivation_type": DerivedPhysicsType.TTC.value,
-                "inputs": ["SCN.relative_distance", "SCN.relative_speed_kph"],
-            },
-        ))
+    registry.extend(derive_scenario_physics(scenario))
+    # Exposure metadata is pre-causal context. It is method-sourced evidence,
+    # not a final E judgement, and is therefore explicitly attached to the
+    # atomic Scenario candidate.
+    for item in scenario.exposure_context:
+        if not isinstance(item, dict):
+            continue
+        atom_id = str(item.get("atom_id", "")).strip()
+        if not atom_id:
+            continue
+        for key in ("e_z", "e_f"):
+            value = item.get(key)
+            if value in (None, ""):
+                continue
+            registry.register(EvidenceRecord(
+                f"SCN.exposure.{atom_id}.{key}", value,
+                EvidenceKind.APPROVED_RULE, FactProvenance.APPROVED_RULE,
+                ReviewStatus.FINALIZED,
+                tuple(source for source in scenario.sources if isinstance(source, SourceRef)),
+                {
+                    "atom_id": atom_id,
+                    "dimension": item.get("dimension", []),
+                    "source_rule_id": item.get("source_rule_id", ""),
+                    "coupling": item.get("coupling", []),
+                    "method_source_hash": item.get("method_source_hash", ""),
+                    "semantic_fingerprint": scenario.semantic_fingerprint,
+                },
+            ))
     return registry
-
-
-def _distance_m(value: Any) -> float | None:
-    if isinstance(value, (int, float)):
-        return float(value) if value >= 0 else None
-    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*m\s*", str(value or ""), re.IGNORECASE)
-    return float(match.group(1)) if match else None
 
 
 def validate_evidence_contract(
@@ -288,11 +488,18 @@ def validate_evidence_contract(
                      code=ScenarioEvidenceErrorCode.INVALID_CAUSAL_CHAIN_SHAPE,
                      hop="causal_chain", claim="", basis_type="", invalid_refs=[],
                      reason=f"causal_chain must be object; {shape}")
-    hop_names = ("m_to_b", "b_to_i", "i_to_h", "h_to_harm")
+    # v4 semantic assessment ends at Hazardous Event. A supplied v3-shaped
+    # payload is validated as a legacy compatibility input, but v4 prompts
+    # never request or generate the optional fourth hop.
+    legacy_harm = "h_to_harm" in chain or bool(item.get("potential_harm", ""))
+    hop_names = ("m_to_b", "b_to_i", "i_to_h", "h_to_harm") if legacy_harm else (
+        "m_to_b", "b_to_i", "i_to_h"
+    )
     breakpoint_index = {
         CausalBreakpoint.M_TO_B: 0, CausalBreakpoint.B_TO_I: 1,
-        CausalBreakpoint.I_TO_H: 2, CausalBreakpoint.H_TO_HARM: 3,
-        CausalBreakpoint.NONE: 4,
+        CausalBreakpoint.I_TO_H: 2,
+        CausalBreakpoint.H_TO_HARM: 3 if legacy_harm else 2,
+        CausalBreakpoint.NONE: 3 if legacy_harm else 2,
     }[breakpoint]
     assumption_hops = 0
     for index, hop_name in enumerate(hop_names):
@@ -337,6 +544,21 @@ def validate_evidence_contract(
                          hop=hop_name, claim=claim, basis_type=basis.value, invalid_refs=[],
                          reason="supported hop requires evidence refs")
         resolved = [registry.resolve(ref) for ref in refs]
+        if causal and hop_name in ({"i_to_h", "h_to_harm"} if legacy_harm else {"i_to_h"}) and refs and all(
+            fact.get("evidence_role") == "UPSTREAM_CAUSAL_CLAIM"
+            for fact in resolved
+        ):
+            raise _error(
+                malfunction, scenario, prompt_version, batch, split_path,
+                split_depth,
+                code=ScenarioEvidenceErrorCode.SELF_REFERENTIAL_CAUSAL_EVIDENCE,
+                hop=hop_name, claim=claim, basis_type=basis.value,
+                invalid_refs=refs,
+                reason=(
+                    "an upstream hazard claim cannot be the sole evidence for "
+                    "a downstream hazard or harm transition"
+                ),
+            )
         if basis is EvidenceBasisType.DIRECT_FACT and any(
             fact["kind"] != "DIRECT_FACT" for fact in resolved
         ):
@@ -448,18 +670,11 @@ def compile_causal_assessment(
             or str(chain.get("i_to_h", {}).get("claim", "")),
             tuple(chain.get("i_to_h", {}).get("evidence_refs", [])),
         ),
-        (
-            "harm", CausalNodeType.HARM,
-            str(item.get("potential_harm", "")).strip()
-            or str(chain.get("h_to_harm", {}).get("claim", "")),
-            tuple(chain.get("h_to_harm", {}).get("evidence_refs", [])),
-        ),
     )
     hop_specs = (
         ("m_to_b", "malfunction", "behavior"),
         ("b_to_i", "behavior", "consequence"),
         ("i_to_h", "consequence", "hazard"),
-        ("h_to_harm", "hazard", "harm"),
     )
     present_hops = [name for name, _, _ in hop_specs if isinstance(chain.get(name), dict)]
     required_node_names = {"malfunction"}

@@ -4,12 +4,18 @@ from typing import Any
 
 from hara_agent.contracts import ScenarioCausalAssessment
 from hara_agent.models import (
-    EvidenceValue, ItemDefinitionFacts, ReviewStatus, RiskAssessment, SourceRef,
+    EvidenceValue, ItemDefinitionFacts, MalfunctionCandidate, ReviewStatus,
+    RiskAssessment, ScenarioCandidate, SourceRef,
 )
 from hara_agent.services.analysis import (
     ASILLookupService, MethodRiskFactBindingService,
-    ScenarioScoringService,
+    PotentialHarmResolver, RiskCalculationInputService, ScenarioScoringService,
 )
+from hara_agent.services.semantic.scenario_evidence import FactRegistry, build_fact_registry
+from hara_agent.services.semantic.project_evidence_registry import (
+    MethodEvidenceProvider, build_project_evidence_registry,
+)
+from hara_agent.services.analysis.scenario_physics import derive_scenario_physics
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 
@@ -89,7 +95,8 @@ def _validated_causal_assessment(value: dict[str, Any]) -> ScenarioCausalAssessm
         assessment.breakpoint.value == str(value.get("breakpoint", "")),
         dimensions == list(value.get("risk_dimensions_changed", [])),
         assessment.hazardous_event == str(value.get("hazardous_event", "")),
-        assessment.potential_harm == str(value.get("potential_harm", "")),
+        # Potential Harm is deliberately absent/empty at the v4 Scenario
+        # semantic boundary and is attached after deterministic Severity.
     ))
     if not consistent:
         raise ValueError("Scenario causal_assessment conflicts with compatibility fields")
@@ -121,6 +128,9 @@ def score_structured_scenarios(
     risks: list[RiskAssessment] = []
     pending: list[dict[str, Any]] = []
     binding_audits: list[dict[str, Any]] = []
+    calculation_audits: list[dict[str, Any]] = []
+    calculation_inputs = RiskCalculationInputService()
+    harm_resolver = PotentialHarmResolver()
     project_facts = (
         ItemDefinitionFacts.from_dict(state.item_definition["typed"])
         if risk_fact_binding is not None else None
@@ -134,8 +144,40 @@ def score_structured_scenarios(
                 f"场景评分外键缺失: scenario_id={scenario_id!r}, malfunction_id={malfunction_id!r}"
             )
         candidate = scenario_by_id[scenario_id]
-        scenario = {"scenario_id": scenario_id, **candidate.facts}
+        malfunction = malfunction_by_id[malfunction_id]
+        scenario = {
+            "scenario_id": scenario_id,
+            "malfunction_id": malfunction_id,
+            **candidate.facts,
+        }
+        for key in ("component_category", "failure_type"):
+            if malfunction.get(key) not in (None, ""):
+                scenario[key] = malfunction[key]
         scenario["_fact_provenance"] = dict(candidate.fact_provenance)
+        derived_physics = derive_scenario_physics(candidate)
+        for record in derived_physics:
+            key = record.evidence_ref.split(".", 1)[1]
+            if key in scenario and scenario[key] != record.value:
+                raise ValueError(
+                    "Scenario contains a value that conflicts with deterministic "
+                    f"physics: key={key!r}"
+                )
+            scenario[key] = record.value
+            scenario["_fact_provenance"][key] = {
+                "provenance": record.provenance.value,
+                "approval": record.approval_status.value,
+                "source_refs": [
+                    {
+                        "source_type": source.source_type,
+                        "source_id": source.source_id,
+                        "location": source.location,
+                        "excerpt": source.excerpt,
+                    }
+                    for source in record.source_refs
+                ],
+                "evidence_ref": record.evidence_ref,
+                **record.metadata,
+            }
         scenario.setdefault("situational_description", candidate.situational_description)
         scenario.setdefault("situational_detailing", candidate.situational_detailing)
         if risk_fact_binding is not None and project_facts is not None:
@@ -153,10 +195,9 @@ def score_structured_scenarios(
                 **binding.audit,
             })
         hazard_event = causal_assessment.hazardous_event
-        potential_harm = causal_assessment.potential_harm
-        if not hazard_event or not potential_harm:
+        if not hazard_event:
             raise ValueError(
-                f"保留场景缺少Hazardous Event/Potential Harm: {malfunction_id}/{scenario_id}"
+                f"保留场景缺少Hazardous Event: {malfunction_id}/{scenario_id}"
             )
 
         scored = scoring.score(scenario, hazard_event)
@@ -165,6 +206,49 @@ def score_structured_scenarios(
         controllability = _scoring_evidence(
             scored["controllability"], "controllability_score"
         )
+        method = getattr(scoring, "method", None)
+        method_sources = []
+        for source in malfunction.get("sources", []):
+            method_sources.append(source if isinstance(source, SourceRef) else SourceRef(**source))
+        malfunction_candidate = MalfunctionCandidate(
+            malfunction_id=malfunction_id,
+            function_id=str(malfunction.get("function_id", "UNKNOWN")),
+            guideword=str(malfunction.get("guideword", "UNKNOWN")),
+            description=str(malfunction.get("description", "malfunction")),
+            functional_effect=str(malfunction.get("functional_effect", "behavior changes")),
+            vehicle_level_hazard=str(malfunction.get("vehicle_level_hazard", "hazardous state")),
+            causal_chain=[str(item) for item in malfunction.get("causal_chain", ("M", "B"))],
+            sources=method_sources,
+            status=ReviewStatus(malfunction.get("status", ReviewStatus.PENDING.value)),
+        )
+        evidence_registry = build_fact_registry(
+            malfunction_candidate, candidate,
+            build_project_evidence_registry(project_facts, method)
+            if project_facts is not None else None,
+        )
+        if method is not None:
+            # The production registry and the risk-stage registry use the
+            # same provider contract. The explicit extension is harmless for
+            # callers that supplied only a scenario-local registry.
+            method_records = tuple(MethodEvidenceProvider(method).evidence_records())
+            existing = {item.evidence_ref for item in evidence_registry.records}
+            evidence_registry.extend(
+                item for item in method_records if item.evidence_ref not in existing
+            )
+        harm = harm_resolver.resolve(
+            method=method,
+            severity_result=scored["severity"],
+            scenario=scenario,
+            registry=evidence_registry,
+        ) if method is not None else None
+        potential_harm = harm.potential_harm if harm is not None else ""
+        if harm is not None and harm.status.value == "FINALIZED":
+            causal_assessment = causal_assessment.with_harm(
+                potential_harm=harm.potential_harm,
+                evidence_refs=harm.evidence_refs,
+                source_refs=harm.source_refs,
+                review_status=ReviewStatus.FINALIZED,
+            )
         exposure_method = str(scored["exposure"].get("exposure_method", "")).upper()
         valid_scores = (
             severity.value in {"S0", "S1", "S2", "S3"}
@@ -213,6 +297,37 @@ def score_structured_scenarios(
             exposure_tf=exposure_method,
         )
         risks.append(risk)
+        for stored in assessments:
+            if (
+                str(stored.get("malfunction_id", "")) == malfunction_id
+                and str(stored.get("scenario_id", "")) == scenario_id
+            ):
+                stored["causal_assessment"] = causal_assessment.to_dict()
+                stored["potential_harm"] = potential_harm
+                break
+        calculation_audits.append({
+            "malfunction_id": malfunction_id,
+            "scenario_id": scenario_id,
+            "severity_input": calculation_inputs.severity(
+                malfunction_id, scenario_id, scenario,
+                getattr(getattr(method, "structured_risk_method", None), "severity", None).speed_semantic
+                if getattr(getattr(method, "structured_risk_method", None), "severity", None) is not None
+                else None,
+            ).to_dict(),
+            "exposure_input": calculation_inputs.exposure(
+                scenario_id, scenario,
+            ).to_dict(),
+            "controllability_input": calculation_inputs.controllability(
+                malfunction_id, scenario_id, scenario,
+            ).to_dict(),
+            "ftti_input": calculation_inputs.ftti(
+                malfunction_id, scenario_id, asil_value,
+            ).to_dict(),
+            "potential_harm": harm.to_dict() if harm is not None else {
+                "status": "PENDING_METHOD_SEMANTICS",
+                "reason": "No active MethodContract was available for deterministic harm resolution.",
+            },
+        })
         for field_name in ("severity", "exposure", "controllability", "asil"):
             evidence = getattr(risk, field_name)
             if evidence.status is ReviewStatus.PENDING:
@@ -231,5 +346,6 @@ def score_structured_scenarios(
         pending_field_count=len(pending),
         asil_source=asil_table.source,
         risk_fact_binding_audits=binding_audits,
+        risk_calculation_inputs=calculation_audits,
     )
     return state

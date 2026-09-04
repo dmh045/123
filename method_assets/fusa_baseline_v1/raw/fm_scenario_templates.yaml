@@ -1,0 +1,206 @@
+# fm_scenario_templates.yaml
+# ────────────────────────────────────────────────────────────────
+# FM 类别 × ODD 必须覆盖的代表性场景模板
+#
+# 用途:
+#   Step 3b LLM 填值时, 按 (component_category, failure_type, keyword) 匹配模板,
+#   把模板参考值作为强约束注入 prompt, LLM 只能在 ±20% 内微调.
+#   没有模板的 FM 继续走纯 LLM 自由填值.
+#
+# 注意:
+#   ego_v_kph 不在模板中指定 — 由 Step 3b 根据 ODD ego_v_kph_typical 列表选取。
+#   模板只规定碰撞场景的几何结构 (obj_type, obj_position, obj_distance_m, collision_type)。
+#
+# 数据来源:
+#   IAV EHYREEV 蓝海项目代客泊车 HARA 分析 V1.0 Sheet 6 反推
+# ────────────────────────────────────────────────────────────────
+
+version: "1.0"
+
+# 全局 ODD 几何约束 (AVP 场景) — 速度由 docx ODD extraction 决定, 不在此处指定
+avp_odd:
+  gap_front_m: 0.3
+  gap_side_m: 1.75
+  gap_rear_m: 3.0
+
+templates:
+
+  # ── 制动扭矩过小 / 不足 ──
+  - fm_match:
+      keywords: ["制动扭矩过小", "制动扭矩不足", "制动力不足", "brake_under"]
+      component_category: ["brake_actuator", "brake_controller", "esc_unit"]
+      failure_type: ["insufficient_output", "degraded_performance"]
+    required_scenarios:
+      - label: "前进撞前方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: front
+        collision_type: front
+      - label: "前进撞前方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: passenger_car
+        obj_position: front
+        collision_type: front
+      - label: "倒车撞后方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: rear
+        collision_type: rear
+      - label: "倒车撞后方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: passenger_car
+        obj_position: rear
+        collision_type: rear
+
+  # ── 制动扭矩丢失 ──
+  - fm_match:
+      keywords: ["制动扭矩丢失", "制动力丢失", "制动功能丢失", "brake_loss"]
+      component_category: ["brake_actuator", "brake_controller"]
+      failure_type: ["loss_of_function", "no_output"]
+    required_scenarios:
+      - label: "前进撞前方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: front
+        collision_type: front
+      - label: "前进撞前方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: passenger_car
+        obj_position: front
+        collision_type: front
+      - label: "倒车撞后方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: rear
+        collision_type: rear
+
+  # ── 非预期制动 ──
+  - fm_match:
+      keywords: ["非预期制动", "意外制动", "unintended_braking"]
+      failure_type: ["unintended_activation"]
+      component_category: ["brake_actuator", "brake_controller"]
+    required_scenarios:
+      - label: "被后车追尾(静止后车)"
+        obj_v_kph: 0
+        obj_distance_m: 3.0
+        obj_type: passenger_car
+        obj_position: rear
+        collision_type: rear
+      - label: "被后车追尾(后车10km/h)"
+        obj_v_kph: 10
+        obj_distance_m: 3.0
+        obj_type: passenger_car
+        obj_position: rear
+        collision_type: rear
+
+  # ── 驱动扭矩过大 / 非预期加速 ──
+  - fm_match:
+      keywords: ["驱动扭矩过大", "非预期加速", "意外加速", "unintended_acceleration", "drive_over"]
+      component_category: ["drive_actuator", "drive_controller"]
+      failure_type: ["excessive_output", "unintended_activation"]
+    required_scenarios:
+      - label: "加速撞前方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: front
+        collision_type: front
+      - label: "加速撞前方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: passenger_car
+        obj_position: front
+        collision_type: front
+      - label: "加速撞侧方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 1.75
+        obj_type: passenger_car
+        obj_position: left
+        collision_type: side
+
+  # ── 转向偏置 / 转向失效 ──
+  - fm_match:
+      keywords: ["转向偏置", "转向失效", "方向偏转", "steering_drift", "steering_loss"]
+      component_category: ["steering_actuator", "steering_controller", "eps_motor"]
+      failure_type: ["drift", "loss_of_function", "incorrect_output"]
+    required_scenarios:
+      - label: "偏转撞侧方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 1.75
+        obj_type: passenger_car
+        obj_position: left
+        collision_type: side
+      - label: "偏转撞侧方行人"
+        obj_v_kph: 0
+        obj_distance_m: 1.75
+        obj_type: pedestrian
+        obj_position: left
+        collision_type: side
+
+  # ── EPB 非预期拉起 / 非预期驻车 ──
+  # TODO: actuator lifecycle plugin — EPB 误触发的高速场景 (40/60/80 km/h)
+  #       不在 AVP ODD 内, 需要独立的 lifecycle 分析产出, 不应由模板硬编码。
+
+  # ── EPB 非预期释放 / 溜车 ──
+  - fm_match:
+      keywords: ["EPB释放", "溜车", "驻车释放", "parking_brake_release", "rollaway"]
+      component_category: ["epb", "parking_brake"]
+      failure_type: ["unintended_deactivation", "loss_of_function"]
+    required_scenarios:
+      - label: "坡道溜车撞前方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: front
+        collision_type: front
+      - label: "坡道溜车撞前方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: passenger_car
+        obj_position: front
+        collision_type: front
+
+  # ── 路径规划偏差 ──
+  - fm_match:
+      keywords: ["路径偏差", "路径规划", "path_deviation"]
+      component_category: ["path_planner", "apa_controller"]
+      failure_type: ["path_deviation", "incorrect_output"]
+    required_scenarios:
+      - label: "偏离路径撞侧方车辆"
+        obj_v_kph: 0
+        obj_distance_m: 1.75
+        obj_type: passenger_car
+        obj_position: left
+        collision_type: side
+      - label: "偏离路径撞行人"
+        obj_v_kph: 0
+        obj_distance_m: 1.75
+        obj_type: pedestrian
+        obj_position: front_left
+        collision_type: side
+
+  # ── 超声波传感器失效 ──
+  - fm_match:
+      keywords: ["超声波", "UPA", "障碍物漏检", "obstacle_miss"]
+      component_category: ["upa_sensor"]
+      failure_type: ["obstacle_miss", "no_detection", "loss_of_function"]
+    required_scenarios:
+      - label: "漏检前方行人"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: pedestrian
+        obj_position: front
+        collision_type: front
+      - label: "漏检前方障碍物"
+        obj_v_kph: 0
+        obj_distance_m: 0.3
+        obj_type: static_obstacle
+        obj_position: front
+        collision_type: front

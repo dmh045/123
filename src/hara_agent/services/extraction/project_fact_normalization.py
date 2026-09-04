@@ -45,10 +45,15 @@ class ProjectFactNormalizer:
 
     OPERATOR_ALIASES = {
         "LT": ConstraintOperator.LT, "<": ConstraintOperator.LT,
-        "LE": ConstraintOperator.LE, "<=": ConstraintOperator.LE, "â‰¤": ConstraintOperator.LE, "â‰¦": ConstraintOperator.LE,
+        "LE": ConstraintOperator.LE, "<=": ConstraintOperator.LE,
+        "≤": ConstraintOperator.LE, "≦": ConstraintOperator.LE,
+        "â‰¤": ConstraintOperator.LE, "â‰¦": ConstraintOperator.LE,
         "EQ": ConstraintOperator.EQ, "=": ConstraintOperator.EQ,
-        "GE": ConstraintOperator.GE, ">=": ConstraintOperator.GE, "â‰¥": ConstraintOperator.GE, "â‰§": ConstraintOperator.GE,
-        "GT": ConstraintOperator.GT, ">": ConstraintOperator.GT, "ï¼ž": ConstraintOperator.GT,
+        "GE": ConstraintOperator.GE, ">=": ConstraintOperator.GE,
+        "≥": ConstraintOperator.GE, "≧": ConstraintOperator.GE,
+        "â‰¥": ConstraintOperator.GE, "â‰§": ConstraintOperator.GE,
+        "GT": ConstraintOperator.GT, ">": ConstraintOperator.GT,
+        "＞": ConstraintOperator.GT, "ï¼ž": ConstraintOperator.GT,
         "RANGE": ConstraintOperator.RANGE,
     }
     UNIT_ALIASES = {

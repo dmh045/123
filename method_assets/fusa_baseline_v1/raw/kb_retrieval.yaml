@@ -1,0 +1,158 @@
+# skills/hara/kb_retrieval.yaml
+#
+# 由 core.hara.sec_tools.classify_kb_score(score) 读取
+#
+# 用途：把 search_knowledge_base 返回的每条 hit 按 score 分三档：
+#   high   → 终态可用，confidence=high，escalation_reason=None（清白 finalized）
+#   medium → 弱证据，confidence=medium，finalized + escalation_reason="kb_weak_evidence"
+#   discard → 视为未召回，sources=[]，必须 escalate 到 engineer
+#
+# 阈值由来：
+#   0.7 / 0.4 是初始拍板值，跑一段时间后按数据回归调整
+#
+# 修改约束：
+#   - 字段名稳定（prompts.py / classify_kb_score 双向引用）
+#   - 数值改动后必须跑 tests/hara/test_kb_score_threshold.py 验证边界
+#   - 不要静默 fallback；缺字段一律抛错（fail-loud）
+
+# search_knowledge_base 返回的每条 hit 中分数字段名
+# （防工具层改名时此 yaml 也能记录真实字段名供 reviewer 查阅）
+score_field_name: score
+
+score_thresholds:
+  # ≥ high → confidence=high，清白 finalized（escalation_reason 必须为空）
+  high: 0.70
+
+  # medium ≤ score < high → confidence=medium，弱证据进 sources，
+  # finalized + escalation_reason="kb_weak_evidence"，提示 reviewer 复核
+  medium: 0.40
+
+  # < noise_floor → 视为未召回，sources=[]，必须 escalate 到 engineer
+  # 当前与 medium 相同（0.4-0.7 medium 档闭区间下界即噪声地板）；
+  # 若未来想引入"灰区"（不进 sources 但记入审计），把 noise_floor 调低于 medium。
+  audit_only: 0.20     # 不可作判定依据，但保留进 sources 供审计  ← 新增
+  noise_floor: 0.10
+
+# ============================================================
+# classification — 双信号分档（rerank × recall 联合决策）
+# ============================================================
+#
+# 问题背景：
+#   - recall_score (item["score"]) = 向量召回相似度，量级 0.1~0.5，判别力低
+#   - rerank_score (item["rerank_score"]) = 交叉编码器重排，量级 0.5~0.95，判别力强
+#   - 旧代码以 recall_score 作主信号，而 yaml 阈值按 rerank 量级标定 → 全量 pending
+#
+# 新决策：primary_score >= primary_min AND guard_score >= guard_min → 命中该档
+#   primary_score : 主信号字段名（读自 _compact_item 输出）
+#   guard_score   : 守卫信号字段名（防止 rerank 孤高 / 召回极差的噪声）
+#   tiers         : 按 primary_min 从高到低排列，首个命中档即为结果
+#   noise_floor   : primary_score < noise_floor -> 直接 discard，不进 tiers 评估
+#
+# 修改约束：
+#   - 所有数值只在此 yaml，不入 Python 常量、不入 prompt
+#   - 字段名改动必须同步更新 sec_tools.classify_kb_score 和 _compact_item
+#   - 跑 tests/hara/test_kb_score_threshold.py 验证边界
+#
+classification:
+  primary_score: rerank_score   # 主分类信号：cross-encoder 重排分，0.5~0.95
+  guard_score: recall_score     # 守卫信号：向量召回相似度，0.1~0.5
+
+  tiers:
+    - name: high
+      primary_min: 0.85         # rerank >= 0.85 -> 高置信，直接 finalized
+      guard_min: 0.15           # recall >= 0.15 -> 排除随机噪声命中
+
+    - name: medium
+      primary_min: 0.60         # rerank >= 0.60 -> 中置信，弱证据进 sources
+      guard_min: 0.10           # recall >= 0.10 -> 极低门槛，防止 rerank 孤高
+
+    - name: audit_only
+      primary_min: 0.30         # rerank >= 0.30 -> 仅供审计，不作判定依据
+      guard_min: 0.0            # 无 recall 下界（审计宽松）
+
+  noise_floor:
+    rerank_score: 0.20          # rerank < 0.20 -> 直接 discard，不进 tiers
+
+# ============================================================
+# query_templates — Step 5 判定轴 × 检索意图配置
+# ============================================================
+#
+# 消费方：tools/volcengine_kb_tools.py search_knowledge_base(intent=...)
+#
+# 每个 intent 块的字段说明：
+#   description        : 人类可读说明，便于 reviewer 理解用途
+#   use_business_context: true  → 工具层用 context dict 填充 {placeholder}
+#                         false → 不注入业务词，query 保持去业务化（适合检索标准条文）
+#   search_profile     : precise / balanced / recall，覆盖函数默认值
+#   filter_tags        : 覆盖 analysis_methods / levels / domains / guide_only
+#   queries            : 模板列表，支持 {placeholder} 占位符
+#                        缺失占位符 → 该模板被跳过，不报错
+#
+
+
+query_templates:
+  ftti:
+    description: 检索 FTTI 标准定义 / T1+T2 公式，去业务化以匹配标准条文风格
+    use_business_context: false
+    search_profile: precise
+    filter_tags:
+      guide_only: true
+    queries:
+      - "Fault Tolerant Time Interval definition"
+      - "FTTI T1 T2 reaction time system response time"
+      - "故障容错时间间隔 计算公式 制动反应时间"
+      - "fault reaction time system response time functional safety"
+
+  severity:
+    description: 检索相似 HARA 案例的 Severity 评分依据，业务化匹配历史案例
+    use_business_context: true
+    search_profile: balanced
+    filter_tags:
+      analysis_methods: ["hara"]
+      domains: ["智驾域"]
+    queries:
+      - "{collision_type} 碰撞 严重度 S 等级 HARA"
+      - "{hazard_description} severity 伤亡后果"
+      - "{scenario_brief} HARA 严重度分级"
+      - "整车级危害 severity S1 S2 S3 判定依据"
+
+  exposure:
+    description: 检索相似场景的 Exposure 评分依据，业务化匹配历史案例
+    use_business_context: true
+    search_profile: balanced
+    filter_tags:
+      analysis_methods: ["hara"]
+      domains: ["智驾域"]
+    queries:
+      - "{traffic_scenario} 暴露概率 E 分级 HARA"
+      - "{scenario_brief} exposure E1 E2 E3 E4"
+      - "ODD 暴露率 道路类型 驾驶场景 E 等级"
+      - "整车级危害 exposure 运行设计域 概率"
+
+  controllability:
+    description: 检索相似场景的 Controllability 评分依据，业务化匹配历史案例
+    use_business_context: true
+    search_profile: balanced
+    filter_tags:
+      analysis_methods: ["hara"]
+      domains: ["智驾域"]
+    queries:
+      - "{collision_type} 可控性 C 驾驶员反应 HARA"
+      - "{hazard_description} controllability 驾驶员干预"
+      - "{scenario_brief} C1 C2 C3 可控性分级"
+      - "整车级危害 controllability 驾驶员可控比例"
+
+  scenario_build:
+    description: |
+      Step 3a 场景构建检索：给定 fm + ODD，召回 VDA 702 场景配方与同类功能 HARA 场景组合。
+      用于辅助 LLM 在 5 维度 atom 池里挑代表性组合（典型/边界/极端），不用于召回数值参数。
+    use_business_context: true
+    search_profile: balanced
+    filter_tags:
+      analysis_methods: ["hara"]
+      domains: ["智驾域"]
+    queries:
+      - "{failure_mode} 场景 atom 组合 HARA"
+      - "{function_name} {failure_mode} 触发场景 VDA702"
+      - "{odd_summary} {failure_mode} 典型工况"
+      - "VDA 702 V2 5.3 atom 场景维度 EGO_ACTION OBJECT"

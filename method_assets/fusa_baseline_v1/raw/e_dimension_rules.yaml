@@ -1,0 +1,98 @@
+version: "1.0"
+source: "VDA 702 + ISO 26262 工程经验"
+
+# e_dimension_resolver 设计：yaml-first + LLM 兜底
+#   1. 优先按 rules 列表做 component_category 快速匹配 → source="yaml_rule"
+#   2. 规则未命中（component_category=None 或不在覆盖列表）→ LLM 兜底
+#   3. LLM 不可用 → value=None，下游 evaluator 走 pending 路径
+#
+# Z = 时间域（故障立即可感，按车辆运行时间评估暴露率）
+# F = 频率域（故障需特定场景触发，按场景出现频率评估）
+
+# ============================================================
+# 规则表：基于 component_category 精确匹配
+# ============================================================
+rules:
+
+  # Z 组：执行器 & 基础设施 — 故障影响随行车时间持续存在
+  - rule_id: "R001"
+    match_component_category:
+      - actuator_longitudinal   # 行车制动 / 驻车制动 / 挡位
+      - actuator_lateral        # 转向
+      - actuator_propulsion     # 驱动
+    e_dimension: Z
+    rationale: "执行器故障对车辆运动的影响随行车时间持续存在，无需特定触发场景"
+
+  - rule_id: "R002"
+    match_component_category:
+      - communication           # CAN / Ethernet 报文
+      - power                   # 供电
+      - computing               # 域控程序崩溃 / 状态机
+    e_dimension: Z
+    rationale: "通信 / 供电 / 计算平台异常立即触发系统状态变化"
+
+  # F 组：传感器 — 危险仅在对应目标 / 场景出现时暴露
+  - rule_id: "R003"
+    match_component_category:
+      - sensor_camera
+      - sensor_radar
+      - sensor_lidar
+      - sensor_ultrasonic
+      - sensor_imu
+    e_dimension: F
+    rationale: "感知传感器故障的危险仅在对应交通目标 / 动态场景出现时才暴露"
+
+  # F 组：场景相关系统 — 需等特定触发条件
+  - rule_id: "R004"
+    match_component_category:
+      - lighting                # 需夜间 / 隧道 / 雨雾场景
+      - wiper                   # 需降雨场景
+      - localization            # 需导航 / 出库 / 巡航场景
+      - hmi                     # 需驾驶员交互场景
+    e_dimension: F
+    rationale: "灯光 / 雨刮 / 定位 / HMI 故障需等对应触发场景（夜间 / 降雨 / 导航 / 操作）才暴露"
+
+# ============================================================
+# fewshot examples 供 LLM 兜底时参考（component_category=None 等情况）
+# ============================================================
+examples:
+  - failure_pattern: "制动执行器扭矩丢失"
+    e_dimension: Z
+    reason: "故障一旦发生立即可感（车辆不能减速），按车辆运行时间评估"
+
+  - failure_pattern: "前照灯模块失效，灯不点亮"
+    e_dimension: F
+    reason: "白天无危险，等夜间 / 隧道场景触发才暴露"
+
+  - failure_pattern: "EPS 持续输出偏置扭矩"
+    e_dimension: Z
+    reason: "直道弯道均持续漂移，按行驶时间评估"
+
+  - failure_pattern: "雨刮失效"
+    e_dimension: F
+    reason: "晴天无危险，等降雨场景才暴露"
+
+  - failure_pattern: "倒车灯失效"
+    e_dimension: F
+    reason: "等倒车动作触发才相关"
+
+  - failure_pattern: "驱动扭矩非预期输出"
+    e_dimension: Z
+    reason: "立即影响车辆纵向运动"
+
+  - failure_pattern: "通信报文超时"
+    e_dimension: Z
+    reason: "故障立即触发系统态切换"
+
+  - failure_pattern: "定位失效"
+    e_dimension: F
+    reason: "等场景触发（出库 / 巡航 / 泊入）才暴露"
+
+  - failure_pattern: "驻车制动失效"
+    e_dimension: Z
+    reason: "驻车需求时立即影响"
+
+  - failure_pattern: "感知 sensor 失效（毫米波雷达）"
+    e_dimension: F
+    reason: "等对应交通对象出现才暴露"
+

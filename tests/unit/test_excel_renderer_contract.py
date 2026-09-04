@@ -87,3 +87,60 @@ def test_renderer_preserves_ignorable_namespace_declarations_and_drops_calc_chai
                 assert f"xmlns:{prefix}=" in root.group(0)
             assert "ns2:uid=" not in root.group(0)
             assert "xr:uid=" in root.group(0)
+
+
+def test_renderer_keeps_inapplicable_and_nonhazardous_guideword_rows_as_na():
+    method = TemplateRoleCompiler().compile_method(TEMPLATE)
+    output = ROOT / "output" / ".test-report" / "guideword-na-rows.xlsx"
+    state = HARAState(run_id="guideword-na-rows", stage=WorkflowStage.RENDER)
+    state.functions = [{
+        "function_id": "F01",
+        "name": "Parking motion control",
+        "output": "Vehicle motion request",
+    }]
+    state.guideword_assessments = [
+        {
+            "function_id": "F01",
+            "guideword": "reverse",
+            "applicable": False,
+            "disposition": "NOT_APPLICABLE",
+            "rationale": "The output has no reversible direction semantic.",
+        },
+        {
+            "function_id": "F01",
+            "guideword": "different to",
+            "applicable": True,
+            "disposition": "NO_CREDIBLE_HAZARD",
+            "rationale": "The identified difference cannot change vehicle behavior.",
+        },
+    ]
+
+    HARAExcelRenderer(method.report_contract).render(
+        state, TEMPLATE, output, draft=True,
+    )
+
+    mappings = {
+        item.canonical_field: item.column_index
+        for item in method.report_contract.hara_fields
+    }
+    start_row = max(
+        row for item in method.report_contract.hara_fields for row in item.header_rows
+    ) + 1
+    workbook = load_workbook(output, read_only=True, data_only=False)
+    try:
+        sheet = workbook[method.report_contract.hara_fields[0].sheet]
+        assert sheet.cell(start_row, mappings["guideword"]).value == "reverse"
+        assert sheet.cell(start_row, mappings["malfunction"]).value.startswith("N/A：")
+        assert "语义不适用" in sheet.cell(start_row, mappings["remark"]).value
+        assert sheet.cell(start_row + 1, mappings["guideword"]).value == "different to"
+        assert "可信车辆级危害" in sheet.cell(start_row + 1, mappings["remark"]).value
+        for field in (
+            "hazard", "scenario", "hazardous_event", "severity",
+            "exposure", "controllability", "asil", "safety_goal", "safe_state",
+        ):
+            if field in mappings:
+                assert sheet.cell(start_row, mappings[field]).value is None
+                assert sheet.cell(start_row + 1, mappings[field]).value is None
+    finally:
+        workbook.close()
+        output.unlink()

@@ -1,0 +1,9 @@
+method_id: invalid_duplicate_role
+method_version: "test"
+sources:
+  asil: missing.yaml
+normalized_sources:
+  asil: missing.yaml
+policies:
+  asil_zero_short_circuit: QM
+asset_hashes: {}

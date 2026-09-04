@@ -13,6 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from openpyxl import load_workbook
 
 from hara_agent.contracts import ReportContract, ReportFieldMapping
+from hara_agent.models import GuidewordDisposition
 
 if TYPE_CHECKING:
     from hara_agent.workflow.state import HARAState
@@ -189,8 +190,53 @@ class HARAExcelRenderer:
             state.functions, lambda item: str(item.get("function_id", "")), "Function",
         )
         goals = self._unique_index(state.safety_goals, lambda item: item.sg_id, "Safety Goal")
-        rows: list[dict[str, object]] = []
-        for offset, risk in enumerate(state.risk_results):
+        function_order = {
+            str(item.get("function_id", "")): index
+            for index, item in enumerate(state.functions)
+        }
+        guideword_order = {
+            (
+                str(item.get("function_id", "")),
+                str(item.get("guideword", "")),
+            ): index
+            for index, item in enumerate(state.guideword_assessments)
+        }
+        projected: list[tuple[tuple[int, int, int, int], dict[str, object]]] = []
+
+        for assessment_index, assessment in enumerate(state.guideword_assessments):
+            disposition = self._guideword_disposition(assessment)
+            if disposition is GuidewordDisposition.DOWNSTREAM_CANDIDATE:
+                continue
+            function_id = str(assessment.get("function_id", ""))
+            if function_id not in functions:
+                raise ValueError(
+                    f"Renderer GuidewordAssessment Function foreign key missing: {function_id!r}"
+                )
+            function = functions[function_id]
+            guideword = str(assessment.get("guideword", ""))
+            rationale = self._brief(str(assessment.get("rationale", "")))
+            label = (
+                "语义不适用"
+                if disposition is GuidewordDisposition.NOT_APPLICABLE
+                else "未识别到可信车辆级危害"
+            )
+            projected.append((
+                (
+                    function_order.get(function_id, len(function_order)),
+                    guideword_order.get((function_id, guideword), assessment_index),
+                    0,
+                    assessment_index,
+                ),
+                {
+                    "function": function.get("name", ""),
+                    "output": function.get("output", ""),
+                    "guideword": guideword,
+                    "malfunction": f"N/A：{rationale}",
+                    "remark": f"N/A（{label}）；未进入下游分析",
+                },
+            ))
+
+        for risk_index, risk in enumerate(state.risk_results):
             if risk.scenario_id not in scenarios or risk.malfunction_id not in malfunctions:
                 raise ValueError(
                     f"Renderer foreign key missing: risk={risk.assessment_id!r}, "
@@ -210,11 +256,21 @@ class HARAExcelRenderer:
                     f"Non-QM risk lacks Safety Goal foreign key: risk={risk.assessment_id!r}, "
                     f"safety_goal_id={risk.safety_goal_id!r}"
                 )
-            rows.append({
-                "hara_id": f"HARA_{offset + 1:03d}",
+            guideword = str(malfunction.get("guideword", ""))
+            projected.append((
+                (
+                    function_order.get(function_id, len(function_order)),
+                    guideword_order.get(
+                        (function_id, guideword),
+                        len(state.guideword_assessments) + risk_index,
+                    ),
+                    1,
+                    risk_index,
+                ),
+                {
                 "function": function.get("name", ""),
                 "output": function.get("output", ""),
-                "guideword": malfunction.get("guideword", ""),
+                "guideword": guideword,
                 "malfunction": malfunction.get("description", ""),
                 "hazard": malfunction.get("vehicle_level_hazard", ""),
                 "scenario": scenario.situational_description,
@@ -234,8 +290,32 @@ class HARAExcelRenderer:
                 "safety_goal": goal.text if goal else "",
                 "safe_state": goal.safe_state if goal else "",
                 "remark": "",
-            })
+                },
+            ))
+        projected.sort(key=lambda item: item[0])
+        rows = []
+        for offset, (_, row) in enumerate(projected, start=1):
+            rows.append({"hara_id": f"HARA_{offset:03d}", **row})
         return rows
+
+    @staticmethod
+    def _guideword_disposition(assessment: dict) -> GuidewordDisposition:
+        raw = assessment.get("disposition")
+        raw_value = getattr(raw, "value", raw)
+        if raw_value:
+            return GuidewordDisposition(str(raw_value))
+        return (
+            GuidewordDisposition.DOWNSTREAM_CANDIDATE
+            if assessment.get("applicable") is True
+            else GuidewordDisposition.NOT_APPLICABLE
+        )
+
+    @staticmethod
+    def _brief(value: str, limit: int = 120) -> str:
+        compact = " ".join(value.split()) or "未提供进一步说明"
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 1].rstrip() + "…"
 
     @staticmethod
     def _unique_index(values, key, label: str):

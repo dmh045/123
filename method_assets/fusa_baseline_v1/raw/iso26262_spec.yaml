@@ -1,0 +1,67 @@
+version: "1.0-baseline"
+source: "ISO 26262:2018"
+# skills/hara/iso26262_spec.yaml
+#
+# immutable — 本文件只包含 ISO 26262 标准规定的内容，不含任何项目特化值。
+# 修改前必须能引用 ISO 26262-3:2018 的具体条款或 Annex。
+#
+# 数据来源：
+#   severity.collision    ← ISO 26262-3 Annex B + VDA 702（Δv 碰撞严重度区间）
+#   controllability.ttc   ← ISO 26262-3 §6.4.3.6（TTC 分级）
+#   asil_matrix           ← ISO 26262-3:2018 Table 4（完整 ASIL 判定矩阵）
+#
+# 不属于本文件的内容（见 domain_rules/*.yaml）：
+#   - exposure 暴露率映射（依赖 ODD / road_type / weather，项目特化）
+#   - driver_out_of_seat 等 domain modifier
+#   - pedestrian_minimum、triggering_state_mapping 等经验规则
+#   - standard_kinematic_values、fallback_scenario_dimensions
+
+severity:
+  # 碰撞严重度 Δv 阈值（ISO 26262-3 Annex B + VDA 702）
+  # 取值策略：区间下界保守（S1 取 4-20 区间的 4，S2 取 20-40 区间的 20）
+  collision:
+    front:
+      S0: { delta_v_max: 4 }
+      S1: { delta_v_min: 4,  delta_v_max: 20 }
+      S2: { delta_v_min: 20, delta_v_max: 40 }
+      S3: { delta_v_min: 40 }
+    back:
+      S0: { delta_v_max: 4 }
+      S1: { delta_v_min: 4,  delta_v_max: 20 }
+      S2: { delta_v_min: 20, delta_v_max: 40 }
+      S3: { delta_v_min: 40 }
+    side:
+      S0: { delta_v_max: 2 }
+      S1: { delta_v_min: 2,  delta_v_max: 8 }
+      S2: { delta_v_min: 8,  delta_v_max: 16 }
+      S3: { delta_v_min: 16 }
+
+controllability:
+  # TTC 分级阈值（ISO 26262-3 §6.4.3.6）
+  ttc_thresholds:
+    C0: { ttc_min: 5 }                   # > 5s
+    C1: { ttc_min: 4, ttc_max: 5 }
+    C2: { ttc_min: 3, ttc_max: 4 }
+    C3: { ttc_max: 3 }                   # ≤ 3s
+
+# ISO 26262-3:2018 Table 4 — 完整 ASIL 判定矩阵
+# 注意：
+#   - C0 不在此矩阵（C0 永远 QM，由加载器短路返回）
+#   - S0 / E0 同理（任一为 0 → QM，由加载器短路）
+#   - 矩阵结构：asil_matrix[S][E][C] → ASIL level string
+asil_matrix:
+  S1:
+    E1: { C1: QM, C2: QM, C3: QM }
+    E2: { C1: QM, C2: QM, C3: QM }
+    E3: { C1: QM, C2: QM, C3: A  }
+    E4: { C1: QM, C2: A,  C3: B  }
+  S2:
+    E1: { C1: QM, C2: QM, C3: QM }
+    E2: { C1: QM, C2: QM, C3: A  }
+    E3: { C1: QM, C2: A,  C3: B  }
+    E4: { C1: A,  C2: B,  C3: C  }
+  S3:
+    E1: { C1: QM, C2: QM, C3: A  }
+    E2: { C1: QM, C2: A,  C3: B  }
+    E3: { C1: A,  C2: B,  C3: C  }
+    E4: { C1: B,  C2: C,  C3: D  }

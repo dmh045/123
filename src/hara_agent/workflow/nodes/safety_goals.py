@@ -21,7 +21,7 @@ def aggregate_safety_goals(
     scenarios = {item.scenario_id: item for item in state.scenarios}
 
     for risk in state.risk_results:
-        if risk.asil.value in {"QM", "NA", "N/A", ""}:
+        if risk.asil.value not in {"A", "B", "C", "D"}:
             continue
         malfunction = malfunctions.get(risk.malfunction_id)
         if malfunction is None:
@@ -83,7 +83,7 @@ def aggregate_safety_goals(
     state.record(
         "safety_goals_aggregated",
         non_qm_risk_count=sum(
-            risk.asil.value not in {"QM", "NA", "N/A", ""}
+            risk.asil.value in {"A", "B", "C", "D"}
             for risk in state.risk_results
         ),
         safety_goal_count=len(goals),

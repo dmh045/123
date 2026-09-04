@@ -1,0 +1,7 @@
+schema_version: "1.0"
+source: "governed field normalization for c_profiles/iav_avp.yaml"
+aliases:
+  remote_brake_available: remote_intervention_available
+  remote_app_brake_available: remote_intervention_available
+  external_evasion: other_road_user_avoidance_possible
+  counter_party_can_evade: other_road_user_avoidance_possible

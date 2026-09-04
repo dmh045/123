@@ -1,0 +1,9 @@
+schema_version: "1.0"
+source: "governed HARA baseline"
+safety_goal:
+  generate_for_asil: [A, B, C, D]
+  skip_for: [QM]
+  status: USER_SELECTED_BASELINE
+safe_state:
+  require_project_control_capability: true
+  status: USER_SELECTED_BASELINE

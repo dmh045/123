@@ -1,0 +1,120 @@
+# fm_layer_classification.yaml
+# ────────────────────────────────────────────────────────────────
+# FailureMode.scope_layer 分层规则
+# Step 2 后处理依据 component_category + failure_type + 关键词 判定 FM 所属层级。
+#
+# 匹配优先级: rules 按顺序匹配, 首条命中即停止。
+# 未命中任何规则时, 取 default_layer (默认 control)。
+#
+# scope_layer 含义:
+#   control       — 执行控制层（制动/转向/驱动等物理控制环）
+#   state_machine — 状态机层（功能激活/退出/降级/模式切换）
+#   hmi           — 人机交互层（显示/声音/提示/确认/报警）
+#   parking       — 泊车特有（路径规划/车位检测/定位）
+#
+# chain_to 规则:
+#   非 control 层 FM 链到同 item 的全部 control 层 FM
+# ────────────────────────────────────────────────────────────────
+
+version: "2.1"
+
+# 未命中任何 rule 时的默认层级
+# 物理执行/传感类 FM 占大多数, 默认 control 最安全
+default_layer: control
+
+# rules 顺序: hmi → state_machine → parking
+# (control 不需显式规则 — 由 default_layer 兜底)
+rules:
+
+  # ── hmi 层: 人机交互/提示/确认/报警 ──
+  # (必须在 state_machine 之前, "报警失效" 属 HMI 而非状态机)
+  - scope_layer: hmi
+    match:
+      component_category:
+        - hmi
+        - lighting
+      keywords_in_function_name:
+        - 报警
+        - 告警
+        - 提示
+        - 显示
+        - 指示
+        - 声音
+        - 蜂鸣
+        - 灯光
+        - 界面
+        - 屏幕
+        - HMI
+      keywords_in_failure_mode:
+        - 未报警
+        - 未告警
+        - 未提示
+        - 误报警
+        - 误告警
+        - 虚假报警
+        - 显示错误
+        - 显示缺失
+        - 指示灯
+
+  # ── state_machine 层: 功能激活/退出/模式切换/降级 ──
+  - scope_layer: state_machine
+    match:
+      component_category:
+        - computing
+      keywords_in_function_name:
+        - 开启
+        - 激活
+        - 退出
+        - 关闭
+        - 切换
+        - 模式
+        - 状态机
+        - 降级
+        - 启动
+        - 待机
+        - 唤醒
+        - 休眠
+        - 功能管理
+        - 功能使能
+      keywords_in_failure_mode:
+        - 功能未激活
+        - 功能误激活
+        - 非预期激活
+        - 非预期退出
+        - 无法退出
+        - 无法关闭
+        - 模式切换
+        - 状态跳变
+        - 卡在
+        - stuck
+
+  # ── parking 层: 泊车特有子系统 ──
+  - scope_layer: parking
+    match:
+      component_category:
+        - localization
+      keywords_in_function_name:
+        - 路径规划
+        - 车位检测
+        - 泊车
+        - 定位
+      keywords_in_failure_mode:
+        - 路径偏差
+        - 漏检
+        - 误检
+        - 车位
+        - 定位偏移
+
+# chain_to 推导规则
+chain_rules:
+  - source_layer: state_machine
+    target_layer: control
+    rationale: "状态机层失效最终通过物理控制层体现危害"
+
+  - source_layer: hmi
+    target_layer: control
+    rationale: "HMI层失效在控制层已发生物理失效时加重后果"
+
+  - source_layer: parking
+    target_layer: control
+    rationale: "泊车子系统失效最终通过执行器体现危害"

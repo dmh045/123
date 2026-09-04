@@ -8,6 +8,7 @@ from hara_agent.services.validation import ReleaseGateValidator
 
 from .checkpoints import CheckpointRepository
 from .state import HARAState, WorkflowStage
+from .review_artifacts import ReviewArtifactWriter
 
 
 Node = Callable[[HARAState], HARAState]
@@ -26,10 +27,12 @@ class WorkflowGraph:
     TERMINAL = {WorkflowStage.COMPLETE, WorkflowStage.BLOCKED}
 
     def __init__(self, checkpoint_repository: CheckpointRepository | None = None,
-                 progress: Callable[[str, str, float], None] | None = None):
+                 progress: Callable[[str, str, float], None] | None = None,
+                 review_artifact_writer: ReviewArtifactWriter | None = None):
         self.nodes: dict[WorkflowStage, Node] = {}
         self.checkpoints = checkpoint_repository
         self.progress = progress
+        self.review_artifact_writer = review_artifact_writer
 
     def add_node(self, stage: WorkflowStage, node: Node) -> "WorkflowGraph":
         if stage in self.nodes:
@@ -65,7 +68,9 @@ class WorkflowGraph:
                 self.progress("started", previous.value, 0.0)
             try:
                 state = node(state)
-            except Exception:
+            except Exception as exc:
+                if self.review_artifact_writer is not None:
+                    self.review_artifact_writer.mark_failed(state, exc)
                 if self.progress:
                     self.progress("failed", previous.value, monotonic() - started)
                 raise
@@ -74,6 +79,8 @@ class WorkflowGraph:
             if state.stage is previous:
                 state.errors.append({"type": "workflow_no_progress", "stage": previous.value})
                 state.stage = WorkflowStage.BLOCKED
+            if self.review_artifact_writer is not None:
+                self.review_artifact_writer.write_summary(state)
             self._save(state)
         state.errors.append({"type": "workflow_step_limit", "max_steps": max_steps})
         state.stage = WorkflowStage.BLOCKED

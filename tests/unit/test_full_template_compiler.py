@@ -8,7 +8,7 @@ import pytest
 from openpyxl import load_workbook
 
 from hara_agent.contracts import (
-    CompileStatus, CompilerDiagnosticCode, NormativeStrength,
+    CompileStatus, CompilerDiagnosticCode, FactOrigin, FactType, NormativeStrength,
     ParseStatus, RangePredicate,
 )
 from hara_agent.template import TemplateRoleCompiler
@@ -61,6 +61,11 @@ def test_current_template_compiles_full_method_contract():
     assert len(method.controllability.examples) == 11
     assert len(method.asil.mappings) == 80
     assert len(method.required_fact_specs) == 9
+    exposure_selector = next(
+        item for item in method.required_fact_specs
+        if item.fact_type is FactType.EXPOSURE
+    )
+    assert exposure_selector.origin is FactOrigin.HUMAN_EVIDENCE
     assert len(method.report_contract.hara_fields) == 21
     assert len(method.report_contract.safety_goal_fields) == 6
     assert method.scenario_model.source_type == "METHOD_SCENARIO_ONTOLOGY"

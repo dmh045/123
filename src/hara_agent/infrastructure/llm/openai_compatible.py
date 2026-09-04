@@ -35,6 +35,14 @@ class LLMOutputLimitError(ValueError):
         self.diagnostics = diagnostics or {}
 
 
+class LLMEmptyOutputError(ValueError):
+    """The provider returned no machine-readable content."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
 class LLMTimeoutError(RuntimeError):
     """A request exhausted its task-specific timeout attempts."""
 
@@ -176,13 +184,22 @@ class OpenAICompatibleClient:
                     "input_characters": input_characters,
                     "content_characters": len(str(content or "")),
                     "reasoning_characters": len(str(reasoning_content or "")),
+                    "finish_reason": finish_reason,
+                    "max_tokens": body["max_tokens"],
+                    "prompt_tokens": raw_usage.get("prompt_tokens", raw_usage.get("input_tokens")),
                     "completion_tokens": raw_usage.get("completion_tokens", raw_usage.get("output_tokens")),
                 },
             )
         if not str(content or "").strip():
-            raise ValueError(
+            raise LLMEmptyOutputError(
                 f"LLM返回空内容；finish_reason={finish_reason}；"
-                f"本次max_tokens={body['max_tokens']}。"
+                f"本次max_tokens={body['max_tokens']}。",
+                diagnostics={
+                    "finish_reason": finish_reason,
+                    "max_tokens": body["max_tokens"],
+                    "prompt_tokens": raw_usage.get("prompt_tokens", raw_usage.get("input_tokens")),
+                    "completion_tokens": raw_usage.get("completion_tokens", raw_usage.get("output_tokens")),
+                },
             )
         format_retry_attempt = int(request.metadata.get("_format_retry_attempt", 0))
         markdown_fence_normalizations = 0
@@ -202,6 +219,14 @@ class OpenAICompatibleClient:
                 data = self._parse_json_content(content, schema_name=request.schema_name)
         except LLMJSONContractError as exc:
             diagnostics = exc.diagnostics
+            diagnostics.setdefault("request_id", str(response.get("id", "")))
+            diagnostics.setdefault("finish_reason", finish_reason)
+            diagnostics.setdefault(
+                "prompt_tokens", raw_usage.get("prompt_tokens", raw_usage.get("input_tokens"))
+            )
+            diagnostics.setdefault(
+                "completion_tokens", raw_usage.get("completion_tokens", raw_usage.get("output_tokens"))
+            )
             print(
                 "[HARA] LLM JSON contract failure "
                 f"task={request.task}{request_context} schema_name={request.schema_name} "
@@ -501,7 +526,7 @@ class OpenAICompatibleClient:
                 and isinstance(data.get("rationale"), str)
                 and bool(data["rationale"].strip())
                 and "confidence" in data
-                and isinstance(data.get("status"), str)
+                and isinstance(data.get("disposition"), str)
             )
         if schema_name in {
             "ScenarioFeasibilityAssessmentList",

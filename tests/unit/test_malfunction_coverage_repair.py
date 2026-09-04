@@ -2,7 +2,8 @@ import pytest
 
 from hara_agent.infrastructure.llm import LLMResponse
 from hara_agent.models import (
-    FunctionDefinition, GuidewordAssessment, ReviewStatus, SourceRef,
+    FunctionDefinition, GuidewordAssessment, GuidewordDisposition,
+    ReviewStatus, SourceRef,
 )
 from hara_agent.services.semantic import GuidewordApplicabilityAgent, MalfunctionHazardAgent
 
@@ -194,6 +195,7 @@ def test_blanket_guideword_selection_is_audited_without_overriding_semantics():
             return LLMResponse(data={"assessments": [{
                 "guideword": guideword,
                 "applicable": True,
+                "disposition": "DOWNSTREAM_CANDIDATE",
                 "rationale": "the output has this deviation dimension",
                 "confidence": 0.8,
                 "status": "PENDING",
@@ -207,3 +209,30 @@ def test_blanket_guideword_selection_is_audited_without_overriding_semantics():
     assert all(item.applicable for item in assessments)
     assert all(item.status is ReviewStatus.FINALIZED for item in assessments)
     assert audit["blanket_applicability"] is True
+
+
+def test_no_credible_hazard_skips_malfunction_llm_call():
+    class Client:
+        def complete_json(self, request):
+            raise AssertionError("no-hazard disposition must not call the LLM")
+
+    function, _ = _inputs()
+    assessment = GuidewordAssessment(
+        "F001",
+        "different to",
+        True,
+        "the difference cannot change vehicle-level behavior",
+        sources=list(function.sources),
+        status=ReviewStatus.FINALIZED,
+        confidence=0.8,
+        disposition=GuidewordDisposition.NO_CREDIBLE_HAZARD,
+    )
+
+    candidates, audit = MalfunctionHazardAgent(Client()).generate(
+        function, [assessment],
+    )
+
+    assert candidates == []
+    assert audit["skipped"] is True
+    assert audit["skip_reason"] == "no_credible_hazard_guidewords"
+    assert audit["llm_call_count"] == 0

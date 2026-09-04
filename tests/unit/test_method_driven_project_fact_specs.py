@@ -30,8 +30,8 @@ def test_batches_are_compiled_from_modes_and_method_contract_only():
     )
 
     speed = batches["mode_speed_envelopes"]
-    risk = batches["method_risk_facts"]
     assert [item.context_hints for item in speed] == [("Garage",), ("Highway",)]
+    risk = batches["method_risk_facts"]
     assert [item.fact_type for item in risk] == ["OCCURRENCE_FREQUENCY"]
     assert all("parking" not in repr(item).casefold() for item in (*speed, *risk))
 
@@ -52,7 +52,7 @@ def test_declared_modes_are_used_when_no_mode_was_requested():
 def test_method_risk_fact_normalization_is_neutral_and_source_grounded():
     spec = build_project_fact_spec_batches(
         (),
-        (_required(FactType.OCCURRENCE_FREQUENCY, FactOrigin.HUMAN_EVIDENCE),),
+        (_required(FactType.OCCURRENCE_FREQUENCY, FactOrigin.PROJECT_FACT),),
     )["method_risk_facts"][0]
     assert spec.output_type is ProjectFactOutputType.RISK_FACT
     result = ProjectFactNormalizer().normalize(
@@ -78,3 +78,16 @@ def test_method_risk_fact_normalization_is_neutral_and_source_grounded():
     assert result.risk_facts[0].value == "F"
     assert result.risk_facts[0].fact_id.startswith("RF-")
     assert result.risk_facts[0].source_refs[0].location == "table[1].row[2]"
+
+
+def test_method_decisions_and_executor_outputs_are_not_requested_from_item_definition():
+    batches = build_project_fact_spec_batches((), (
+        _required(FactType.EXPOSURE, FactOrigin.HUMAN_EVIDENCE),
+        _required(
+            FactType.AVOIDABILITY_PERCENT,
+            FactOrigin.HUMAN_EVIDENCE,
+            unit="%",
+        ),
+    ))
+
+    assert "method_risk_facts" not in batches

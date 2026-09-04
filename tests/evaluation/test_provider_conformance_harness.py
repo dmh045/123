@@ -13,7 +13,8 @@ def context():
     scenario = ScenarioCandidate(
         "SCN-1", "mode", "object ahead", "closing state",
         {"object_position": "ahead", "relative_distance": "1 m",
-         "relative_speed_kph": 5.0},
+         "relative_speed_kph": 5.0,
+         "harm_mechanism": "contact can expose occupants to injury"},
         semantic_fingerprint="provider-fixture",
     )
     return malfunction, scenario
@@ -28,7 +29,7 @@ def valid_payload():
             "m_to_b": {"claim": "behavior changes", "basis_type": "DIRECT_FACT", "evidence_refs": ["MF.functional_effect"]},
             "b_to_i": {"claim": "interaction changes", "basis_type": "DIRECT_FACT", "evidence_refs": ["SCN.object_position"]},
             "i_to_h": {"claim": "contact becomes possible", "basis_type": "DERIVED_PHYSICS", "evidence_refs": ["DERIVED.ttc_s"]},
-            "h_to_harm": {"claim": "event can cause harm", "basis_type": "DIRECT_FACT", "evidence_refs": ["MF.vehicle_level_hazard"]},
+            "h_to_harm": {"claim": "event can cause harm", "basis_type": "DIRECT_FACT", "evidence_refs": ["SCN.harm_mechanism"]},
         },
         "risk_dimension_changes": [{"dimension": "distance", "evidence_refs": ["SCN.relative_distance"], "reason": "explicit distance"}],
         "rationale": "complete chain", "hazardous_event": "contact",

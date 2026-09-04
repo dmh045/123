@@ -7,8 +7,8 @@
     "compiler_architecture": "RoleContract -> Rule Parser -> Rule IR -> MethodContract",
     "engineering_rules_compiled": true
   },
-  "contract_version": "method-contract-v2",
-  "compiler_version": "full-template-compiler-v1",
+  "contract_version": "method-contract-v3",
+  "compiler_version": "full-template-compiler-v2",
   "compile_status": "READY_WITH_WARNINGS",
   "engineering_rules_compiled": true,
   "counts": {
@@ -32,7 +32,7 @@
   "section_hashes": {
     "workflow": "62d0907471e77f0db5deb538ed73d6a45bada8bee50500c4de30ea65ef87d388",
     "guidewords": "98fd6145519754806ef762e38be3005dc21c60f66c349955e95f0efa68d2554b",
-    "scenario_model": "0fcab2541e32b16eae86b23a7283053f671d5def344acde90971668c769fb8a6",
+    "scenario_model": "4d17f36d2ee2993a36146ce2c20042766a235821b1f5adf84e0587b716d08e23",
     "severity": "b7501449d8d3470d3e5ce355de8fd59069eb0df7f05e9a40ed5f88a8b2fb08b7",
     "exposure": "dbacdb7c36cab1ad5e256c458aaeae1bd4c0ff85876f0821fef40e32897570fd",
     "controllability": "8d0f24ca95b8fb0995d3e771875842754a87f1aa40e58a813227e77ed97fc953",
@@ -40,7 +40,7 @@
     "safety_goal_method": "fb4854c8fe3c02ed91674d8892cfb6e7f7261478b66487f5dc585edd5f9ac20e",
     "safe_state_method": "ad8b8bb9d536644bfa5b3f17cc954713109a6ff4996df029a6abce78cd9b0b71",
     "report_contract": "9675d02ae1f5d4f4f3961847fdf48df18263df6ee96ced4d2816e146875a4e2f",
-    "required_fact_specs": "363df3568ee3a659b1a69d28df912dca48b8780b7f5c2806570a516db7a99646"
+    "required_fact_specs": "abf9a8d9c47f85825d2babd07d694ed7098c98f99a95d4387d80e64794f5f45e"
   },
   "source_hash_digest": "5cbe954ad61a41eaaeb26ba9e735b029d7bfa5e95a54b68b2d88d123ba6bbd08",
   "diagnostics": [

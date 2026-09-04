@@ -7,7 +7,9 @@ from .project_facts import (
     MethodRiskFactBinding, RiskFact,
     ProjectFactOutputType,
 )
-from .malfunction import GuidewordAssessment, MalfunctionCandidate
+from .malfunction import (
+    GuidewordAssessment, GuidewordDisposition, MalfunctionCandidate,
+)
 from .risk import RiskAssessment
 from .safety_goal import SafetyGoal
 from .scenario import ScenarioCandidate, ScenarioFeasibilityAssessment
@@ -16,7 +18,8 @@ __all__ = [
     "EvidenceValue", "EvidenceKind", "EvidenceRecord", "EVIDENCE_NAMESPACES",
     "FactProvenance", "FunctionDefinition", "ItemDefinitionFacts",
     "SpeedEnvelope", "RiskFact", "MethodRiskFactBinding", "ConstraintOperator",
-    "ProjectFactOutputType", "GuidewordAssessment", "MalfunctionCandidate",
+    "ProjectFactOutputType", "GuidewordAssessment", "GuidewordDisposition",
+    "MalfunctionCandidate",
     "ReviewStatus", "RiskAssessment", "SafetyGoal",
     "ScenarioCandidate", "ScenarioFeasibilityAssessment", "SourceRef",
 ]

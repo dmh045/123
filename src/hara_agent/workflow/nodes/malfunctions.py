@@ -6,6 +6,7 @@ import sys
 from hara_agent.models import FunctionDefinition, GuidewordAssessment
 from hara_agent.services.semantic import MalfunctionHazardAgent
 from hara_agent.workflow.state import HARAState, WorkflowStage
+from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
 from .parallel import ordered_parallel_map
 
@@ -14,7 +15,8 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
                         functions: list[FunctionDefinition],
                         assessments: list[GuidewordAssessment],
                         max_workers: int = 1,
-                        progress=None) -> HARAState:
+                        progress=None,
+                        review_artifact_writer: ReviewArtifactWriter | None = None) -> HARAState:
     candidates = []
     def generate(function):
         related = [item for item in assessments if item.function_id == function.function_id]
@@ -45,6 +47,8 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         item.model_local_id = model_local_id
         value = asdict(item)
         normalized.append(value)
+        if review_artifact_writer is not None:
+            review_artifact_writer.record_malfunction(item)
         state.record(
             "malfunction_identity_normalized",
             function_id=item.function_id,
@@ -60,7 +64,11 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         })
     skip_reasons = {
         reason: sum(audit.get("skip_reason") == reason for audit in audits)
-        for reason in ("no_applicable_guidewords", "no_complete_applicable_guidewords")
+        for reason in (
+            "no_applicable_guidewords",
+            "no_complete_applicable_guidewords",
+            "no_credible_hazard_guidewords",
+        )
     }
     llm_called = sum(not audit.get("skipped", False) for audit in audits)
     coverage_repairs = sum(
@@ -76,6 +84,7 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         f"actual_llm_calls={actual_llm_calls} coverage_repairs={coverage_repairs} "
         f"skipped_no_applicable={skip_reasons['no_applicable_guidewords']} "
         f"skipped_incomplete={skip_reasons['no_complete_applicable_guidewords']} "
+        f"skipped_no_hazard={skip_reasons['no_credible_hazard_guidewords']} "
         f"candidate_count={len(candidates)}",
         file=sys.stderr,
         flush=True,
@@ -88,6 +97,7 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         coverage_repair_count=coverage_repairs,
         skipped_no_applicable=skip_reasons["no_applicable_guidewords"],
         skipped_incomplete=skip_reasons["no_complete_applicable_guidewords"],
+        skipped_no_hazard=skip_reasons["no_credible_hazard_guidewords"],
         candidate_count=len(candidates),
     )
     state.stage = WorkflowStage.MALFUNCTIONS

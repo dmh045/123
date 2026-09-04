@@ -5,13 +5,16 @@ import json
 from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .method import RoleBinding, TemplateRole
 
+if TYPE_CHECKING:
+    from .risk_calculation import StructuredRiskMethod
 
-METHOD_CONTRACT_VERSION = "method-contract-v2"
-TEMPLATE_COMPILER_VERSION = "full-template-compiler-v1"
+
+METHOD_CONTRACT_VERSION = "method-contract-v3"
+TEMPLATE_COMPILER_VERSION = "full-template-compiler-v2"
 
 
 class CompileStatus(str, Enum):
@@ -45,6 +48,11 @@ class CompilerDiagnosticCode(str, Enum):
     WORKFLOW_COORDINATE_MISMATCH = "WORKFLOW_COORDINATE_MISMATCH"
     SOURCE_REF_MISSING = "SOURCE_REF_MISSING"
     MALFORMED_TEMPLATE_TEXT = "MALFORMED_TEMPLATE_TEXT"
+    METHOD_SOURCE_INVALID = "METHOD_SOURCE_INVALID"
+    METHOD_SOURCE_CONFLICT = "METHOD_SOURCE_CONFLICT"
+    BASELINE_SCENARIO_BINDING_INCOMPLETE = "BASELINE_SCENARIO_BINDING_INCOMPLETE"
+    FTTI_METHOD_UNCOMPILED = "FTTI_METHOD_UNCOMPILED"
+    SEVERITY_FALLBACK_UNCOMPILED = "SEVERITY_FALLBACK_UNCOMPILED"
 
 
 class RuleType(str, Enum):
@@ -91,6 +99,8 @@ class FactType(str, Enum):
     VEHICLE_SPEED = "VEHICLE_SPEED"
     RELATIVE_SPEED = "RELATIVE_SPEED"
     IMPACT_SPEED = "IMPACT_SPEED"
+    DELTA_V = "DELTA_V"
+    TTC = "TTC"
     SPEED_UNSPECIFIED = "SPEED_UNSPECIFIED"
     COLLISION_TYPE = "COLLISION_TYPE"
     ROAD_USER_TYPE = "ROAD_USER_TYPE"
@@ -98,7 +108,11 @@ class FactType(str, Enum):
     OCCURRENCE_FREQUENCY = "OCCURRENCE_FREQUENCY"
     SITUATION_CLASSIFICATION = "SITUATION_CLASSIFICATION"
     DRIVER_STATE = "DRIVER_STATE"
+    DRIVER_IN_VEHICLE = "DRIVER_IN_VEHICLE"
+    DIRECT_CONTROL_AVAILABLE = "DIRECT_CONTROL_AVAILABLE"
     INTERVENTION_AVAILABLE = "INTERVENTION_AVAILABLE"
+    REMOTE_INTERVENTION_AVAILABLE = "REMOTE_INTERVENTION_AVAILABLE"
+    FUNCTION_TYPE = "FUNCTION_TYPE"
     AVOIDABILITY_PERCENT = "AVOIDABILITY_PERCENT"
     FUNCTION = "FUNCTION"
     OUTPUT = "OUTPUT"
@@ -254,12 +268,45 @@ class ScenarioDimension:
     semantics: str = "METHOD_SCENARIO_ONTOLOGY"
 
 
+class ScenarioConstraintDisposition(str, Enum):
+    PHYSICALLY_IMPOSSIBLE = "PHYSICALLY_IMPOSSIBLE"
+    SEMANTICALLY_INCOMPATIBLE = "SEMANTICALLY_INCOMPATIBLE"
+    RARE_BUT_FEASIBLE = "RARE_BUT_FEASIBLE"
+    EXPLICITLY_ALLOWED = "EXPLICITLY_ALLOWED"
+
+
+@dataclass(frozen=True)
+class ScenarioConstraintPredicate:
+    dimension: str
+    values: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.dimension or not self.values:
+            raise ValueError("ScenarioConstraintPredicate requires dimension and values")
+
+
+@dataclass(frozen=True)
+class ScenarioConstraintRule:
+    rule_id: str
+    predicates: tuple[ScenarioConstraintPredicate, ...]
+    disposition: ScenarioConstraintDisposition
+    reason: str
+    normative_strength: NormativeStrength
+    source_ref: SourceRef
+    executable: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.rule_id or not self.predicates or not self.reason.strip():
+            raise ValueError("ScenarioConstraintRule requires identity, predicates and reason")
+
+
 @dataclass(frozen=True)
 class ScenarioModel:
     dimensions: tuple[ScenarioDimension, ...]
     structural_constraints: tuple[str, ...]
     source_binding: RoleBinding
     source_type: str = "METHOD_SCENARIO_ONTOLOGY"
+    constraint_rules: tuple[ScenarioConstraintRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -418,6 +465,7 @@ class MethodContract:
     sources: tuple[SourceRef, ...]
     compile_status: CompileStatus
     engineering_rules_compiled: bool
+    structured_risk_method: StructuredRiskMethod | None = None
     contract_version: str = METHOD_CONTRACT_VERSION
     compiler_version: str = TEMPLATE_COMPILER_VERSION
 
@@ -447,6 +495,8 @@ class MethodContract:
 
     def to_dict(self) -> dict[str, Any]:
         result = _serialize(self)
+        if self.structured_risk_method is None:
+            result.pop("structured_risk_method", None)
         result["blocking_diagnostics"] = _serialize(self.blocking_diagnostics)
         result["warnings"] = _serialize(self.warnings)
         return result
@@ -460,6 +510,8 @@ class MethodContract:
             "controllability", "asil", "safety_goal_method", "safe_state_method",
             "report_contract", "required_fact_specs",
         )
+        if self.structured_risk_method is not None:
+            sections += ("structured_risk_method",)
 
         def digest(value: Any) -> str:
             payload = json.dumps(

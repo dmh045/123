@@ -1,4 +1,4 @@
-from hara_agent.models import ProjectFactOutputType, ReviewStatus
+from hara_agent.models import ConstraintOperator, ProjectFactOutputType, ReviewStatus
 from hara_agent.services.extraction import (
     ProjectFactNormalizer, RequiredProjectFactSpec,
 )
@@ -75,3 +75,24 @@ def test_invalid_speed_operator_and_unit_fail_closed():
 
     assert invalid_operator.failures[0].code == "INVALID_OPERATOR"
     assert invalid_unit.failures[0].code == "INVALID_UNIT"
+
+
+def test_unicode_and_legacy_mojibake_operators_are_normalized():
+    base = {
+        "fact_type": "speed.search", "status": "FOUND", "value": 30,
+        "unit": "km/h", "operating_mode": "search", "source_block_id": "S1",
+    }
+
+    for operator in ("≤", "≦", "â‰¤", "â‰¦"):
+        result = ProjectFactNormalizer().normalize(
+            (SPECS[0],), [{**base, "operator": operator}], BLOCKS, "ItemDef.docx",
+        )
+        assert not result.failures
+        assert result.speed_envelopes[0].speed_min_kph == 0
+        assert result.speed_envelopes[0].speed_max_kph == 30
+
+    for operator in ("≥", "≧", "â‰¥", "â‰§"):
+        assert ProjectFactNormalizer.OPERATOR_ALIASES[operator] is ConstraintOperator.GE
+
+    for operator in ("＞", "ï¼ž"):
+        assert ProjectFactNormalizer.OPERATOR_ALIASES[operator] is ConstraintOperator.GT

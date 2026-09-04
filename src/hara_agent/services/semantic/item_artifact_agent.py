@@ -28,10 +28,12 @@ from .parsing import CONFIDENCE_PROMPT_CONTRACT
 class ItemArtifactExtractionAgent:
     """Extract core Item facts and Functions once from the full document."""
 
-    PROMPT_VERSION = "item-artifacts-v4-typed-contract"
+    PROMPT_VERSION = "item-artifacts-v5-full-document-contract"
     SYSTEM_PROMPT = """你是汽车功能安全HARA的相关项定义抽取Agent。只提取文档明确陈述的事实。
+必须综合全文，不得把某个固定章节、标题编号或模板工作流中的章节示例当成唯一来源。
 一次返回核心Item Definition和车辆级Functions。不得把标题、条件、步骤、后果或质量要求识别为Function；
-不得用常识补写ODD、速度或功能。复杂的性能、驾驶员控制和Exposure证据由后续局部抽取处理，本次不要展开。
+不得用常识补写ODD、速度或功能。核心输出需保留功能的前置条件、触发、ODD约束、回退行为和后果；
+复杂数值性能、驾驶员位置/控制通道及Exposure证据由MethodContract驱动的后续有界抽取处理，不得丢弃、猜测或从模板示例补写。
 所有结论必须有可定位来源；证据不足时返回null或空数组并标记PENDING。"""
 
     def __init__(self, client: LLMClient, validator: FunctionValidator | None = None):
@@ -91,11 +93,8 @@ class ItemArtifactExtractionAgent:
                 text = block_value(block, "text")
                 if cls._excerpt_is_present(fragment, text):
                     candidates.append(block)
-            if candidates:
-                block = min(
-                    candidates,
-                    key=lambda value: len(normalize_source_text(block_value(value, "text"))),
-                )
+            if len(candidates) == 1:
+                block = candidates[0]
                 block_text = block_value(block, "text")
                 exact_excerpt = fragment if fragment in block_text else block_text
                 repaired.append(type(source)(
@@ -105,6 +104,8 @@ class ItemArtifactExtractionAgent:
                     excerpt=exact_excerpt,
                 ))
                 continue
+            if candidates:
+                return []
             fragment_source = type(source)(
                 source_type=source.source_type,
                 source_id=source.source_id,
@@ -114,6 +115,10 @@ class ItemArtifactExtractionAgent:
             ordered = cls._ordered_omission_source(
                 fragment_source, source_blocks,
             )
+            if not ordered:
+                ordered = cls._boundary_punctuation_omission_source(
+                    fragment_source, source_blocks,
+                )
             if len(ordered) != 1:
                 return []
             repaired.extend(ordered)
@@ -132,6 +137,8 @@ class ItemArtifactExtractionAgent:
         cls,
         source: Any,
         source_blocks: Sequence[Any],
+        *,
+        require_unique: bool = True,
     ) -> list[Any]:
         """Bind a provider-shortened quote to one unambiguous source block.
 
@@ -177,12 +184,22 @@ class ItemArtifactExtractionAgent:
                 (right - left - 1 for left, right in zip(positions, positions[1:])),
                 default=0,
             )
+            anchors_are_strong = (
+                prefix_anchor >= 6
+                and suffix_anchor >= 4
+                and prefix_anchor + suffix_anchor >= 14
+            )
+            uniquely_bounded_one_sided_anchor = (
+                require_unique
+                and prefix_anchor >= 10
+                and suffix_anchor >= 2
+                and prefix_anchor + suffix_anchor >= 12
+            )
+            minimum_block_coverage = 0.28 if require_unique else 0.30
             if (
-                prefix_anchor < 6
-                or suffix_anchor < 4
-                or prefix_anchor + suffix_anchor < 14
+                not (anchors_are_strong or uniquely_bounded_one_sided_anchor)
                 or span_density < 0.45
-                or block_coverage < 0.30
+                or block_coverage < minimum_block_coverage
                 or max_gap > 40
             ):
                 continue
@@ -195,6 +212,8 @@ class ItemArtifactExtractionAgent:
 
         if not candidates:
             return []
+        if require_unique and len(candidates) != 1:
+            return []
         candidates.sort(key=lambda value: (value[0], value[1], value[2]), reverse=True)
         if len(candidates) > 1 and (
             candidates[0][0] == candidates[1][0]
@@ -203,6 +222,76 @@ class ItemArtifactExtractionAgent:
         ):
             return []
         block = candidates[0][3]
+        return [type(source)(
+            source_type=source.source_type,
+            source_id=source.source_id,
+            location=block_value(block, "location"),
+            excerpt=block_value(block, "text"),
+        )]
+
+    @classmethod
+    def _boundary_punctuation_omission_source(
+        cls,
+        source: Any,
+        source_blocks: Sequence[Any],
+    ) -> list[Any]:
+        """Combine an existing bounded omission with terminal punctuation repair.
+
+        The only additional tolerance is removal of terminal punctuation.  The
+        existing ordered-character, anchor, density, coverage, and gap checks
+        still apply, and this variant requires exactly one qualifying block.
+        """
+
+        stripped_excerpt = source.excerpt.rstrip().rstrip("。！？!?；;：:，,、")
+        if stripped_excerpt == source.excerpt.rstrip():
+            return []
+        stripped_source = type(source)(
+            source_type=source.source_type,
+            source_id=source.source_id,
+            location=source.location,
+            excerpt=stripped_excerpt,
+        )
+        return cls._ordered_omission_source(
+            stripped_source,
+            source_blocks,
+            require_unique=True,
+        )
+
+    @classmethod
+    def _unique_contiguous_anchor_source(
+        cls,
+        source: Any,
+        source_blocks: Sequence[Any],
+    ) -> list[Any]:
+        """Rebind a boundary-punctuation variant to one exact source block.
+
+        This repair is intentionally narrower than fuzzy matching.  It removes
+        only terminal punctuation from the proposed citation and then requires
+        the remaining, sufficiently long text to occur contiguously exactly
+        once across all source blocks.  The complete original block is returned
+        so model-generated punctuation and location text never become evidence.
+        """
+
+        normalized_excerpt = "".join(
+            normalize_source_text(source.excerpt).split()
+        )
+        anchor = normalized_excerpt.rstrip("。！？!?；;：:，,、")
+        if anchor == normalized_excerpt or len(anchor) < 12:
+            return []
+
+        matches: list[Any] = []
+        match_count = 0
+        for block in source_blocks:
+            block_text = block_value(block, "text")
+            normalized_block = "".join(normalize_source_text(block_text).split())
+            occurrences = normalized_block.count(anchor)
+            if occurrences:
+                match_count += occurrences
+                matches.append(block)
+
+        if match_count != 1 or len(matches) != 1:
+            return []
+        block = matches[0]
         return [type(source)(
             source_type=source.source_type,
             source_id=source.source_id,
@@ -231,7 +320,12 @@ class ItemArtifactExtractionAgent:
         prefix, suffix = (value.strip() for value in parts)
         leading_match = re.match(r".+?(?:[：:。！？!?；;])", prefix, re.DOTALL)
         leading_anchor = leading_match.group(0).strip() if leading_match else prefix
-        trailing_anchor = suffix
+        trailing_fragments = [
+            value.strip()
+            for value in re.findall(r".+?(?:[。！？!?；;]+|$)", suffix, re.DOTALL)
+            if value.strip()
+        ]
+        trailing_anchor = trailing_fragments[-1] if trailing_fragments else suffix
         if len(normalize_source_text(leading_anchor)) < 8:
             return []
         if len(normalize_source_text(trailing_anchor)) < 8:
@@ -303,6 +397,20 @@ class ItemArtifactExtractionAgent:
                         source, source_blocks,
                     )
                     repair_kind = "ordered_omission"
+                if not repaired:
+                    repaired = (
+                        ItemArtifactExtractionAgent._unique_contiguous_anchor_source(
+                            source, source_blocks,
+                        )
+                    )
+                    repair_kind = "unique_contiguous_anchor_rebind"
+                if not repaired:
+                    repaired = (
+                        ItemArtifactExtractionAgent._boundary_punctuation_omission_source(
+                            source, source_blocks,
+                        )
+                    )
+                    repair_kind = "bounded_omission_boundary_punctuation"
                 if not repaired:
                     repaired = ItemArtifactExtractionAgent._explicit_ellipsis_range_source(
                         source, source_blocks,

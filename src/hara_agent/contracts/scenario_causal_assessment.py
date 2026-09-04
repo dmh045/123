@@ -11,7 +11,7 @@ from .causal_graph import CausalGraph, CausalNodeType
 from .evidence_binding import EvidenceBinding
 
 
-SCENARIO_CAUSAL_ASSESSMENT_VERSION = "scenario-causal-assessment-v2"
+SCENARIO_CAUSAL_ASSESSMENT_VERSION = "scenario-causal-assessment-v4"
 
 
 class CausalBreakpoint(str, Enum):
@@ -120,7 +120,17 @@ class ScenarioCausalAssessment:
                 return CausalAssessmentStatus.CAUSAL_GAP
         if self.breakpoint is not CausalBreakpoint.NONE or self.unsupported_links:
             return CausalAssessmentStatus.CAUSAL_GAP
-        if not self.hazardous_event.strip() or not self.potential_harm.strip():
+        # v4 stops the semantic stage at Hazardous Event.  The optional harm
+        # node is attached later by the deterministic risk stage.  Keep the
+        # five-node check for explicitly restored legacy-shaped objects so
+        # old in-memory fixtures remain inspectable, but never require harm
+        # from a four-node v4 causal result.
+        if not self.hazardous_event.strip():
+            return CausalAssessmentStatus.CAUSAL_GAP
+        has_harm_node = any(
+            item.node_type is CausalNodeType.HARM for item in self.causal_graph.nodes
+        )
+        if has_harm_node and not self.potential_harm.strip():
             return CausalAssessmentStatus.CAUSAL_GAP
         return CausalAssessmentStatus.VALIDATED
 
@@ -131,10 +141,65 @@ class ScenarioCausalAssessment:
             CausalNodeType.SYSTEM_BEHAVIOR_CHANGE,
             CausalNodeType.OPERATIONAL_CONSEQUENCE,
             CausalNodeType.HAZARD,
-            CausalNodeType.HARM,
         )
+        if any(item.node_type is CausalNodeType.HARM for item in node_by_id.values()):
+            expected += (CausalNodeType.HARM,)
         actual = tuple(node_by_id[item].node_type for item in self.causal_chain)
         return actual == expected and self.causal_graph.has_path(self.causal_chain)
+
+    def with_harm(
+        self,
+        *,
+        potential_harm: str,
+        evidence_refs: tuple[str, ...],
+        source_refs: tuple[Any, ...] = (),
+        basis_type: EvidenceKind = EvidenceKind.APPROVED_RULE,
+        review_status: ReviewStatus | None = None,
+    ) -> "ScenarioCausalAssessment":
+        """Attach the deterministic H→Harm result after S has been resolved."""
+
+        if not potential_harm.strip() or not evidence_refs:
+            raise ValueError("Deterministic harm attachment requires value and evidence")
+        if any(item.node_type is CausalNodeType.HARM for item in self.causal_graph.nodes):
+            raise ValueError("Scenario causal assessment already contains a harm node")
+        hazard_id = self.causal_chain[-1]
+        harm_id = f"{self.scenario_id}:harm"
+        harm_node = CausalNode(
+            harm_id, CausalNodeType.HARM, potential_harm,
+            tuple(evidence_refs),
+        )
+        edge = CausalEdge(
+            "H_TO_HARM", hazard_id, harm_id, CausalRelation.CAUSES,
+            f"{self.hazardous_event} is associated with {potential_harm}",
+            tuple(evidence_refs),
+        )
+        binding = EvidenceBinding(
+            "H_TO_HARM", tuple(evidence_refs), basis_type,
+            tuple(source_refs),
+            review_status or ReviewStatus.PENDING,
+        )
+        graph = CausalGraph(
+            nodes=(*self.causal_graph.nodes, harm_node),
+            edges=(*self.causal_graph.edges, edge),
+        )
+        return ScenarioCausalAssessment(
+            scenario_id=self.scenario_id,
+            causal_graph=graph,
+            causal_chain=(*self.causal_chain, harm_id),
+            breakpoint=self.breakpoint,
+            evidence_bindings=(*self.evidence_bindings, binding),
+            unsupported_links=tuple(
+                item for item in self.unsupported_links if item != "H_TO_HARM"
+            ),
+            risk_dimension_changes=self.risk_dimension_changes,
+            hazardous_event=self.hazardous_event,
+            potential_harm=potential_harm,
+            provenance=tuple(dict.fromkeys((*self.provenance, *evidence_refs))),
+            review_status=(
+                self.review_status
+                if review_status is None else review_status
+            ),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -1,0 +1,7 @@
+schema_version: "1.0"
+source: "governed HARA baseline"
+rules: []
+note: >-
+  No cross-dimension rule was promoted to normative status in the supplied assets.
+  atom_spec and compound metadata may be used for deterministic range consistency;
+  few-shot infeasible examples remain non-executable.

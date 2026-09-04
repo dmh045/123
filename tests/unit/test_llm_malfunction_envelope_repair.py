@@ -3,7 +3,7 @@ import json
 import pytest
 
 from hara_agent.config import LLMConfig
-from hara_agent.infrastructure.llm import LLMRequest
+from hara_agent.infrastructure.llm import LLMJSONContractError, LLMRequest
 from hara_agent.infrastructure.llm.openai_compatible import (
     LLMSchemaContractError,
     OpenAICompatibleClient,
@@ -142,3 +142,58 @@ def test_core_item_artifacts_rejects_wrong_top_level_field_types():
         ))
 
     assert len(calls) == 1
+
+
+def _sequenced_scenario_client(contents: list[str], calls: list[bytes]):
+    def transport(_url, _headers, body, _timeout):
+        calls.append(body)
+        content = contents[len(calls) - 1]
+        return {
+            "id": f"response-{len(calls)}",
+            "model": "fake",
+            "choices": [{
+                "message": {"content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+        }
+
+    return OpenAICompatibleClient(LLMConfig(
+        provider="openai-compatible",
+        base_url="https://example.invalid/v1",
+        model="fake",
+        api_key="fake",
+        max_retries=0,
+    ), transport=transport)
+
+
+def test_scenario_adapter_recovers_first_malformed_json_once():
+    calls: list[bytes] = []
+    client = _sequenced_scenario_client([
+        '{"assessments": [',
+        '{"assessments": []}',
+    ], calls)
+
+    response = client.complete_json(_schema_request(
+        "assess_scenario_feasibility", "ScenarioFeasibilityAssessmentList",
+    ))
+
+    assert response.data == {"assessments": []}
+    assert len(calls) == 2
+    assert response.usage["format_retry_calls"] == 1
+    assert response.usage["format_retry_successes"] == 1
+
+
+def test_scenario_adapter_does_not_attempt_third_json_recovery_call():
+    calls: list[bytes] = []
+    client = _sequenced_scenario_client([
+        '{"assessments": [',
+        '{"assessments": [',
+    ], calls)
+
+    with pytest.raises(LLMJSONContractError):
+        client.complete_json(_schema_request(
+            "assess_scenario_feasibility", "ScenarioFeasibilityAssessmentList",
+        ))
+
+    assert len(calls) == 2

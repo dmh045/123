@@ -1,0 +1,78 @@
+version: "1.0"
+source: "VDA 702 V2 §5.3 + 工程经验"
+purpose: |
+  atom 的物理 / 运动学规格，供 ODD 剪枝、feasible_ranges 计算等下游消费。
+  与 vda702_atoms.yaml 主清单解耦：vda702 管 atom ID + E 值 + label，本文件管 spec。
+  缺 spec 的 atom loader 留 None 不阻塞。
+
+specs:
+  # ── EGO_ACTION/EGO_DYNAMICS：速度档（V2 FA 系列） ────────────────────────
+  FA001:
+    ego_dynamics:
+      v_range_kph: [0, null]
+      unit: "kph"
+    description: "起步 / 加速（v_min=0）"
+  FA002:
+    ego_dynamics:
+      v_min_kph: 130
+      unit: "kph"
+    description: "高速行驶 v ≥ 130 kph"
+  FA003:
+    ego_dynamics:
+      v_range_kph: [100, 130]
+      unit: "kph"
+    description: "v ∈ [100, 130] kph"
+  FA004:
+    ego_dynamics:
+      v_range_kph: [50, 100]
+      unit: "kph"
+    description: "v ∈ [50, 100] kph"
+  FA005:
+    ego_dynamics:
+      v_range_kph: [0, 15]
+      unit: "kph"
+    description: "低速 v ≤ 15 kph"
+  FA033:
+    ego_dynamics:
+      v_range_kph: [0, 15]
+      unit: "kph"
+      direction: "reverse"
+    description: "倒车（低速反向）"
+  FA034:
+    ego_dynamics:
+      v_range_kph: [0, 5]
+      unit: "kph"
+      direction: "reverse"
+    description: "倒车极低速"
+
+  # ── EGO_X_ROAD / ROAD：坡度档 ────────────────────────────────────────
+  PH012:
+    slope:
+      range_pct: [5, 8]
+      unit: "percent"
+    description: "停在 5-8% 坡道（驻车）"
+  PH013:
+    slope:
+      range_pct: [8, 15]
+      unit: "percent"
+    description: "停在 8-15% 坡道"
+  PH014:
+    slope:
+      pct_min: 15
+      unit: "percent"
+    description: "停在 ≥ 15% 坡道"
+  FB001:
+    slope:
+      range_pct: [0, 2]
+      unit: "percent"
+    description: "V2 平路 0-2%"
+  FB002:
+    slope:
+      range_pct: [2, 8]
+      unit: "percent"
+    description: "V2 行驶在 2-8% 坡"
+  FB003:
+    slope:
+      pct_min: 8
+      unit: "percent"
+    description: "V2 行驶在 ≥ 8% 坡"

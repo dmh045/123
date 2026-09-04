@@ -6,16 +6,19 @@
 python -m hara_agent doctor --template TEMPLATE.xlsx
 python -m hara_agent confirm-template-role --template TEMPLATE.xlsx --select "ROLE=SHEET!A1:B9" --confirmed-by REVIEWER
 python -m hara_agent analyze --item ITEM.docx --template TEMPLATE.xlsx --output REPORT.xlsx --operating-mode MODE --allow-draft
+python -m hara_agent doctor --method-baseline method_assets/fusa_baseline_v1/manifest.yaml --report-template references/HARA_Template_AI_20260327.xlsx
+python -m hara_agent analyze --item ITEM.docx --method-baseline method_assets/fusa_baseline_v1/manifest.yaml --report-template references/HARA_Template_AI_20260327.xlsx --output REPORT.xlsx --operating-mode MODE --allow-draft
 ```
 
-The installed console entry is `hara-agent`. There is one runtime; do not recreate old controllers, fallback engines, Domain profiles, compatibility adapters, or alternate report generators.
+The installed console entry is `hara-agent`. There is one runtime and one downstream `MethodContract`; do not recreate old controllers, fallback engines, compatibility adapters, or alternate report generators. A governed YAML baseline is an additional method source, not a second runtime.
 
 ## Truth-source contract
 
-- Template → `TemplateRoleContract` → `MethodContract`.
+- Explicit Template → `TemplateRoleContract` → `MethodContract`.
+- No explicit Template → governed YAML baseline manifest → `MethodContract`.
 - Item/source documents → typed `ProjectFacts` and neutral `RiskFacts`.
 - `MethodContract + ProjectFacts/RiskFacts` → HARA evaluation.
-- `HARAState + ReportContract` → template-preserving Excel report.
+- `HARAState + ReportContract` → template-preserving Excel report. Method-source and report-template hashes are independent in YAML baseline mode.
 - Human confirmation is required only for unresolved semantic ambiguity or engineering approval.
 
 Template role confirmations and explicit `MethodRiskFactBinding` records are bound to `template_hash`; repeat runs with the same template reuse them. They are generated governance artifacts, not a third manually maintained business input.
@@ -23,6 +26,7 @@ Template role confirmations and explicit `MethodRiskFactBinding` records are bou
 ## Non-negotiable rules
 
 - Never copy S/E/C, ASIL, scenario, SG, or Safe-State business rules into Python.
+- Runtime evaluators never open YAML directly; only the YAML baseline compiler may load governed method assets.
 - Never identify a method role by a fixed sheet name, sheet order, row, column, range, or workbook hash.
 - Never infer missing project facts from template examples or defaults.
 - LLM outputs must be schema-bounded, source-linked, and `PENDING` until approved when they contain semantic inference.

@@ -1,0 +1,321 @@
+# =============================================================================
+# determine_s_parameter.yaml  (engineering edition)
+# ISO 26262 S 参数（Severity）确定的行业标准知识资产
+#
+# 本文件属于 fusa_agent 的 Skill 资产层，对用户透明、跨项目通用。
+# 用户无需修改此文件；项目专属信息（item / scenario / ODD）由 docx 输入。
+# 物理换算（E = 1/2 m v² 等）由 Python 代码实现。
+#
+# 工程化原则：
+#   - 不使用 AEV/CIA 双表，统一取保守值
+#   - configuration 收敛为 frontal/rear, grazing(oblique), side, rear_stable
+#   - PKW-PKW 与 PKW-VRU 分两张表，各按 traffic domain 查
+#   - 表中每个 cell 都有确定 S 值（不存在 null）
+# =============================================================================
+
+schema_version: "2.0"
+asset_type: "industry_standard_knowledge"
+domain: "functional_safety.hara.severity"
+edition: "engineering"
+
+# -----------------------------------------------------------------------------
+# 信息来源
+# -----------------------------------------------------------------------------
+references:
+  - id: "ISO_26262_3_2018"
+    title: "ISO 26262-3:2018, Annex B (S-parameter)"
+    role: "S 等级语义来源"
+  - id: "VDA_702_2023"
+    title: "VDA-Empfehlung 702, Juni 2023"
+    role: "Situation / 速度域约定"
+  - id: "internal_engineering_table"
+    title: "工程协调版 S 参数表（与 EA Department / Mirko Junge 协调）"
+    role: "PKW-PKW 与 PKW-VRU 的工程查表来源"
+
+# -----------------------------------------------------------------------------
+# 1. S 等级定义
+# -----------------------------------------------------------------------------
+s_levels:
+  S0:
+    description: "No injuries"
+  S1:
+    description: "Light and moderate injuries"
+  S2:
+    description: "Severe injuries, possibly life-threatening, survival probable"
+  S3:
+    description: "Life-threatening (survival uncertain) or fatal injuries"
+
+# -----------------------------------------------------------------------------
+# 2. Traffic Domain 定义
+#    PKW-PKW 表使用 5 个 domain（RS / CR / AT / RR / IH）
+#    PKW-VRU 表额外引入 SZ（v < 15 km/h），适用于行人/骑行/摩托
+# -----------------------------------------------------------------------------
+traffic_domains:
+  SZ:
+    name_en: "Shared Zone"
+    name_zh: "共享区/步行区"
+    speed_low: 0
+    speed_high: 15
+    applies_to: ["pkw_vru"]
+    examples: ["步行街", "停车场内部", "厂区内道路"]
+  RS:
+    name_en: "Residential Roads"
+    name_zh: "居住区道路"
+    speed_low: 0
+    speed_high: 30
+    applies_to: ["pkw_pkw", "pkw_vru"]
+  CR:
+    name_en: "City Roads"
+    name_zh: "城市道路"
+    speed_low: 30
+    speed_high: 50
+    applies_to: ["pkw_pkw", "pkw_vru"]
+  AT:
+    name_en: "Arterial Thoroughfare"
+    name_zh: "主干道/快速路"
+    speed_low: 50
+    speed_high: 70
+    applies_to: ["pkw_pkw", "pkw_vru"]
+  RR:
+    name_en: "Rural Roads"
+    name_zh: "乡村公路"
+    speed_low: 70
+    speed_high: 100
+    applies_to: ["pkw_pkw", "pkw_vru"]
+  IH:
+    name_en: "Intercity Highways / Autobahn"
+    name_zh: "高速公路"
+    speed_low: 100
+    speed_high: null
+    open_high: true
+    applies_to: ["pkw_pkw", "pkw_vru"]
+
+# -----------------------------------------------------------------------------
+# 3. Crash Configuration 枚举（工程简化版）
+# -----------------------------------------------------------------------------
+crash_configurations:
+  frontal_or_rear:
+    name_zh: "正碰或后碰（常规）"
+    description: "正面/追尾碰撞，含完全重叠与中度偏置"
+  grazing:
+    name_zh: "斜碰/刮擦"
+    description: "Oblique / glancing collision，能量分量较小"
+    aliases: ["oblique", "streifend"]
+  side:
+    name_zh: "侧碰"
+    description: "Near-side 与 far-side 不区分，取保守值"
+    aliases: ["near_side", "far_side", "near_side_curtain", "far_side_curtain"]
+  rear_stable:
+    name_zh: "高速/乡村路追尾（车道稳定）"
+    description: "Motorway / rural road, lane-stable rear collision，特例处理"
+    special: true
+
+# -----------------------------------------------------------------------------
+# 4. PKW-PKW S 参数查表
+#    行 = crash configuration，列 = traffic domain
+#    工程约定：取最严等级；frontal 与 rear 合并；side 不区分 near/far
+# -----------------------------------------------------------------------------
+s_parameter_table_pkw_pkw:
+  domain_order: ["RS", "CR", "AT", "RR", "IH"]
+  rows:
+    frontal_or_rear: ["S0", "S0", "S1", "S3", "S3"]
+    grazing:         ["S1", "S1", "S1", "S3", "S3"]
+    side:            ["S0", "S1", "S2", "S3", "S3"]
+
+# 后碰特例（仅在 RR / IH 上的车道稳定追尾时套用，覆盖 frontal_or_rear 默认值）
+rear_collision_special_cases:
+  - condition:
+      configuration: "rear_stable"
+      traffic_flow: "normal_following"
+      domain_in: ["RR", "IH"]
+    s: "S2"
+    rationale: "lane-stable normal subsequent drive between cars (协调结果)"
+  - condition:
+      configuration: "rear_stable"
+      traffic_flow: "heavy_traffic"
+      domain_in: ["RR", "IH"]
+    s: "S1"
+    rationale: "lane-stable heavy traffic between cars (拥堵车流，碰撞动能低)"
+
+# -----------------------------------------------------------------------------
+# 5. PKW-VRU S 参数查表（车 vs 行人/自行车/电动滑板车/摩托车）
+#    工程约定：取最严等级；不区分 PKW 与 SUV（保守按统一表查）
+# -----------------------------------------------------------------------------
+s_parameter_table_pkw_vru:
+  domain_order: ["SZ", "RS", "CR", "AT", "RR", "IH"]
+  rows:
+    crash_with_person: ["S1", "S1", "S2", "S3", "S3", "S3"]
+
+# VRU 特例覆盖
+vru_special_cases:
+  - condition:
+      maneuver: "reverse_drive"
+      domain_in: ["RS"]
+    s: "S2"
+    rationale: "居住区倒车碰撞行人，提升一级"
+
+vru_definition:
+  includes:
+    - "pedestrian (行人)"
+    - "cyclist (自行车骑行者)"
+    - "scooter rider (电动/踏板车骑行者)"
+    - "motorcyclist (摩托车骑行者)"
+
+# -----------------------------------------------------------------------------
+# 6. 表选择与查表流程
+# -----------------------------------------------------------------------------
+determination_workflow:
+  - step: 1
+    name: "确定碰撞对象类型"
+    decision:
+      - if: "对方为机动车（PKW / SUV / LKW）"
+        use_table: "s_parameter_table_pkw_pkw"
+      - if: "对方为 VRU（行人/自行车/滑板车/摩托）"
+        use_table: "s_parameter_table_pkw_vru"
+
+  - step: 2
+    name: "确定 traffic domain"
+    input: "事故所在路段的法定限速 或 实际行驶速度"
+    use: "traffic_domains"
+    rule: "按 ego 车（或决定能量的车）所在限速段归类"
+
+  - step: 3
+    name: "确定 crash configuration"
+    decision:
+      - if: "正面或追尾碰撞"
+        configuration: "frontal_or_rear"
+      - if: "斜碰、刮擦、小角度偏置"
+        configuration: "grazing"
+      - if: "侧面碰撞（任意一侧，含帘式气囊情况）"
+        configuration: "side"
+      - if: "高速/乡村路车道稳定追尾"
+        configuration: "rear_stable"
+        check_special: "rear_collision_special_cases"
+      - if: "对方为 VRU"
+        configuration: "crash_with_person"
+        check_special: "vru_special_cases"
+
+  - step: 4
+    name: "查表"
+    output: "单 cell 的 S 值"
+
+  - step: 5
+    name: "应用特例覆盖（如有）"
+    use: ["rear_collision_special_cases", "vru_special_cases"]
+
+  - step: 6
+    name: "多场景聚合"
+    rule: "若 hazard 覆盖多个 cell，取最高 S（highest classification）"
+
+  - step: 7
+    name: "记录依据"
+    must_include:
+      - "选用的表（pkw_pkw / pkw_vru）"
+      - "selected cell: (configuration, domain)"
+      - "是否触发特例覆盖、覆盖前后 S 值"
+      - "聚合后 overall S"
+
+# -----------------------------------------------------------------------------
+# 7. 默认假设（与工程表一致；项目可在 docx 显式声明覆盖）
+# -----------------------------------------------------------------------------
+default_assumptions:
+  vehicle:
+    ncap_era: "post_NCAP"
+    has_curtain_airbag: true
+  occupant:
+    position: "front_row"
+    belted: true
+  ego_vehicle:
+    has_adas: true
+    role: "AEV (ADAS equipped vehicle)"
+  aggregation:
+    rule: "highest classification across all applicable cells"
+  note: |
+    工程表已对 AEV/CIA、near-side/far-side、PKW/SUV 取保守合并值。
+    若项目偏离这些假设（如未系安全带、pre-NCAP、后排乘员），需在
+    HARA 假设栏显式标注并考虑提升 S 等级。
+# =============================================================================
+# Evaluator 快速查表接口（severity_evaluator.py 使用）
+# =============================================================================
+
+# =============================================================================
+# v2.0 新增: 基于相对速度的 S 查表 (项目内 S 参考表反推, 2026-05-20)
+# =============================================================================
+# 设计:
+#   - 优先此表 (有 ego_v + obj_v 时按相对速度直接查)
+#   - 撞人 (obj_type=pedestrian) 在车辆碰撞结果上 +1 升级
+#   - 旧 traffic_domain × crash_config 表仍保留, 作为缺速度数据时的兜底
+#
+# bins 解释: 每条规则一个区间; 按数组顺序匹配, 首次命中即返回
+#   {max: 4,  s: S0}  → ΔV < 4 kph
+#   {max: 20, s: S1}  → 4 ≤ ΔV < 20 kph
+#   {min: 40, s: S3}  → ΔV ≥ 40 kph (开区间上界)
+
+s_by_relative_velocity:
+  # 车-车 碰撞
+  vehicle_collision:
+    frontal:
+      - {max: 4,  s: S0}
+      - {max: 20, s: S1}
+      - {max: 40, s: S2}
+      - {min: 40, s: S3}
+    rear:
+      - {max: 4,  s: S0}
+      - {max: 20, s: S1}
+      - {max: 40, s: S2}
+      - {min: 40, s: S3}
+    side:
+      - {max: 2,  s: S0}
+      - {max: 8,  s: S1}
+      - {max: 16, s: S2}
+      - {min: 16, s: S3}
+
+  # 行人碰撞 (PKW vs pedestrian)
+  # 人体脆弱性远高于车辆乘员: 任何接触即 S1, 不存在 S0
+  pedestrian_collision:
+    - {max: 5,  s: S1}    # ΔV < 5 kph: 轻微接触
+    - {max: 15, s: S2}    # 5 ≤ ΔV < 15 kph: 中重伤
+    - {min: 15, s: S3}    # ΔV ≥ 15 kph: 致命/危及生命
+
+  # 自行车/电动车骑行者碰撞
+  cyclist_collision:
+    - {max: 5,  s: S1}
+    - {max: 20, s: S2}
+    - {min: 20, s: S3}
+
+  # 摩托车骑行者 (与车辆同速域但保护差)
+  motorcycle_collision:
+    - {max: 5,  s: S1}
+    - {max: 25, s: S2}
+    - {min: 25, s: S3}
+
+  # AEB 触发后剩余 ΔV (单独适用)
+  aeb_delta_v:
+    - {max: 0,  s: S0}
+    - {max: 30, s: S1}
+    - {max: 60, s: S2}
+    - {min: 60, s: S3}
+
+  # VRU 升级: 撞人在车辆碰撞结果上 +1 (S0→S1, S1→S2, S2→S3, S3→S3 封顶)
+  vru_uplift_levels: 1
+
+# crash_config 别名折叠（frontal/rear → frontal_or_rear 等）
+crash_configuration_fallback:
+  frontal: frontal_or_rear
+  rear: frontal_or_rear
+  oblique: grazing
+  near_side: side
+  far_side: side
+
+# s_parameter_tables: evaluator 内部使用的统一查表入口
+#   key = table_type（evaluator 默认 post_ncap_belted_non_ADAS_failure）
+#   数据来自 s_parameter_table_pkw_pkw（工程保守 PKW-PKW 场景）
+s_parameter_tables:
+  post_ncap_belted_non_ADAS_failure:
+    description: "Post-NCAP, belted occupants, non-ADAS failure scenario (PKW-PKW conservative)"
+    domain_order: [RS, CR, AT, RR, IH]
+    rows:
+      frontal_or_rear: [S0, S0, S1, S3, S3]
+      grazing:         [S1, S1, S1, S3, S3]
+      side:            [S0, S1, S2, S3, S3]
+      rear_stable:     [S0, S0, S1, S2, S2]

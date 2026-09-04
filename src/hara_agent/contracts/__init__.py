@@ -12,7 +12,9 @@ from .method_contract import (
     Guideword, GuidewordContract, MethodAssumption, MethodContract,
     NormativeStrength, ParseStatus, Predicate, PredicateOperator, RangePredicate,
     ReportContract, ReportFieldMapping, RequiredFactSpec, RuleType,
-    ScaleLevel, ScenarioDimension, ScenarioModel, SeverityContract, SeverityScale,
+    ScaleLevel, ScenarioConstraintDisposition, ScenarioConstraintPredicate,
+    ScenarioConstraintRule, ScenarioDimension, ScenarioModel,
+    SeverityContract, SeverityScale,
     SourceRef, WorkflowContract, WorkflowStep, unique_sources,
 )
 from .causal_graph import (
@@ -22,6 +24,20 @@ from .evidence_binding import EvidenceBinding
 from .scenario_causal_assessment import (
     SCENARIO_CAUSAL_ASSESSMENT_VERSION, CausalAssessmentStatus,
     CausalBreakpoint, RiskDimensionChange, ScenarioCausalAssessment,
+)
+from .risk_calculation import (
+    RISK_CALCULATION_CONTRACT_VERSION, CalculationStatus,
+    ControllabilityAssessmentInput, ControllabilityBand,
+    ControllabilityJudgement, ControllabilityProfile,
+    ExposureAssessment, ExposureMethodDomain, ExposureCombinationRelation,
+    ExposureCombinationRule, ExposureCombinationStep, FTTIAssessmentInput,
+    ExposureAggregationPolicy, ExposureAtom, ExposureDimensionAssessment,
+    ExposureDomainRule,
+    ExposureMethod, PhysicalConsequence, RiskFactResolution,
+    RiskFactResolutionStatus, ScenarioApplicabilityAssessment,
+    ScenarioApplicabilityStatus, SeverityAssessmentInput, SeverityMethod,
+    SeverityMethodBand, SpeedSemantic, ControllabilityCondition,
+    ControllabilityOverride, StructuredRiskMethod,
 )
 
 __all__ = [
@@ -38,10 +54,26 @@ __all__ = [
     "GuidewordContract", "MethodAssumption", "NormativeStrength", "ParseStatus",
     "Predicate", "PredicateOperator", "RangePredicate", "ReportContract",
     "ReportFieldMapping", "RequiredFactSpec", "RuleType", "ScaleLevel",
-    "ScenarioDimension", "ScenarioModel", "SeverityContract", "SeverityScale",
+    "ScenarioConstraintDisposition", "ScenarioConstraintPredicate",
+    "ScenarioConstraintRule", "ScenarioDimension", "ScenarioModel",
+    "SeverityContract", "SeverityScale",
     "SourceRef", "WorkflowContract", "WorkflowStep", "unique_sources",
     "CausalEdge", "CausalGraph", "CausalNode", "CausalNodeType",
     "CausalRelation", "EvidenceBinding", "SCENARIO_CAUSAL_ASSESSMENT_VERSION",
     "CausalAssessmentStatus", "CausalBreakpoint", "RiskDimensionChange",
     "ScenarioCausalAssessment",
+    "RISK_CALCULATION_CONTRACT_VERSION", "CalculationStatus",
+    "ControllabilityAssessmentInput", "ControllabilityBand",
+    "ControllabilityJudgement", "ControllabilityProfile",
+    "ExposureAssessment", "ExposureMethodDomain",
+    "ExposureCombinationRelation", "ExposureCombinationRule",
+    "ExposureCombinationStep",
+    "ExposureAggregationPolicy", "ExposureAtom", "ExposureDomainRule",
+    "ExposureMethod",
+    "FTTIAssessmentInput",
+    "ExposureDimensionAssessment", "PhysicalConsequence", "RiskFactResolution",
+    "RiskFactResolutionStatus", "ScenarioApplicabilityAssessment",
+    "ScenarioApplicabilityStatus", "SeverityAssessmentInput", "SeverityMethod",
+    "SeverityMethodBand", "SpeedSemantic", "ControllabilityCondition",
+    "ControllabilityOverride", "StructuredRiskMethod",
 ]

@@ -20,13 +20,14 @@ from .traceability import resolve_malfunction_sources
 class MalfunctionHazardAgent:
     """Generate traceable malfunction and vehicle-level hazard candidates."""
 
-    PROMPT_VERSION = "malfunction-hazard-v6"
+    PROMPT_VERSION = "malfunction-hazard-v7-bounded-classification"
     SYSTEM_PROMPT = """你是汽车功能安全HARA分析助手。只处理已判定适用的Guideword。Malfunction描述功能相对预期行为的偏差；functional_effect描述功能/车辆行为影响；vehicle_level_hazard描述可能造成伤害的车辆级危险状态，不得直接写人员伤亡。causal_chain必须明确从失效到车辆级危险状态的至少两段因果关系，并且必须是JSON字符串数组，不得返回单个字符串。不得复制无关子系统模板。"""
 
     INJURY_TERMS = ("死亡", "致命伤", "骨折", "窒息", "fatality", "death", "injury")
 
-    def __init__(self, client: LLMClient):
+    def __init__(self, client: LLMClient, *, component_categories: tuple[str, ...] = ()):
         self.client = client
+        self.component_categories = tuple(component_categories)
 
     def generate(self, function: FunctionDefinition,
                  assessments: list[GuidewordAssessment]
@@ -35,18 +36,23 @@ class MalfunctionHazardAgent:
             item for item in assessments
             if (
                 item.is_semantically_complete
-                and item.applicable
+                and item.enters_downstream
                 and item.status is ReviewStatus.FINALIZED
             )
         ]
         if any(item.function_id != function.function_id for item in assessments):
             raise ValueError("GuidewordAssessment与Function不一致")
         if not applicable:
-            has_applicable = any(item.applicable for item in assessments)
-            skip_reason = (
-                "no_complete_applicable_guidewords"
-                if has_applicable else "no_applicable_guidewords"
+            has_downstream_candidate = any(
+                item.enters_downstream for item in assessments
             )
+            has_semantically_applicable = any(item.applicable for item in assessments)
+            if has_downstream_candidate:
+                skip_reason = "no_complete_applicable_guidewords"
+            elif has_semantically_applicable:
+                skip_reason = "no_credible_hazard_guidewords"
+            else:
+                skip_reason = "no_applicable_guidewords"
             complete_count = sum(item.is_semantically_complete for item in assessments)
             incomplete_count = len(assessments) - complete_count
             print(
@@ -63,6 +69,8 @@ class MalfunctionHazardAgent:
                 "prompt_version": self.PROMPT_VERSION,
                 "applicable_guidewords": 0,
                 "candidate_count": 0,
+                "llm_call_count": 0,
+                "coverage_repair_count": 0,
                 "skipped": True,
                 "skip_reason": skip_reason,
                 "complete_guidewords": complete_count,
@@ -164,6 +172,12 @@ class MalfunctionHazardAgent:
         existing: list[MalfunctionCandidate] | None = None,
     ) -> LLMRequest:
         guidewords = [item.guideword for item in applicable]
+        classification_contract = ""
+        if self.component_categories:
+            classification_contract = (
+                f"component_category必须从{list(self.component_categories)}中选择一个；"
+                "它表示该失效直接所属的部件/能力类别，不得自行创造类别。"
+            )
         repair_instruction = ""
         if coverage_repair:
             repair_instruction = (
@@ -185,7 +199,9 @@ class MalfunctionHazardAgent:
                 "当前任务不需要额外顶层字段。不得使用malfunctions、results、items、candidate_list或hazards"
                 "替代candidates；不得直接返回JSON array；不得在JSON前后添加说明文字。"
                 "candidates每项包含malfunction_id、guideword、description、functional_effect、"
-                "vehicle_level_hazard、causal_chain、confidence、status。"
+                "vehicle_level_hazard、causal_chain、confidence、status"
+                + ("、component_category。" if self.component_categories else "。")
+                + classification_contract +
                 "causal_chain必须是至少包含两个非空字符串的JSON array，例如"
                 "[\"功能偏差\",\"车辆行为异常\",\"车辆级危险状态\"]；"
                 "即使因果关系可写成一句话，也禁止把causal_chain写成string。"
@@ -255,6 +271,19 @@ class MalfunctionHazardAgent:
                 if assessment is None:
                     raise ValueError("guideword is not an approved applicable input")
                 candidate = self._parse(function, normalized_item, assessment)
+                if (
+                    self.component_categories
+                    and candidate.component_category not in self.component_categories
+                ):
+                    print(
+                        "[HARA] malfunction component classification unresolved "
+                        f"function={function.function_id} "
+                        f"malfunction={candidate.malfunction_id} "
+                        f"value={candidate.component_category!r}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    candidate.component_category = ""
                 hazard_lower = candidate.vehicle_level_hazard.lower()
                 if any(term in hazard_lower for term in self.INJURY_TERMS):
                     raise ValueError("vehicle-level hazard contains an injury outcome")
@@ -363,6 +392,8 @@ class MalfunctionHazardAgent:
             functional_effect=str(item.get("functional_effect", "")).strip(),
             vehicle_level_hazard=str(item.get("vehicle_level_hazard", "")).strip(),
             causal_chain=causal_chain,
+            component_category=str(item.get("component_category", "")).strip(),
+            failure_type=str(item.get("failure_type", "")).strip(),
             sources=sources,
             status=ReviewStatus.PENDING,
             confidence=parse_confidence(

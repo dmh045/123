@@ -33,9 +33,10 @@ from hara_agent.workflow import (
     SemanticWorkflowAgents,
     SemanticWorkflowInputs,
     WorkflowRunResult,
+    ReviewArtifactWriter,
     build_hara_agent_graph,
 )
-from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
+from hara_agent.method_sources import MethodSourceKind, MethodSourceResolver
 
 
 class HARAApplication:
@@ -52,27 +53,30 @@ class HARAApplication:
 
     def run(self) -> WorkflowRunResult:
         self.config.validate()
-        manifest_root = os.getenv(
-            "HARA_TEMPLATE_ROLE_MANIFEST_DIR",
-            "runtime/agent/template-role-manifests",
+        resolution = MethodSourceResolver().resolve(
+            template_path=self.config.template_path,
+            baseline_manifest_path=self.config.method_baseline_path,
+            report_template_path=(
+                self.config.template_path
+                if self.config.template_path is not None
+                else self.config.report_template_path
+            ),
         )
-        method = TemplateRoleCompiler(
-            manifest_store=TemplateRoleManifestStore(manifest_root)
-        ).compile_method(self.config.template_path)
-        if (
-            method.compile_status is CompileStatus.NOT_READY
-            or not method.engineering_rules_compiled
-        ):
-            blockers = [item.message for item in method.blocking_diagnostics]
-            raise ValueError(f"Active template MethodContract is not ready: {blockers}")
+        method = resolution.method
         method_ref = {
             "template_hash": method.metadata["template_hash"],
             "contract_version": method.contract_version,
             "compiler_version": method.compiler_version,
             "compile_status": method.compile_status.value,
             "engineering_rules_compiled": method.engineering_rules_compiled,
+            "source_kind": resolution.source_kind.value,
+            "method_source_hash": method.metadata.get("method_source_hash", method.metadata["template_hash"]),
+            "report_template_hash": resolution.report_template_hash,
         }
-        guidewords = [item.name for item in method.guidewords.guidewords]
+        # Preserve the compiled template semantics.  The semantic agent still
+        # accepts plain strings for tests/embedders, but production must not
+        # discard the normative description and source binding here.
+        guidewords = list(method.guidewords.guidewords)
         candidate_service = MethodScenarioCandidateService(method)
 
         def report_batch(name: str, completed: int, total: int) -> None:
@@ -90,9 +94,16 @@ class HARAApplication:
         def prepare_candidates(state: HARAState):
             return self.prepare_scenario_candidates(state, candidate_service)
         checkpoints = CheckpointRepository(self.config.run_dir)
+        review_artifact_writer = ReviewArtifactWriter(
+            self.config.run_id,
+            os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"),
+        )
         renderer = HARAExcelRenderer(
             method.report_contract,
-            template_hash=str(method.metadata["template_hash"]),
+            # This is the independently resolved report-layout hash. In
+            # Template mode it happens to equal the method-source hash; in
+            # YAML mode it intentionally does not.
+            template_hash=resolution.report_template_hash,
         )
         if self.config.resume:
             state = checkpoints.load(self.config.run_id)
@@ -115,7 +126,12 @@ class HARAApplication:
             )
             state.record(
                 "method_contract_compiled",
-                template_path=str(self.config.template_path),
+                template_path=(str(self.config.template_path) if self.config.template_path else ""),
+                method_baseline_path=(
+                    str(self.config.method_baseline_path)
+                    if resolution.source_kind is MethodSourceKind.YAML_BASELINE else ""
+                ),
+                report_template_path=str(resolution.report_template_path),
                 **method_ref,
                 guideword_count=len(guidewords),
                 scenario_dimension_count=len(method.scenario_model.dimensions),
@@ -146,15 +162,27 @@ class HARAApplication:
                     os.getenv("HARA_ARTIFACT_CACHE_MODE", "readwrite"),
                 ),
                 required_fact_specs=method.required_fact_specs,
+                method_contract=method,
                 requested_operating_modes=(
                     (str(self.config.operating_mode),)
                     if self.config.operating_mode else ()
                 ),
+                review_artifact_writer=review_artifact_writer,
             ),
             SemanticWorkflowAgents(
                 client=self.llm_client,
                 guidewords=GuidewordApplicabilityAgent(self.llm_client),
-                malfunctions=MalfunctionHazardAgent(self.llm_client),
+                malfunctions=MalfunctionHazardAgent(
+                    self.llm_client,
+                    component_categories=(
+                        tuple(sorted({
+                            category
+                            for rule in method.structured_risk_method.exposure.domain_rules
+                            for category in rule.component_categories
+                        }))
+                        if method.structured_risk_method is not None else ()
+                    ),
+                ),
                 scenarios=ScenarioFeasibilityAgent(self.llm_client),
                 risk_facts=ScenarioRiskFactAgent(self.llm_client),
             ),
@@ -166,7 +194,7 @@ class HARAApplication:
             ),
             checkpoint_repository=checkpoints,
             reporting=ReportingWorkflowConfig(
-                template_path=self.config.template_path,
+                template_path=resolution.report_template_path,
                 output_path=self.config.output_path,
                 renderer=renderer,
             ),
@@ -179,7 +207,7 @@ class HARAApplication:
         ):
             output = renderer.render(
                 result.state,
-                self.config.template_path,
+                resolution.report_template_path,
                 self.config.output_path,
                 draft=True,
             )

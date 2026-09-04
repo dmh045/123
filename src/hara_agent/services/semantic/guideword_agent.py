@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
+from copy import deepcopy
+from dataclasses import replace
 
-from hara_agent.infrastructure.llm import LLMClient, LLMRequest
-from hara_agent.models import FunctionDefinition, GuidewordAssessment, ReviewStatus
+from hara_agent.contracts import Guideword
+from hara_agent.infrastructure.llm import (
+    LLMClient,
+    LLMOutputLimitError,
+    LLMRequest,
+)
+from hara_agent.models import (
+    FunctionDefinition,
+    GuidewordAssessment,
+    GuidewordDisposition,
+    ReviewStatus,
+)
 
 from .parsing import CONFIDENCE_PROMPT_CONTRACT, parse_confidence
 from .traceability import resolve_guideword_sources
@@ -13,37 +26,159 @@ from .traceability import resolve_guideword_sources
 class GuidewordApplicabilityAgent:
     """Assess every template guideword without generating a Cartesian product."""
 
-    PROMPT_VERSION = "guideword-applicability-v5"
-    SYSTEM_PROMPT = """你是汽车功能安全HAZOP分析助手。针对给定Function/Output逐项判断模板Guideword是否具有明确的功能语义和可形成的偏差。必须覆盖输入中的每个Guideword且只出现一次。不适用不是遗漏，必须给出具体理由；不得为了凑数量判为适用。结论是候选，证据不足时标记PENDING。"""
+    PROMPT_VERSION = "guideword-applicability-v9-bounded-output"
+    INITIAL_MAX_TOKENS = 4096
+    OUTPUT_LIMIT_RETRY_MAX_TOKENS = 8192
+    SYSTEM_PROMPT = """你是汽车功能安全HAZOP分析助手。针对给定Function/Output逐项判断模板Guideword是否具有明确的功能语义和可形成的偏差。必须覆盖输入中的每个Guideword且只出现一次。不适用不是遗漏，必须给出具体理由；不得为了凑数量判为适用。结论必须区分：DOWNSTREAM_CANDIDATE（语义适用且存在可信的车辆级危害潜力）、NOT_APPLICABLE（偏差维度与该Function/Output语义不适用）、NO_CREDIBLE_HAZARD（偏差语义适用，但依据Item Definition无法形成可信的车辆级危害）。disposition只能是DOWNSTREAM_CANDIDATE、NOT_APPLICABLE、NO_CREDIBLE_HAZARD之一；PENDING不是disposition。证据完整性和ReviewStatus由系统确定，模型不得使用PENDING作为disposition。不确定时不得武断标记NO_CREDIBLE_HAZARD；证据不足时仍须在三种disposition中选择最合理的一个。"""
+    RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "assessments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "guideword": {"type": "string"},
+                        "applicable": {"type": "boolean"},
+                        "disposition": {
+                            "type": "string",
+                            "enum": [
+                                "DOWNSTREAM_CANDIDATE",
+                                "NOT_APPLICABLE",
+                                "NO_CREDIBLE_HAZARD",
+                            ],
+                        },
+                        "rationale": {"type": "string", "maxLength": 240},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["guideword", "applicable", "disposition", "rationale", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["assessments"],
+        "additionalProperties": False,
+    }
 
     def __init__(self, client: LLMClient):
         self.client = client
 
-    def assess(self, function: FunctionDefinition, guidewords: list[str]
+    def assess(self, function: FunctionDefinition, guidewords: list[str | Guideword]
                ) -> tuple[list[GuidewordAssessment], dict]:
         started = time.monotonic()
-        expected = [str(value).strip() for value in guidewords if str(value).strip()]
+        contexts = [self._guideword_context(value) for value in guidewords]
+        contexts = [value for value in contexts if value["name"]]
+        expected = [value["name"] for value in contexts]
         if not expected or len(expected) != len(set(expected)):
             raise ValueError("Guideword输入必须非空且唯一")
+        response_schema = deepcopy(self.RESPONSE_SCHEMA)
+        assessment_schema = response_schema["properties"]["assessments"]
+        assessment_schema["minItems"] = len(expected)
+        assessment_schema["maxItems"] = len(expected)
+        assessment_schema["items"]["properties"]["guideword"]["enum"] = expected
+        function_context = {
+            "function_id": function.function_id,
+            "name": function.name,
+            "output": function.output,
+            "description": function.description,
+            "preconditions": function.preconditions,
+            "triggers": function.triggers,
+            "odd_constraints": function.odd_constraints,
+            "fallback_behavior": function.fallback_behavior,
+            "consequences": function.consequences,
+            "source_evidence": [
+                {
+                    "location": source.location,
+                    "excerpt": source.excerpt,
+                }
+                for source in function.sources
+                if source.location or source.excerpt
+            ],
+        }
         request = LLMRequest(
             task="assess_guideword_applicability",
             system_prompt=self.SYSTEM_PROMPT,
             user_prompt=(
-                f"Function={function.name}\nOutput={function.output}\nDescription={function.description}\n"
-                f"Guidewords={expected}\n"
+                "FunctionContext="
+                + json.dumps(function_context, ensure_ascii=False)
+                + "\nGuidewordDefinitions="
+                + json.dumps(contexts, ensure_ascii=False)
+                + "\n必须优先采用模板给出的Guideword description判断偏差维度；不得只按名称联想。"
+                "在返回JSON前于同一次回答内逐项反证检查适用结论，尤其当几乎全部Guideword均适用时；"
+                "不得为了全局覆盖率强制任何Guideword匹配Function。该自检不得产生额外顶层字段。\n"
+                f"assessments必须恰好包含{len(expected)}项：每个输入Guideword恰好一次，禁止遗漏、重复或新增Guideword。"
+                "每个rationale只能用一句简洁工程理由说明适用性或disposition，最多240字符；"
+                "不得长篇重复Function或Item Definition原文，不得使用Markdown，不得输出额外commentary。\n"
                 "只返回一个JSON object，顶层必须且只能使用assessments字段："
                 "{\"assessments\":[...]}。assessments每项包含guideword、applicable、rationale、"
-                "confidence、status；guideword必须为string，applicable必须为boolean，rationale必须为非空string，"
+                "disposition、confidence；guideword必须为string，applicable必须为boolean，"
+                "disposition必须是DOWNSTREAM_CANDIDATE、NOT_APPLICABLE、NO_CREDIBLE_HAZARD之一。"
+                "PENDING不是disposition，不得出现在disposition字段。"
+                "DOWNSTREAM_CANDIDATE和NO_CREDIBLE_HAZARD的applicable必须为true，NOT_APPLICABLE必须为false；"
+                "rationale必须为非空string且简洁，"
                 "confidence必须为0.0到1.0的JSON number。必须逐项覆盖输入的全部Guidewords，不得省略rationale。"
-                "source由系统从Function证据确定性传播，禁止生成source字段。"
+                "source和status由系统从Function证据确定性传播，禁止生成source或status字段。"
                 + CONFIDENCE_PROMPT_CONTRACT
             ),
             schema_name="GuidewordAssessmentList",
             prompt_version=self.PROMPT_VERSION,
             metadata={"function_id": function.function_id},
-            max_tokens=4096,
+            max_tokens=self._initial_max_tokens(),
+            response_schema=response_schema,
         )
-        response = self.client.complete_json(request)
+        initial_budget = request.max_tokens or self.INITIAL_MAX_TOKENS
+        configured_limit = self._configured_provider_limit()
+        output_limit_retry_audit: dict[str, object] | None = None
+        try:
+            response = self.client.complete_json(request)
+        except LLMOutputLimitError as error:
+            retry_budget = min(configured_limit, self.OUTPUT_LIMIT_RETRY_MAX_TOKENS)
+            output_limit_retry_audit = self._output_limit_retry_audit(
+                function.function_id,
+                initial_budget=initial_budget,
+                retry_budget=retry_budget,
+                error=error,
+            )
+            if retry_budget <= initial_budget:
+                print(
+                    "[HARA] guideword output-limit retry skipped "
+                    f"function={function.function_id} "
+                    f"initial_max_tokens={initial_budget} "
+                    f"configured_limit={configured_limit} "
+                    "reason=provider_limit_not_above_current_budget",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                error.diagnostics.update({
+                    "function_id": function.function_id,
+                    "output_limit_retry": False,
+                    "output_limit_retry_audit": output_limit_retry_audit,
+                })
+                raise
+            print(
+                "[HARA] guideword output-limit retry "
+                f"function={function.function_id} "
+                f"initial_max_tokens={initial_budget} "
+                f"retry_max_tokens={retry_budget} attempt=2/2 "
+                f"finish_reason={output_limit_retry_audit['finish_reason']} "
+                f"prompt_tokens={output_limit_retry_audit['prompt_tokens']} "
+                f"completion_tokens={output_limit_retry_audit['completion_tokens']}",
+                file=sys.stderr,
+                flush=True,
+            )
+            retry_metadata = dict(request.metadata)
+            retry_metadata["_guideword_output_limit_retry_attempt"] = 1
+            retry = replace(request, max_tokens=retry_budget, metadata=retry_metadata)
+            try:
+                response = self.client.complete_json(retry)
+            except LLMOutputLimitError as retry_error:
+                retry_error.diagnostics.update({
+                    "function_id": function.function_id,
+                    "output_limit_retry": True,
+                    "output_limit_retry_audit": output_limit_retry_audit,
+                })
+                raise
+            request = retry
         raw = response.data.get("assessments")
         if not isinstance(raw, list):
             raise ValueError("LLM输出缺少assessments数组")
@@ -71,7 +206,23 @@ class GuidewordApplicabilityAgent:
             item.applicable and item.is_semantically_complete
             for item in assessments
         )
+        downstream_candidate_count = sum(
+            item.enters_downstream and item.is_semantically_complete
+            for item in assessments
+        )
+        not_applicable_count = sum(
+            item.disposition is GuidewordDisposition.NOT_APPLICABLE
+            for item in assessments
+        )
+        no_credible_hazard_count = sum(
+            item.disposition is GuidewordDisposition.NO_CREDIBLE_HAZARD
+            for item in assessments
+        )
         blanket_applicability = len(expected) > 1 and applicable_count == len(expected)
+        near_blanket_applicability = (
+            len(expected) >= 4
+            and downstream_candidate_count >= len(expected) - 1
+        )
         if blanket_applicability:
             print(
                 "[HARA] guideword blanket applicability warning "
@@ -108,12 +259,71 @@ class GuidewordApplicabilityAgent:
             "pending_count": review_pending_count,
             "parse_error_count": len(parse_errors),
             "applicable_count": applicable_count,
+            "downstream_candidate_count": downstream_candidate_count,
+            "not_applicable_count": not_applicable_count,
+            "no_credible_hazard_count": no_credible_hazard_count,
             "blanket_applicability": blanket_applicability,
+            "near_blanket_applicability": near_blanket_applicability,
+            "additional_llm_calls": 1 if output_limit_retry_audit else 0,
+            "output_limit_retry": bool(output_limit_retry_audit),
+            "output_limit_retry_audit": output_limit_retry_audit,
+            "llm_call_count": 1 + (1 if output_limit_retry_audit else 0),
             "elapsed_seconds": round(elapsed_seconds, 3),
         }
         if parse_errors:
             metadata["parse_errors"] = parse_errors
         return assessments, metadata
+
+    def _initial_max_tokens(self) -> int:
+        return min(self.INITIAL_MAX_TOKENS, self._configured_provider_limit())
+
+    def _configured_provider_limit(self) -> int:
+        configured = int(
+            getattr(getattr(self.client, "config", None), "max_tokens", 32768)
+        )
+        if configured <= 0:
+            raise ValueError("Guideword provider max_tokens必须大于0")
+        return configured
+
+    @staticmethod
+    def _output_limit_retry_audit(
+        function_id: str,
+        *,
+        initial_budget: int,
+        retry_budget: int,
+        error: LLMOutputLimitError,
+    ) -> dict[str, object]:
+        diagnostics = dict(error.diagnostics or {})
+        return {
+            "function_id": function_id,
+            "initial_max_tokens": initial_budget,
+            "retry_max_tokens": retry_budget,
+            "attempt": 2,
+            "failed_attempt": 1,
+            "finish_reason": diagnostics.get("finish_reason", "length"),
+            "prompt_tokens": diagnostics.get(
+                "prompt_tokens", diagnostics.get("input_tokens")
+            ),
+            "completion_tokens": diagnostics.get(
+                "completion_tokens", diagnostics.get("output_tokens")
+            ),
+        }
+
+    @staticmethod
+    def _guideword_context(value: str | Guideword) -> dict[str, str]:
+        if isinstance(value, Guideword):
+            return {
+                "name": value.name.strip(),
+                "description": value.description.strip(),
+                "template_source": (
+                    f"{value.source_ref.sheet}!{value.source_ref.range}"
+                ),
+            }
+        return {
+            "name": str(value).strip(),
+            "description": "",
+            "template_source": "legacy_untyped_input",
+        }
 
     @classmethod
     def _parse_item(
@@ -130,6 +340,55 @@ class GuidewordApplicabilityAgent:
         rationale = str(item.get("rationale", "")).strip() if isinstance(item, dict) else ""
         if not rationale:
             missing_fields.append("rationale")
+        raw_disposition = (
+            str(item.get("disposition", "")).strip() if isinstance(item, dict) else ""
+        )
+        raw_applicable = item.get("applicable") if isinstance(item, dict) else None
+        disposition_repair = None
+        if raw_disposition:
+            try:
+                GuidewordDisposition(raw_disposition)
+            except ValueError:
+                if raw_disposition == "PENDING" and raw_applicable is False:
+                    disposition_repair = {
+                        "field": "disposition",
+                        "raw": raw_disposition,
+                        "repaired": "NOT_APPLICABLE",
+                        "reason": "applicable=false and disposition=PENDING is unambiguously NOT_APPLICABLE",
+                    }
+                    print(
+                        "[HARA] guideword disposition deterministic repair "
+                        f"function={function.function_id} index={index} "
+                        f"guideword={guideword} raw=PENDING repaired=NOT_APPLICABLE",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    raise ValueError(
+                        f"PROVIDER_INVALID_GUIDEWORD_DISPOSITION: "
+                        f"disposition={raw_disposition!r} applicable={raw_applicable!r} "
+                        f"function={function.function_id} guideword={guideword}; "
+                        f"cannot deterministically repair"
+                    )
+        elif raw_applicable is False:
+            disposition_repair = {
+                "field": "disposition",
+                "raw": "<missing>",
+                "repaired": "NOT_APPLICABLE",
+                "reason": "applicable=false and disposition missing is unambiguously NOT_APPLICABLE",
+            }
+            print(
+                "[HARA] guideword disposition deterministic repair "
+                f"function={function.function_id} index={index} "
+                f"guideword={guideword} raw=<missing> repaired=NOT_APPLICABLE",
+                file=sys.stderr, flush=True,
+            )
+        elif raw_applicable is True:
+            raise ValueError(
+                f"PROVIDER_INVALID_GUIDEWORD_DISPOSITION: "
+                f"disposition=<missing> applicable=True "
+                f"function={function.function_id} guideword={guideword}; "
+                f"cannot distinguish DOWNSTREAM_CANDIDATE vs NO_CREDIBLE_HAZARD"
+            )
         if missing_fields:
             print(
                 "[HARA] guideword item validation failed "
@@ -143,17 +402,19 @@ class GuidewordApplicabilityAgent:
             if "guideword" in missing_fields:
                 raise ValueError("GuidewordAssessment缺少guideword")
             raise ValueError("GuidewordAssessment.applicable必须为boolean")
-        assessment = cls._parse(function, item)
-        if "rationale" not in missing_fields:
+        assessment = cls._parse(function, item, disposition_repair=disposition_repair)
+        if "rationale" not in missing_fields and disposition_repair is None:
             return assessment, None
         parse_error = {
             "function_id": function.function_id,
             "index": index,
             "guideword": guideword,
-            "field": "rationale",
-            "error": "missing",
+            "field": "rationale" if "rationale" in missing_fields else "disposition",
+            "error": "missing" if "rationale" in missing_fields else "provider_invalid_disposition_repaired",
             "raw_status": raw_status or "<missing>",
         }
+        if disposition_repair is not None:
+            parse_error["disposition_repair"] = disposition_repair
         print(
             "[HARA] guideword item degraded "
             f"function={function.function_id} index={index} guideword={guideword} "
@@ -164,12 +425,27 @@ class GuidewordApplicabilityAgent:
         return assessment, parse_error
 
     @staticmethod
-    def _parse(function: FunctionDefinition, item: object) -> GuidewordAssessment:
+    def _parse(
+        function: FunctionDefinition, item: object,
+        disposition_repair: dict[str, object] | None = None,
+    ) -> GuidewordAssessment:
         if not isinstance(item, dict):
             raise ValueError("assessments数组元素必须为object")
         if not isinstance(item.get("applicable"), bool):
             raise ValueError("Guideword applicable必须为boolean")
         rationale = str(item.get("rationale", "")).strip()
+        disposition_text = str(item.get("disposition", "")).strip()
+        if disposition_repair is not None:
+            disposition_text = str(
+                disposition_repair.get("repaired", disposition_text)
+            ).strip()
+        disposition = (
+            GuidewordDisposition(disposition_text)
+            if disposition_text else (
+                GuidewordDisposition.DOWNSTREAM_CANDIDATE
+                if item["applicable"] else GuidewordDisposition.NOT_APPLICABLE
+            )
+        )
         sources = resolve_guideword_sources(function)
         status = (
             ReviewStatus.FINALIZED
@@ -194,4 +470,5 @@ class GuidewordApplicabilityAgent:
                     f"function={function.function_id} guideword={item.get('guideword', '')}"
                 ),
             ),
+            disposition=disposition,
         )

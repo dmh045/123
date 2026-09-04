@@ -1,0 +1,11 @@
+schema_version: "1.0"
+source: "fusa_agent/core/hara/schemas.py#HAZOPGuideWord and skills/hara/SKILL.md#HAZOP"
+guidewords:
+  - {id: GW-NO-LOSS, name: "No/Loss", description: "Function or required output is absent or lost."}
+  - {id: GW-MORE, name: "More", description: "Function or output exceeds the intended magnitude, duration, or rate."}
+  - {id: GW-LESS, name: "Less", description: "Function or output is below the intended magnitude, duration, or rate."}
+  - {id: GW-REVERSE, name: "Reverse/Opposite", description: "Function or output occurs in the opposite direction or sense."}
+  - {id: GW-OTHER, name: "As well as/Other than", description: "An additional or different function or output occurs."}
+  - {id: GW-STUCK, name: "Stuck", description: "Function or output remains fixed and cannot transition as intended."}
+  - {id: GW-EARLY, name: "Early", description: "Function or output occurs earlier than intended."}
+  - {id: GW-LATE, name: "Late", description: "Function or output occurs later than intended."}

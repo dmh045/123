@@ -13,6 +13,8 @@ from hara_agent.contracts import (
     CompileStatus, TemplateRole, TemplateRoleConfirmation,
 )
 from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
+from hara_agent.method_sources import MethodSourceResolver
+from hara_agent.workflow import ReviewArtifactReader, render_review
 
 
 def _role_compiler() -> TemplateRoleCompiler:
@@ -49,7 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     analyze = subparsers.add_parser("analyze", help="运行HARA Agent主链")
     analyze.add_argument("--item", required=True, type=Path)
-    analyze.add_argument("--template", required=True, type=Path)
+    analyze.add_argument("--template", type=Path)
+    analyze.add_argument(
+        "--method-baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    analyze.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
     analyze.add_argument("--output", required=True, type=Path)
     analyze.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     analyze.add_argument("--run-id", default="hara-run")
@@ -61,7 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--allow-aggregate-speed-fallback", action="store_true")
     analyze.add_argument("--max-workers", type=int, default=4)
     doctor = subparsers.add_parser("doctor", help="检查模板和运行配置，不执行分析")
-    doctor.add_argument("--template", required=True, type=Path)
+    doctor.add_argument("--template", type=Path)
+    doctor.add_argument(
+        "--method-baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    doctor.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
     confirm = subparsers.add_parser(
         "confirm-template-role",
         help="一次性确认有歧义的模板角色，并按模板哈希保存系统清单",
@@ -73,6 +91,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     confirm.add_argument("--confirmed-by", required=True)
     confirm.add_argument("--rationale", default="")
+    review = subparsers.add_parser(
+        "review", help="只读查看运行中间审计 artifacts，不执行 HARA 或 LLM"
+    )
+    review.add_argument("--run-id", required=True)
+    review.add_argument("--function")
+    review.add_argument("--malfunction")
+    review.add_argument("--scenario")
+    review.add_argument("--all", action="store_true", dest="all_records")
+    review.add_argument("--limit", type=int, default=3)
+    review.add_argument("--feasible", action="store_true")
+    review.add_argument("--infeasible", action="store_true")
     return parser
 
 
@@ -105,10 +134,39 @@ def main(argv: list[str] | None = None) -> int:
             ],
         }, ensure_ascii=False, indent=2))
         return 0 if not method.blocking_diagnostics else 2
+    if args.command == "review":
+        if args.limit < 0:
+            raise ValueError("--limit must not be negative")
+        if args.feasible and args.infeasible:
+            raise ValueError("--feasible and --infeasible are mutually exclusive")
+        reader = ReviewArtifactReader(
+            args.run_id,
+            os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"),
+        )
+        print(render_review(
+            reader,
+            function_id=args.function or "",
+            malfunction_id=args.malfunction or "",
+            scenario_id=args.scenario or "",
+            all_records=args.all_records,
+            limit=args.limit,
+            feasible=args.feasible,
+            infeasible=args.infeasible,
+        ))
+        for warning in reader.warnings:
+            print(f"WARNING: {warning}")
+        return 0
     if args.command == "doctor":
         checks = {}
         try:
-            method = _role_compiler().compile_method(args.template)
+            resolution = MethodSourceResolver().resolve(
+                template_path=args.template,
+                baseline_manifest_path=args.method_baseline,
+                report_template_path=(
+                    args.template if args.template is not None else args.report_template
+                ),
+            )
+            method = resolution.method
             method_ok = (
                 method.compile_status is not CompileStatus.NOT_READY
                 and method.engineering_rules_compiled
@@ -116,6 +174,9 @@ def main(argv: list[str] | None = None) -> int:
             checks["method_contract"] = {
                 "ok": method_ok,
                 "template_hash": method.metadata["template_hash"],
+                "method_source_kind": resolution.source_kind.value,
+                "method_source_hash": method.metadata.get("method_source_hash", method.metadata["template_hash"]),
+                "report_template_hash": resolution.report_template_hash,
                 "contract_version": method.contract_version,
                 "compiler_version": method.compiler_version,
                 "compile_status": method.compile_status.value,
@@ -152,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
         template_path=args.template,
         output_path=args.output,
         run_dir=args.run_dir,
+        method_baseline_path=args.method_baseline,
+        report_template_path=args.report_template,
         resume=args.resume,
         allow_draft=args.allow_draft,
         run_id=args.run_id,

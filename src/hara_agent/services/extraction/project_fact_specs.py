@@ -46,10 +46,16 @@ def build_project_fact_spec_batches(
     """Build bounded extraction work without product/domain constants in Python."""
 
     speed_specs = tuple(_speed_spec(mode) for mode in _unique_modes(operating_modes))
+    non_source_extraction_facts = {
+        # These are governance/engineering outputs, not Item Definition facts.
+        FactType.EXPOSURE,
+        FactType.AVOIDABILITY_PERCENT,
+    }
     risk_specs = tuple(
         _method_risk_spec(spec)
         for spec in _unique_method_specs(method_specs)
         if spec.origin in {FactOrigin.PROJECT_FACT, FactOrigin.HUMAN_EVIDENCE}
+        and spec.fact_type not in non_source_extraction_facts
         and spec.fact_type not in {FactType.FUNCTION, FactType.OUTPUT}
     )
     batches: dict[str, tuple[RequiredProjectFactSpec, ...]] = {}

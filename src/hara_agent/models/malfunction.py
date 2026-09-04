@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 from .common import ReviewStatus, SourceRef
+
+
+class GuidewordDisposition(str, Enum):
+    DOWNSTREAM_CANDIDATE = "DOWNSTREAM_CANDIDATE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    NO_CREDIBLE_HAZARD = "NO_CREDIBLE_HAZARD"
 
 
 @dataclass
@@ -14,8 +21,16 @@ class GuidewordAssessment:
     sources: list[SourceRef] = field(default_factory=list)
     status: ReviewStatus = ReviewStatus.PENDING
     confidence: float = 0.0
+    disposition: GuidewordDisposition | None = None
 
     def __post_init__(self):
+        if self.disposition is None:
+            self.disposition = (
+                GuidewordDisposition.DOWNSTREAM_CANDIDATE
+                if self.applicable else GuidewordDisposition.NOT_APPLICABLE
+            )
+        elif not isinstance(self.disposition, GuidewordDisposition):
+            self.disposition = GuidewordDisposition(str(self.disposition))
         if not str(self.function_id).strip():
             raise ValueError("GuidewordAssessment缺少function_id")
         if not str(self.guideword).strip():
@@ -26,11 +41,30 @@ class GuidewordAssessment:
             raise ValueError("FINALIZED GuidewordAssessment缺少rationale")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("Guideword confidence必须在0到1之间")
+        if (
+            self.disposition is GuidewordDisposition.NOT_APPLICABLE
+            and self.applicable
+        ):
+            raise ValueError("NOT_APPLICABLE GuidewordAssessment不得标记applicable=true")
+        if (
+            self.disposition in {
+                GuidewordDisposition.DOWNSTREAM_CANDIDATE,
+                GuidewordDisposition.NO_CREDIBLE_HAZARD,
+            }
+            and not self.applicable
+        ):
+            raise ValueError(
+                f"{self.disposition.value} GuidewordAssessment必须标记applicable=true"
+            )
 
     @property
     def is_semantically_complete(self) -> bool:
         """Whether the assessment can safely drive draft derivation."""
-        return bool(str(self.rationale).strip())
+        return bool(str(self.rationale).strip()) and self.disposition is not None
+
+    @property
+    def enters_downstream(self) -> bool:
+        return self.disposition is GuidewordDisposition.DOWNSTREAM_CANDIDATE
 
 
 @dataclass
@@ -46,6 +80,8 @@ class MalfunctionCandidate:
     status: ReviewStatus = ReviewStatus.PENDING
     confidence: float = 0.0
     model_local_id: str = ""
+    component_category: str = ""
+    failure_type: str = ""
 
     def __post_init__(self):
         required = (

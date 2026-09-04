@@ -1,0 +1,57 @@
+version: "1.0"
+source: "VDA 702 + 项目经验"
+
+# 仅作 prompt 注入材料供 LLM 参考。coupling_resolver 不读 examples 做代码判断，
+# 单层全 LLM。每条覆盖 dimension_structure.yaml.dimension_dependency.strong_coupling
+# 中的一对，coupled / independent 各举一例，便于 LLM 学习对比。
+
+examples:
+  # ── [WHERE, OBJECT] ────────────────────────────────────────────────
+  - dims: [WHERE, OBJECT]
+    atoms: [parking_lot, pedestrian_nearby]
+    coupling: coupled
+    reason: "停车场属于人车混行区域，行人邻近是该场所的典型对象，二者强绑定"
+  - dims: [WHERE, OBJECT]
+    atoms: [highway, pedestrian_nearby]
+    coupling: independent
+    reason: "高速公路场景下，行人邻近属于异常事件，与场所类型无系统性绑定"
+
+  # ── [WHERE, TRAFFIC_PATTERN] ───────────────────────────────────────
+  - dims: [WHERE, TRAFFIC_PATTERN]
+    atoms: [urban_road, congested_flow]
+    coupling: coupled
+    reason: "城市道路与拥堵交通流是该场所最常见的交通模式，强绑定"
+  - dims: [WHERE, TRAFFIC_PATTERN]
+    atoms: [rural_road, congested_flow]
+    coupling: independent
+    reason: "乡村道路通常自由流，拥堵不是该场所典型模式，无系统性绑定"
+
+  # ── [WHERE, EGO_DYNAMICS] ──────────────────────────────────────────
+  - dims: [WHERE, EGO_DYNAMICS]
+    atoms: [parking_lot, low_speed_under_15kph]
+    coupling: coupled
+    reason: "停车场场景下车速档位由场所物理约束（出入口窄、视距短）决定，强绑定"
+  - dims: [WHERE, EGO_DYNAMICS]
+    atoms: [highway, low_speed_under_15kph]
+    coupling: independent
+    reason: "高速公路上低速档位属于异常工况（事故 / 拥堵尾），不是场所驱动"
+
+  # ── [EGO_ACTION, EGO_DYNAMICS] ─────────────────────────────────────
+  - dims: [EGO_ACTION, EGO_DYNAMICS]
+    atoms: [emergency_brake, deceleration_strong]
+    coupling: coupled
+    reason: "紧急制动动作直接决定了强减速度档位，动作 → 速度变化强绑定"
+  - dims: [EGO_ACTION, EGO_DYNAMICS]
+    atoms: [lane_keep, deceleration_strong]
+    coupling: independent
+    reason: "车道保持动作本身不约束速度档位；强减速度与该动作无固有关系"
+
+  # ── [EGO_ACTION, ROAD] ─────────────────────────────────────────────
+  - dims: [EGO_ACTION, ROAD]
+    atoms: [park_in, parking_space]
+    coupling: coupled
+    reason: "泊入动作物理上只能发生在车位 / 停车场，动作约束道路类型，强绑定"
+  - dims: [EGO_ACTION, ROAD]
+    atoms: [cruise, parking_space]
+    coupling: independent
+    reason: "巡航动作通常发生在主干道，与停车场地无固有关联"

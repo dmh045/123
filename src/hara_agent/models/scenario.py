@@ -28,6 +28,7 @@ class ScenarioCandidate:
     atomic_variant: str = ""
     semantic_fingerprint: str = ""
     scenario_contract_version: str = ""
+    exposure_context: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.scenario_id:
@@ -72,8 +73,8 @@ class ScenarioFeasibilityAssessment:
     def __post_init__(self):
         if not self.malfunction_id or not self.scenario_id or not self.rationale:
             raise ValueError("ScenarioFeasibilityAssessment缺少ID或理由")
-        if self.retain and (not self.hazardous_event or not self.potential_harm):
-            raise ValueError("保留场景必须给出Hazardous Event和Potential Harm")
+        if self.retain and not self.hazardous_event:
+            raise ValueError("保留场景必须给出Hazardous Event")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError("Scenario confidence必须在0到1之间")
         if self.causal_assessment is not None:
@@ -90,6 +91,47 @@ class ScenarioFeasibilityAssessment:
         if self.causal_assessment is not None:
             result["causal_assessment"] = self.causal_assessment.to_dict()
         return self._serialize(result)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ScenarioFeasibilityAssessment":
+        from hara_agent.contracts.scenario_causal_assessment import (
+            ScenarioCausalAssessment,
+        )
+
+        boolean_fields = (
+            "physically_feasible", "functionally_relevant", "causally_relevant",
+        )
+        if any(not isinstance(value.get(field), bool) for field in boolean_fields):
+            raise ValueError(
+                "ScenarioFeasibilityAssessment checkpoint booleans are invalid"
+            )
+        causal_value = value.get("causal_assessment")
+        causal_assessment = (
+            ScenarioCausalAssessment.from_dict(causal_value)
+            if isinstance(causal_value, dict) else None
+        )
+        return cls(
+            malfunction_id=str(value["malfunction_id"]),
+            scenario_id=str(value["scenario_id"]),
+            physically_feasible=value["physically_feasible"],
+            functionally_relevant=value["functionally_relevant"],
+            causally_relevant=value["causally_relevant"],
+            risk_dimensions_changed=[
+                str(item) for item in value.get("risk_dimensions_changed", [])
+            ],
+            rationale=str(value["rationale"]),
+            hazardous_event=str(value.get("hazardous_event", "")),
+            potential_harm=str(value.get("potential_harm", "")),
+            status=ReviewStatus(value.get("status", ReviewStatus.PENDING.value)),
+            confidence=float(value.get("confidence", 0.0)),
+            breakpoint=str(value.get("breakpoint", "")),
+            causal_chain=dict(value.get("causal_chain", {})),
+            risk_dimension_changes=list(value.get("risk_dimension_changes", [])),
+            evidence_contract_version=str(
+                value.get("evidence_contract_version", "")
+            ),
+            causal_assessment=causal_assessment,
+        )
 
     @classmethod
     def _serialize(cls, value: Any) -> Any:

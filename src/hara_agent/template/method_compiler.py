@@ -172,6 +172,7 @@ class FullTemplateCompiler:
         source_items.extend(step.source_ref for step in workflow.steps)
         source_items.extend(item.source_ref for item in guidewords.guidewords)
         source_items.extend(item.source_ref for item in scenario_model.dimensions)
+        source_items.extend(item.source_ref for item in scenario_model.constraint_rules)
         source_items.extend(item.source_ref for item in severity.scale.levels)
         source_items.extend(source for rule in all_rules for source in rule.source_refs)
         source_items.extend(item.source_ref for item in exposure.situation_mappings)
@@ -1354,8 +1355,16 @@ class FullTemplateCompiler:
             FactType.COLLISION_TYPE: FactOrigin.SCENARIO_FACT,
             FactType.ROAD_USER_TYPE: FactOrigin.SCENARIO_FACT,
             FactType.SPEED_UNSPECIFIED: FactOrigin.SCENARIO_FACT,
+            FactType.DELTA_V: FactOrigin.DERIVED_FACT,
+            FactType.TTC: FactOrigin.DERIVED_FACT,
             FactType.DURATION_PERCENT: FactOrigin.DERIVED_FACT,
             FactType.OCCURRENCE_FREQUENCY: FactOrigin.HUMAN_EVIDENCE,
+            FactType.DRIVER_STATE: FactOrigin.PROJECT_FACT,
+            FactType.DRIVER_IN_VEHICLE: FactOrigin.PROJECT_FACT,
+            FactType.DIRECT_CONTROL_AVAILABLE: FactOrigin.PROJECT_FACT,
+            FactType.INTERVENTION_AVAILABLE: FactOrigin.PROJECT_FACT,
+            FactType.REMOTE_INTERVENTION_AVAILABLE: FactOrigin.PROJECT_FACT,
+            FactType.FUNCTION_TYPE: FactOrigin.PROJECT_FACT,
             FactType.AVOIDABILITY_PERCENT: FactOrigin.HUMAN_EVIDENCE,
         }
         specs: list[RequiredFactSpec] = []
@@ -1401,7 +1410,7 @@ class FullTemplateCompiler:
                     "Required when the compiled MethodContract contains both "
                     "duration and frequency exposure rule families."
                 ),
-                origin=FactOrigin.PROJECT_FACT,
+                origin=FactOrigin.HUMAN_EVIDENCE,
                 source_rule_ids=selector_rule_ids,
                 source_refs=selector_sources,
             ))

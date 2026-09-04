@@ -21,6 +21,7 @@ class LLMConfig:
     scenario_batch_max_chars: int = 12000
     scenario_batch_max_items: int = 12
     scenario_max_split_depth: int = 8
+    scenario_causal_evidence_budget: int = 10
 
     @classmethod
     def from_env(cls, prefix: str = "HARA_LLM_") -> "LLMConfig":
@@ -53,6 +54,9 @@ class LLMConfig:
             )),
             scenario_max_split_depth=int(os.getenv(
                 f"{prefix}SCENARIO_MAX_SPLIT_DEPTH", "8"
+            )),
+            scenario_causal_evidence_budget=int(os.getenv(
+                f"{prefix}SCENARIO_CAUSAL_EVIDENCE_BUDGET", "10"
             )),
         )
 
@@ -92,5 +96,9 @@ class LLMConfig:
             raise ValueError("HARA_LLM_SCENARIO_BATCH_MAX_CHARS必须大于0")
         if self.scenario_batch_max_items <= 0:
             raise ValueError("HARA_LLM_SCENARIO_BATCH_MAX_ITEMS必须大于0")
+        if self.scenario_causal_evidence_budget <= 0:
+            raise ValueError(
+                "HARA_LLM_SCENARIO_CAUSAL_EVIDENCE_BUDGET must be greater than 0"
+            )
         if self.scenario_max_split_depth < 0:
             raise ValueError("HARA_LLM_SCENARIO_MAX_SPLIT_DEPTH不得小于0")

@@ -7,7 +7,6 @@ from hara_agent.models import (
     ScenarioFeasibilityAssessment, SourceRef,
 )
 from hara_agent.services.semantic import ScenarioFeasibilityAgent
-from hara_agent.services.semantic.scenario_batching import ScenarioAdaptiveBatchError
 from hara_agent.workflow import HARAState, WorkflowStage
 from hara_agent.workflow.nodes import score_structured_scenarios
 
@@ -25,6 +24,7 @@ def test_agent_parser_auto_finalizes_only_after_typed_evidence_validation():
             "object_position": "ahead",
             "relative_distance": "0.5 m",
             "relative_speed_kph": 5.0,
+            "harm_mechanism": "contact can expose occupants to injury",
         },
         fact_provenance={
             key: {
@@ -37,7 +37,10 @@ def test_agent_parser_auto_finalizes_only_after_typed_evidence_validation():
                     "excerpt": source.excerpt,
                 }],
             }
-            for key in ("object_position", "relative_distance", "relative_speed_kph")
+            for key in (
+                "object_position", "relative_distance", "relative_speed_kph",
+                "harm_mechanism",
+            )
         },
         status=ReviewStatus.FINALIZED, sources=[source], semantic_fingerprint="fp-1",
     )
@@ -66,7 +69,7 @@ def test_agent_parser_auto_finalizes_only_after_typed_evidence_validation():
             "h_to_harm": {
                 "claim": "contact can cause harm",
                 "basis_type": "DIRECT_FACT",
-                "evidence_refs": ["MF.vehicle_level_hazard"],
+                "evidence_refs": ["SCN.harm_mechanism"],
             },
         },
         "risk_dimension_changes": [{
@@ -114,6 +117,7 @@ def test_unrelated_pending_scenario_field_does_not_taint_cited_causal_evidence()
             "operating_scenario": "parking lot",
             "vehicle_state": "active",
             "ego_speed_kph": 20.0,
+            "harm_mechanism": "loss of trajectory control can expose occupants to impact injury",
             "road_surface_conditions": "",
         },
         fact_provenance={
@@ -122,7 +126,10 @@ def test_unrelated_pending_scenario_field_does_not_taint_cited_causal_evidence()
                 "approval": "FINALIZED",
                 "source_refs": [source_dict],
             }
-            for key in ("operating_scenario", "vehicle_state", "ego_speed_kph")
+            for key in (
+                "operating_scenario", "vehicle_state", "ego_speed_kph",
+                "harm_mechanism",
+            )
         } | {
             "road_surface_conditions": {
                 "provenance": "LLM_INFERENCE",
@@ -159,7 +166,7 @@ def test_unrelated_pending_scenario_field_does_not_taint_cited_causal_evidence()
             "h_to_harm": {
                 "claim": "the hazardous vehicle state can cause impact harm",
                 "basis_type": "DIRECT_FACT",
-                "evidence_refs": ["MF.vehicle_level_hazard"],
+                "evidence_refs": ["SCN.harm_mechanism"],
             },
         },
         "risk_dimension_changes": [],
@@ -203,6 +210,44 @@ def test_positive_causal_result_is_not_rejected_only_for_empty_dimension_changes
     )
 
     assert assessment.retain
+
+
+def test_upstream_hazard_claim_cannot_solely_prove_positive_harm_transition():
+    source = SourceRef("item_definition", "item.docx", "p1", "parking evidence")
+    malfunction = MalfunctionCandidate(
+        "MF-1", "FUN-1", "loss", "loss", "behavior changes", "generic hazard",
+        ["loss", "behavior"], sources=[source], status=ReviewStatus.FINALIZED,
+    )
+    scenario = ScenarioCandidate(
+        "SCN-1", "Parking", "active", "active",
+        {"vehicle_state": "active"},
+        fact_provenance={"vehicle_state": {
+            "provenance": "PROJECT_INPUT", "approval": "FINALIZED",
+            "source_refs": [{
+                "source_type": source.source_type, "source_id": source.source_id,
+                "location": source.location, "excerpt": source.excerpt,
+            }],
+        }},
+        sources=[source], status=ReviewStatus.FINALIZED,
+        semantic_fingerprint="self-proof",
+    )
+    payload = {
+        "scenario_id": "SCN-1", "physically_feasible": True,
+        "functionally_relevant": True, "causally_relevant": True,
+        "breakpoint": "NONE",
+        "causal_chain": {
+            "m_to_b": {"claim": "behavior changes", "basis_type": "DIRECT_FACT", "evidence_refs": ["MF.functional_effect"]},
+            "b_to_i": {"claim": "change occurs while active", "basis_type": "DIRECT_FACT", "evidence_refs": ["SCN.vehicle_state"]},
+            "i_to_h": {"claim": "hazard exists", "basis_type": "DIRECT_FACT", "evidence_refs": ["MF.vehicle_level_hazard", "SCN.vehicle_state"]},
+            "h_to_harm": {"claim": "hazard causes harm", "basis_type": "DIRECT_FACT", "evidence_refs": ["MF.vehicle_level_hazard"]},
+        },
+        "risk_dimension_changes": [], "rationale": "self-referential chain",
+        "hazardous_event": "hazard", "potential_harm": "harm",
+        "confidence": 0.8, "status": "PENDING",
+    }
+
+    with pytest.raises(Exception, match="SELF_REFERENTIAL_CAUSAL_EVIDENCE"):
+        ScenarioFeasibilityAgent._parse(malfunction, payload, scenario=scenario)
 
 
 def test_scoring_rejects_legacy_positive_flags_without_typed_contract():
@@ -259,7 +304,7 @@ def _negative_payload(scenario_id: str) -> dict:
     }
 
 
-def test_scenario_coverage_error_triggers_bounded_adaptive_split():
+def test_scenario_coverage_error_salvages_valid_items_and_repairs_missing_id():
     class Client:
         def __init__(self):
             self.calls = 0
@@ -294,9 +339,12 @@ def test_scenario_coverage_error_triggers_bounded_adaptive_split():
     ).assess(malfunction, scenarios)
 
     assert [item.scenario_id for item in assessments] == ["SCN-1", "SCN-2"]
-    assert client.calls == 3
-    assert audit["adaptive_split_count"] == 1
+    assert client.calls == 2
+    assert audit["adaptive_split_count"] == 0
     assert audit["coverage_error_count"] == 1
+    assert audit["valid_items_salvaged"] == 1
+    assert audit["invalid_items_repaired"] == 1
+    assert audit["repair_success_count"] == 1
 
 
 def _empty_hop_claim_payload(scenario_id: str) -> dict:
@@ -352,7 +400,7 @@ def test_single_scenario_evidence_error_gets_one_bounded_contract_repair():
     assert audit["single_item_failures"] == 0
 
 
-def test_single_scenario_contract_repair_still_fails_closed_after_one_attempt():
+def test_single_scenario_contract_repair_exhaustion_becomes_pending_record():
     class Client:
         def __init__(self):
             self.calls = 0
@@ -374,12 +422,51 @@ def test_single_scenario_contract_repair_still_fails_closed_after_one_attempt():
     )
     client = Client()
 
-    with pytest.raises(ScenarioAdaptiveBatchError, match="attempt=1/1"):
-        ScenarioFeasibilityAgent(
-            client, batch_max_chars=50000, batch_max_items=12,
-        ).assess(malfunction, [scenario])
+    assessments, audit = ScenarioFeasibilityAgent(
+        client, batch_max_chars=50000, batch_max_items=12,
+    ).assess(malfunction, [scenario])
 
     assert client.calls == 2
+    assert len(assessments) == 1
+    assert assessments[0].status is ReviewStatus.PENDING
+    assert assessments[0].retain is False
+    assert "classification was not accepted" in assessments[0].rationale
+    assert audit["item_contract_repair_failure_count"] == 1
+    assert audit["single_item_failures"] == 1
+
+
+def test_blank_rationale_gets_one_bounded_contract_repair():
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, request):
+            self.calls += 1
+            payload = _negative_payload("SCN-1")
+            if self.calls == 1:
+                payload["rationale"] = ""
+            else:
+                assert request.metadata["item_contract_repair"] is True
+                assert "non-empty rationale" in request.user_prompt
+            return LLMResponse(data={"assessments": [payload]}, model="fake")
+
+    malfunction = MalfunctionCandidate(
+        "MF-1", "FUN-1", "loss", "braking command lost", "no deceleration",
+        "vehicle continues moving", ["command lost", "vehicle continues moving"],
+    )
+    scenario = ScenarioCandidate(
+        "SCN-1", "Parking", "object ahead", "explicit object",
+        {"object_position": "ahead"}, semantic_fingerprint="fp-SCN-1",
+    )
+
+    assessments, audit = ScenarioFeasibilityAgent(
+        Client(), batch_max_chars=50000, batch_max_items=12,
+    ).assess(malfunction, [scenario])
+
+    assert assessments[0].rationale
+    assert audit["schema_error_count"] == 1
+    assert audit["item_contract_repair_count"] == 1
+    assert audit["item_contract_repair_failure_count"] == 0
 
 
 def test_invalid_causal_chain_container_gets_error_specific_repair_instruction():

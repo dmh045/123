@@ -44,20 +44,35 @@ class MethodRuleScoringService:
         if not method.engineering_rules_compiled:
             raise ValueError("MethodContract engineering rules are not compiled")
         self.method = method
+        self._structured = None
+        if method.structured_risk_method is not None:
+            from .structured_risk_scoring_service import StructuredRiskScoringService
+            self._structured = StructuredRiskScoringService(method)
 
     def score(
         self, scenario: dict[str, Any], hazard_event: str
     ) -> dict[str, dict[str, Any]]:
+        if self._structured is not None:
+            return self._structured.score(scenario, hazard_event)
         severity = self._evaluate(self.method.severity.rules, scenario)
         exposure_method = str(scenario.get("exposure_method", "")).strip().upper()
         if exposure_method == "T":
             exposure = self._evaluate(self.method.exposure.duration_rules, scenario)
         elif exposure_method == "F":
             exposure = self._evaluate(self.method.exposure.frequency_rules, scenario)
+        elif self.method.exposure.situation_mappings:
+            exposure = RuleEvaluation(
+                "", "PENDING",
+                "Exposure path is Scenario dimensions -> MethodContract situation "
+                "mappings -> approved dependency/combination rules -> E. The current "
+                "catalog entries are reference data and the combination semantics are "
+                "not compiled, so no E level is inferred and no T/F project fact is requested.",
+            )
         else:
             exposure = RuleEvaluation(
                 "", "PENDING",
-                "Missing canonical exposure_method; expected T or F from project evidence.",
+                "Missing canonical exposure_method; T/F is an approved method-selection "
+                "decision, not an Item Definition project fact.",
                 missing_facts=(FactType.EXPOSURE,),
             )
         if (
@@ -76,9 +91,28 @@ class MethodRuleScoringService:
         controllability = self._evaluate(
             self.method.controllability.criteria, scenario
         )
+        if (
+            controllability.status == "PENDING"
+            and FactType.AVOIDABILITY_PERCENT in controllability.missing_facts
+        ):
+            controllability = RuleEvaluation(
+                controllability.value,
+                controllability.status,
+                "Controllability path is Scenario/Causal consequence -> TTC and "
+                "intervention context -> approved avoidability executor -> MethodContract "
+                "criteria. The executor thresholds/modifiers are not compiled; "
+                "AVOIDABILITY_PERCENT is not extracted or guessed from Item Definition.",
+                rules=controllability.rules,
+                missing_facts=controllability.missing_facts,
+                fact_sources=controllability.fact_sources,
+            )
         return {
             "severity": self._result(
-                severity, "severity_score", hazard_event=hazard_event
+                severity, "severity_score", hazard_event=hazard_event,
+                calculation_path=(
+                    "validated_causal_consequence->severity_assessment_input"
+                    "->method_contract_rules"
+                ),
             ),
             "exposure": self._result(
                 exposure,
@@ -89,11 +123,20 @@ class MethodRuleScoringService:
                     or ""
                 ),
                 exposure_method=exposure_method,
+                calculation_path=(
+                    "scenario_dimensions->exposure_situation_mapping"
+                    "->exposure_combination_rule->exposure_level"
+                ),
+                reference_mapping_count=len(self.method.exposure.situation_mappings),
             ),
             "controllability": self._result(
                 controllability,
                 "controllability_score",
                 hazard_event=hazard_event,
+                calculation_path=(
+                    "scenario_and_causal_consequence->controllability_assessment_input"
+                    "->avoidability_executor->method_contract_criteria"
+                ),
             ),
         }
 

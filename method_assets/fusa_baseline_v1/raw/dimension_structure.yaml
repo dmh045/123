@@ -1,0 +1,532 @@
+version: "1.0-baseline"
+source: "VDA 702 V2 (2023-06) + 项目 source HARA 表"
+# dimension_structure.yaml
+# Skill 资产 — 跨项目固定 — 不让任何项目改
+# 角色: 定义 5 个 HARA 维度的 schema + 各维度的 VDA atom 来源边界
+# 不含: 具体 atom E 值 (在 vda702_atoms.yaml) / 跨维度约束 (在 cross_dim_constraints.yaml)
+#
+# 溯源原则:
+#   每一条 atom / 前缀都必须出自以下之一:
+#     [V2-Std]  = VDA 702 V2 (2023-06) §5.2 / §5.3 原文
+#     [Src-CN]  = 项目 source HARA 表 (MQB Baseline V1/V2, EHYREEV) 中实际出现
+#     [Src-CN+] = source HARA 表标 "New item from CN" 的新增条目
+#     [Audi]    = Audi 内部估值 (source HARA 表注明)
+#     [VW]      = VW 内部估值 (source HARA 表注明)
+#   两处都查不到的条目: 不写, 不留 placeholder.
+
+# ─────────────────────────────────────────────────────────────
+# VDA 702 V2 §5.2 类别参考  [V2-Std]
+# 这是 atom 前缀归属维度的根本依据
+# ─────────────────────────────────────────────────────────────
+vda702_v2_categories:
+  # 使用阶段 (Fahrzeugbezogene Elemente in der Nutzungsphase)
+  VF: "Vor Fahrtantritt/Fahrplanung"        # HARA 一般不涉及
+  BE: "Beladen und Entladen"                # HARA 一般不涉及
+  ES: "Einsteigen, Einstellen und Starten"  # HARA 一般不涉及
+  FA: "Fahren"                              # 动作 + 速度 + 加速度
+  KA: "Karosserie"                          # HARA 一般不涉及
+  OA: "Over the Air"                        # HARA 一般不涉及
+  PH: "Parken/Halten/Rangieren"             # 动作类别 (不是场所!)
+  AB: "Aussteigen, Fahrt beenden"           # HARA 一般不涉及
+  TL: "Tanken, Laden und Service"           # HARA 一般不涉及
+  SO: "Sondersituationen"                   # V2 = 特殊情况 (Panne/Unfall/Waschanlage/...)
+  IB: "Insassen und Beladung"               # 乘员/装载
+  # 环境 (Fahrzeugexterne Elemente)
+  VD: "Verkehrsdomäne"                      # 场所/交通域
+  FB: "Fahrbahnbeschaffenheit"              # V2 = 路面状况
+  WS: "Witterung/Sicht"                     # 天气/能见度
+  PU: "Peripherie/Umfeld"                   # 周边/对象
+
+hara_relevant_categories: [VD, FB, WS, FA, PH, PU, IB, SO]
+
+# ─────────────────────────────────────────────────────────────
+# V1 ↔ V2 关键前缀变化 (跨版本翻译的钥匙)
+# 此处描述的是 source 数据中观察到的前缀使用模式
+# ─────────────────────────────────────────────────────────────
+prefix_version_changes:
+  - v1: FO
+    v2: VD
+    note: "场所前缀重命名 (Fahrort → Verkehrsdomäne)"
+  - v1: FV
+    v2: FA
+    note: "动作前缀重命名 (Fahrverhalten → Fahren)"
+  - v1: FB
+    v2: FB
+    note: "⚠ 同符号语义反转: V1 实际数据中 FB=动作+速度+加速度; V2 标准 FB=路面状况. source HARA 表的 FB010/020/030/090/110/150/160/170 都是 V1 语义"
+  - v1: SO
+    v2: SO
+    note: "⚠ 同符号语义反转: V1 source 数据中 SO010/020/030=停车场所/路边; V2 标准 SO=特殊情况(Panne/Unfall等). 完全无重叠"
+  - v1: XP
+    v2: PU
+    note: "对象前缀变化: V1 数据用 XP010, V2 用 PU004/PU005"
+
+# ─────────────────────────────────────────────────────────────
+# source HARA 表中观察到的"错标"或"半迁移"情况  [Src-CN]
+# 这些是 yaml 必须捕获、不能默默 reconcile 的事实
+# ─────────────────────────────────────────────────────────────
+known_source_inconsistencies:
+  fb002_fb003_semantic_drift:
+    observation: |
+      source HARA 表把 FB002 / FB003 标注为 "Stopping on the mountain"
+      (停在坡上, 2-8% / >8%).
+    vda_v2_truth: |
+      VDA 702 V2 §5.3 FB002/FB003 实际含义是 "Fahren auf Gefälle/Hang"
+      (行驶在坡上, >2% / >8%) — 是动作"行驶", 不是"停留".
+      V2 中"停在坡上"对应的 atom 是 PH012 (5-8%), PH013 (8-15%), PH014 (>15%).
+    interpretation: |
+      source HARA 表沿用 V1 的 FV040/FV050 ("Halten an Hang") 语义,
+      升级到 V2 时直接套用 FB002/FB003 编号但保留旧含义.
+      工程上是"停留 × 坡度"的复合 atom (EGO_X_ROAD).
+    action: "在 EGO_X_ROAD 维度按 source 实际语义处理, 同时在 metadata 标注此偏差"
+
+  v2_id_column_contains_v1_ids:
+    observation: |
+      source HARA 表的 "VDA-702-V2.0-ID" 列里大量出现 V1 ID
+      (FB010-FB170, FV010-FV110, FO010-FO120 等).
+    interpretation: |
+      source 是 V1 时代做的, V2 ID 列填充未完成. 该列实际混合了 V1/V2 ID.
+    action: "atom 归属维度时按 ID 语义 (源自哪个版本) 判断, 不依赖列名"
+
+# ═══════════════════════════════════════════════════════════════
+# 5 个顶层维度
+# ═══════════════════════════════════════════════════════════════
+dimensions:
+
+  # ─────────────────────────────────────────────────────────────
+  # 1. WHERE — 静态环境
+  # ─────────────────────────────────────────────────────────────
+  WHERE:
+    cn: 静态环境
+    value_type: enum
+    role_in_hara: [E_base, scope_filter]
+
+    vda_sources:
+      v2_prefix: [VD]                 # [V2-Std §5.2] VD = Verkehrsdomäne (场所)
+      v2_exception_atoms:
+        - VD016                        # [V2-Std §5.3] "Fahren über Kreuzung oder Kreisverkehr"
+                                       # 归在 VD 类别但描述的是过交叉口行为, HARA 工程实践常作动作处理
+                                       # 这里仍按 V2 标准归 WHERE, 但允许 EGO_ACTION 引用
+        - VD013                        # [V2-Std §5.3] "Parken in einer Garage mit direkter Anbindung..."
+                                       # VD 类别下但描述"停车"动作 + "车库"场所的复合, 焦点是场所(中毒风险)
+
+      v1_prefix: [FO]                  # [Src-CN] V1 数据中 FO010-FO120 为场所
+      v1_extra_prefix_used_as_place:
+        - SO                           # [Src-CN] V1 数据中 SO010/020/030 用作 "Parkplatz / Straßenrand" 场所类别, 但 V2 标准里 SO=特殊情况, 不承载场所语义. 这里按 source 用法归 WHERE, 但允许 EGO_ACTION 引用
+
+      v2_exclude_from_where_despite_prefix: []
+                                       # 与原 yaml 不同: PH 不在 v2_prefix 中, 因此无需 exclude
+                                       # PH 全部归 EGO_ACTION (PH = Parken/Halten/Rangieren 是动作类别)
+
+    cn_extensions:                     # [Src-CN+] source 数据中标注 "New item from CN" 的场所
+      - "Bridge"
+      - "On/off ramp of city expressway"
+      - "Expressway"
+      - "Parking in a multi-story car park/garage"
+
+    sub_dimensions:
+      WHERE_MICRO:
+        cn: 静态路型
+        value_type: enum
+        vda_sources:
+          v2_atoms:                    # [V2-Std §5.3]
+            - VD017                    # Baustelle mit baulicher Trennung
+            - VD018                    # Baustelle ohne bauliche Trennung
+          v1_atoms:                    # [Src-CN] V1 数据中对应 atom
+            - FO090
+            - FO100
+        cn_extensions:                 # [Src-CN+]
+          - "sharp curve (curve radius < 500m)"
+          - "curve (curve radius > 500m)"
+          - "elongated curve (curve radius >> 500m)"
+        note: |
+          静态路型 = 路本身的几何/状态, 不是自车动作.
+          大部分场景 WHERE_MICRO=null, 仅 construction site / 弯道时取值.
+          弯道 atom 在 source 中标 "New item from CN", 无 VDA ID, E_freq 多为 tbd.
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. ROAD — 路面情况 / 天气
+  # ─────────────────────────────────────────────────────────────
+  ROAD:
+    cn: 路面情况_天气
+    value_type: composite
+    sub_fields:
+      surface:                         # 摩擦 / 颠簸 / 散落
+        type: enum
+      visibility:                      # 光照 / 雨雪雾
+        type: enum
+      slope:                           # 坡度 (独立子字段, 坡度也是路况)
+        type: range
+        unit: percent
+    role_in_hara: [E_factor, physics_modifier]
+
+    vda_sources:
+      v2_prefix: [FB, WS]              # [V2-Std §5.2]
+      v2_atoms_explicit:
+        slope_pure:                    # [V2-Std §5.3] V2 FB001-003 是"行驶在坡度上", 非"停留"
+          - FB001                      # ≤ 2 % 坡度
+          - FB002                      # > 2 % 坡度 (V2 含义, 注意与 source 用法不同)
+          - FB003                      # > 8 % 坡度 (V2 含义)
+        surface:                       # [V2-Std §5.3]
+          - FB004                      # Splitt (砂石)
+          - FB005                      # normaler Reibwert
+          - FB006                      # µ < 0.8
+          - FB007                      # µ < 0.5 (雪/冰)
+          - FB008                      # µ-Split
+          - FB009                      # µ-Sprung
+          - FB010                      # 垂直振动 
+          - FB011                      # Kopfsteinpflaster
+          - FB012                      # Schienen auf der Fahrbahn
+        visibility_weather:            # [V2-Std §5.3]
+          - WS001                      # Hagel
+          - WS002                      # Schneefall
+          - WS005                      # Regen > 20 l/h/m²
+          - WS006                      # Regen > 25 l/h/m²
+          - WS007                      # Dunkelheit ohne Restlicht
+          - WS008                      # Dunkelheit mit Restlicht
+          - WS009                      # Sichtweite < 150 m
+          - WS010                      # Sichtweite < 50 m
+          - WS011                      # starker Seitenwind
+
+      v2_exclude_from_road:
+        - FB002                        
+        - FB003                        
+
+      v1_atoms:
+        observation: |
+          source HARA 表的 V1 数据中, "路面情况/天气" 维度未出现独立 atom 集.
+          V1 表里 FB 前缀承载的是"行车操作"(动作/速度/加速度), 不是路面状况.
+          V1 时代天气/能见度 atom 在 source markdown 摘录中未出现具体编号.
+        status: ""
+
+    cn_extensions: []                 
+
+    note: |
+      V2 FB 与 V1 FB 是同符号反语义, 不能按前缀直接合并.
+      V2 标准里 FB001-FB003 是"行驶在坡度上"(动作语义), 但 source 用作"停留在坡度上",
+      此情况归 EGO_X_ROAD, 不归 ROAD. 见 known_source_inconsistencies.
+
+  # ─────────────────────────────────────────────────────────────
+  # 3. TRAFFIC_BEHAVIOR — 交通情况 (行为)
+  # ─────────────────────────────────────────────────────────────
+  TRAFFIC_BEHAVIOR:
+    cn: 交通情况_行为
+    value_type: composite
+    role_in_hara: [E_factor]
+
+    sub_dimensions:
+
+      # ─── 3.1 自车动作 ───────────────────────────────────────
+      EGO_ACTION:
+        cn: 自车动作
+        value_type: enum
+
+        vda_sources:
+          v2:
+            by_prefix:
+              FA_action_subset:         # [V2-Std §5.3] FA 前缀中"动作"语义 (非速度/加速度档)
+                - FA005                # Slow driving / starting (0 < v < 12 kph) [复合: 也是动力学]
+                - FA030                # Lane change (normal)
+                - FA031                # Lane change (risky / forced)
+                - FA033                # Reversing (v ≤ 10 kph)
+                - FA034                # Reversing (v > 10 kph)
+                - FA037                # Overtaking with lane change on opposite lane
+                - FA040                # (Left/Right) turn
+                - FA042                # Abbiegen über Gegenfahrbahn bei dichtem Gegenverkehr
+              PH_full:                  # [V2-Std §5.3] PH 类别全部为动作 (Parken/Halten/Rangieren)
+                - PH001                # Ein-/Ausparken mit Anhänger
+                - PH002                # Parken/Halten mit Fahrer im Fahrzeug
+                - PH003                # Parken/Halten: Fahrer nicht im Fahrzeug
+                - PH004                # Parken/Halten: Fahrer nicht im Fzg, Passagiere bleiben
+                - PH005                # Ein-/Ausparken
+                - PH006                # Ein-/Ausparken in Längsrichtung
+                - PH007                # Ein-/Ausparken in Querrichtung
+                - PH008                # Halten: Straßenrand Stadt
+                - PH009                # Parken: Straßenrand Stadt
+                - PH010                # Parken/Halten: Straßenrand Landstraße
+                - PH011                # Parken/Halten: Seitenstreifen Autobahn
+                - PH015                # Verkehrsbedingtes Halten
+                - PH016                # Verkehrsbedingtes Halten mit Vorderfzg + Fußgänger
+                - PH017                # Verkehrsbedingtes Halten an erster Stelle
+              PU_action_subset:         # [V2-Std §5.3] PU 中带"跟车/堵车"动作语义
+                - PU008                # Stau/stockender Verkehr Autobahn+Landstraße
+                - PU009                # Stau in der Stadt
+                - PU015                # Folgefahrt normaler Abstand
+                - PU016                # Folgefahrt geringer Abstand
+            by_id_exception:
+              - VD016                  # [V2-Std §5.3] 过交叉口/环岛, VDA 归 VD 但工程作动作处理
+
+          v1:
+            by_prefix:
+              FV_full:                  # [Src-CN] V1 数据中 FV010-FV110 全部为动作
+                - FV010                # Parking in/out
+                - FV020                # Parking longitudinal
+                - FV030                # Parking transverse
+                - FV060                # Stop (traffic light/sign/crosswalk)
+                - FV070                # Stop, first place
+                - FV080                # Crossing intersection
+                - FV090                # Left turn
+                - FV100                # Free travel
+                - FV110                # Follow normal distance
+            by_id_whitelist:            # [Src-CN] V1 数据中 FB 前缀里的动作 atom (不能按前缀引)
+              - FB040                  # Slow drive (0 < v < 12 kph)
+              - FB150                  # Lane change (normal)
+              - FB160                  # Reversing
+              - FB170                  # Overtaking with oncoming traffic
+            by_id_extra:
+              - FX010                  # [Src-CN] V1 德语版表中出现, "Fahren mit Anhänger"
+              - XP010                  # [Src-CN] V1 对象前缀, 在动作上下文中也出现
+
+        compound_atoms:                 # 占多个子维度的 atom, atom 层用 fills 标
+          FA005:
+            fills: [EGO_ACTION, EGO_DYNAMICS]
+            ego_dynamics: {v_range: [0, 12]}
+          FA033:
+            fills: [EGO_ACTION, EGO_DYNAMICS]
+            ego_dynamics: {direction: reverse, v_max_kph: 10}
+          FA034:
+            fills: [EGO_ACTION, EGO_DYNAMICS]
+            ego_dynamics: {direction: reverse, v_min_kph: 10}
+          PU015:
+            fills: [EGO_ACTION, OBJECT]
+            object: {position: front, type: vehicle, distance: normal}
+          PU016:
+            fills: [EGO_ACTION, OBJECT]
+            object: {position: front, type: vehicle, distance: short}
+          PU008:
+            fills: [EGO_ACTION, TRAFFIC_PATTERN]
+            traffic_pattern: jam_motorway_or_country
+          PU009:
+            fills: [EGO_ACTION, TRAFFIC_PATTERN]
+            traffic_pattern: jam_city
+          FB040:
+            fills: [EGO_ACTION, EGO_DYNAMICS]   # V1 同时是动作和速度档
+            ego_dynamics: {v_range: [0, 12]}
+
+        note: |
+          自车动作的 V2 前缀边界: FA(部分) + PH(全部) + PU(部分) + VD016(例外)
+          自车动作的 V1 前缀边界: FV(全部) + FB(白名单 040/150/160/170) + FX010
+          V1 FB 是杂物筐, 必须按 ID 引入, 严禁按前缀引入.
+
+      # ─── 3.2 自车动作 × 路况 (复合) ─────────────────────────
+      EGO_X_ROAD:
+        cn: 自车动作_停留_×_坡度
+        value_type: enum
+        compound_fills: [EGO_ACTION=holding_or_parking, ROAD.slope=range]
+
+        vda_sources:
+          v2_atoms_as_used_in_source:    # V2 ID
+            atoms: [FB002, FB003]
+            descriptions:
+              FB002: "Stopping on mountain 2-8%"
+              FB003: "Stopping on mountain > 8%"
+            inconsistency_note: "source 沿用 V1 语义, 与 V2 标准 FB002/003=行驶在坡度上 不一致"
+          v2_atoms_in_vda_standard:      # [V2-Std §5.3] V2 中"停在坡上"的真正 atom
+            atoms: [PH012, PH013, PH014]
+            descriptions:
+              PH012: "Parken/Halten: 5 % < Neigung ≤ 8 %"
+              PH013: "Parken/Halten: 8 % < Neigung ≤ 15 %"
+              PH014: "Parken/Halten: 15 % < Neigung"
+            usage_note: "已核实"
+          v1_atoms:                      # [Src-CN]
+            atoms: [FV040, FV050]
+            descriptions:
+              FV040: "Halten an Hang 2-8%"
+              FV050: "Halten an Hang > 8%"
+
+        note: | 
+                已核实
+
+      # ─── 3.3 周围交通模式 ───────────────────────────────────
+      TRAFFIC_PATTERN:
+        cn: 周围交通模式
+        value_type: enum
+        vda_sources: {}                  # 全部为 CN 新增, 无 VDA ID 对应
+
+        cn_extensions:                   # [Src-CN+] source 中实际出现
+          # X-on-highway 复合 (与 WHERE 焊死)
+          - {label: "Traffic jam on expressway",                 fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+          - {label: "Traffic jam on motorway",                   fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+          - {label: "Oncoming traffic on expressway",            fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+          - {label: "Oncoming traffic on motorway",              fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+          - {label: "Reverse traffic on motorway",               fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+          - {label: "Reverse traffic on expressway",             fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+          - {label: "Opposing traffic on motorway/expressway",   fills: [TRAFFIC_PATTERN, WHERE], where: "motorway|expressway"}
+          - {label: "Reverse traffic on motorway/expressway",    fills: [TRAFFIC_PATTERN, WHERE], where: "motorway|expressway"}
+          # 非场所绑定
+          - {label: "Cutting-in traffic",                        fills: [TRAFFIC_PATTERN]}
+          - {label: "high delta speed between neighboring",      fills: [TRAFFIC_PATTERN]}
+
+        soft_vda_relation:
+          - cn_label: "high delta speed between neighboring"
+            v2_atom: FA032                # [V2-Std §5.3] "Schnelles Vorbeifahren an deutlich langsameren Verkehr"
+            relation: "语义接近但不完全等同; source 单一文件标注 FA032, 其他未标. 视为软关联."
+
+        note: |
+          几乎全部 atom 与 WHERE 焊死 (X on motorway / expressway), 必须建绑定 E 表.
+
+  # ─────────────────────────────────────────────────────────────
+  # 4. EGO_DYNAMICS — 动力学
+  # ─────────────────────────────────────────────────────────────
+  EGO_DYNAMICS:
+    cn: 动力学
+    value_type: composite
+    sub_fields:
+      v:     {type: range, unit: kph}
+      a_lon: {type: range, unit: mps2}
+      a_lat: {type: range, unit: mps2}
+      state: {type: enum, values: [ready_to_start, standing, rolling]}
+    role_in_hara: [S_input, C_input]
+
+    vda_sources:
+      v2_atoms:                          # [V2-Std §5.3 + Src-CN]
+        speed:
+          - FA001                        # Drive up to 130 kph
+          - FA002                        # Drive > 130 kph
+          - FA003                        # Drive > 180 kph
+          - FA004                        # Drive > 200 kph
+        accel_lon:
+          - FA006                        # Acceleration normal (a < 2 m/s²)
+          - FA007                        # Acceleration medium (a > 2 m/s²)
+          - FA009                        # Acceleration strong (a > 4 m/s²)
+        accel_lat:                       # [V2-Std §5.3] 标准里有, source HARA 实际不用
+          atoms: [FA027, FA028, FA029]
+          descriptions:
+            FA027: "4 < aY ≤ 6 m/s²"
+            FA028: "6 < aY ≤ 8 m/s²"
+            FA029: "aY > 8 m/s²"
+          status_in_source: "VDA 702 V2 §5.3 定义存在; source HARA 表用 Audi E-Value 替代"
+        decel_during_reverse:            # [V2-Std §5.3]
+          - FA035                        # a ≤ 3 m/s²
+          - FA036                        # a > 3 m/s²
+        compound_with_action:            # 跨维度复合 atom (同时归 EGO_ACTION)
+          - FA005                        # Slow drive (0 < v < 12 kph)
+          - FA033                        # Reverse (v ≤ 10 kph)
+          - FA034                        # Reverse (v > 10 kph)
+
+      v1_atoms:                          # [Src-CN] V1 数据中 FB 前缀承载速度+加速度
+        speed:
+          - FB010                        # Drive (v > 130 kph)   [⚠ 与 V2 FB010=路面振动 完全不同]
+          - FB020                        # Drive (v > 180 kph)
+          - FB030                        # Drive (v > 200 kph)
+        accel_lon:
+          - FB090                        # Acceleration normal (a < 2 m/s²)
+          - FB100                        # Acceleration medium (a > 2 m/s²) [V1 only]
+          - FB110                        # Acceleration strong (a > 4 m/s²)
+        compound_with_action:
+          - FB040                        # Slow drive (v < 12 kph) [复合: 也是动作]
+
+      no_vda_id_in_source:               # [Src-CN] source xlsx 出现但 ID 列为 "-"
+        - "Driving (v < 30 kph)"
+        - "Driving (30 < v < 50 kph)"
+        - "Driving (60 < v < 120 kph)"
+
+    other_sources:
+      audi_e_value:                      # [Audi] source 中标注 "Audi E-Value；MQBEV HARA table" 的实际数据来源
+        decel_lon:
+          - "Deceleration (normal, < 2.44 m/s²)"
+          - "Deceleration (medium, 2.44 - 4 m/s²)"
+          - "Deceleration (strong, 4 - 6.5 m/s²)"
+          - "Deceleration (emergency braking, > 6.5 m/s²)"
+        accel_lat:                       # source HARA 表横向加速度的实际数据来源
+          - "Normal lateral acceleration (ay < 3 m/s²)"
+          - "Increased lateral acceleration (3 ≤ ay < 5 m/s²)"
+          - "High lateral acceleration (5 ≤ ay < 7 m/s²)"
+          - "Very high lateral acceleration (ay > 7 m/s²)"
+        state:
+          - "Vehicle ready to start"
+          - "Vehicle stands"
+
+      vw_rating:                         # [VW] source 中标注 "VW rating" / "VW Abschätzung"
+        rollers:                          # 故障态滑行工况
+          - "Rollers with v_max < 30 kph @ free roll 10-40 m"
+          - "Rollers with v_max > 30 kph @ free roll > 40 m"
+          - "Rollers with v_max > 30 kph @ free roll 10-40 m"
+          - "Rollers with v_max < 15 kph @ free roll 10-40 m"
+
+      rating_others:                     # [Src-CN] 标 "Rating" 但来源不详
+        - "unconfirmed accelerator pedal (push operation) or during push recuperation"
+
+    cn_extensions:                       # [Src-CN+]
+      - "Near cut-in"
+      - "Approaching the end of congestion of expressway"
+      - "Approaching the end of congestion of motorway"
+
+    note: |
+      V1 速度+纵向加速度走 FB 前缀; V2 改走 FA 前缀.
+      横向加速度: V2 标准在 FA027-029, 但 source HARA 实际数据全部走 Audi E-Value.
+      减速度: V2 标准无独立 atom (FA035/036 仅限倒车), source HARA 用 Audi E-Value.
+      Rollers 是 VW 估值, 属"故障态滑行"非常规动力学.
+      Audi/VW 估值条目不映射 VDA ID, 但在 source HARA 表中是主力数据来源.
+
+  # ─────────────────────────────────────────────────────────────
+  # 5. OBJECT — 交通对象
+  # ─────────────────────────────────────────────────────────────
+  OBJECT:
+    cn: 交通对象
+    value_type: composite
+    sub_fields:
+      type:     {type: enum, values: [pedestrian, cyclist, motorcycle, car, truck, static_obstacle]}
+      position: {type: enum, values: [front, rear, left, right, front_side, rear_side]}
+      motion:   {type: enum, values: [static, same_direction, opposite_direction, crossing]}
+      distance: {type: enum, values: [restricted, danger_zone, normal]}
+    role_in_hara: [S_input, S_modifier]
+
+    vda_sources:
+      v2_atoms:                          # [V2-Std §5.3 + Src-CN]
+        - PU001                          # Personen auf dem Fahrzeugdach/Motorhaube
+        - PU002                          # Personen auf der Fahrbahn (exkl. Schnellstraßen)
+        - PU003                          # Personen auf der Fahrbahn einer Schnellstraße
+        - PU004                          # Personen im Gefahrenbereich (< 2 m) um langsam fahrendes Fzg
+        - PU005                          # Personen im Gefahrenbereich (1 Fzg-Länge) eines fahrenden Fzg
+        - PU014                          # Straßenbahn auf der Fahrbahn
+      v1_atoms:                          # [Src-CN]
+        - XP010                          # Persons in danger area (V1 ID)
+
+    no_vda_id_pure:                      # [Src-CN] source 列出但无 VDA ID
+      - "Persons in a vehicle"
+      - "Other road users (e.g. cyclists, pedestrians)"
+      - "Occupants (passenger) of their own vehicle"
+      - "Passenger of their own and other vehicles"
+
+    cn_extensions_compound:              # [Src-CN+] 对象 × 场所 复合, 全部带 E 值
+      - {label: "Pedestrians walking in motorway shoulder",     fills: [OBJECT, WHERE], obj: pedestrian,  motion: walking,       where: motorway}
+      - {label: "Pedestrians walking in expressway shoulder",   fills: [OBJECT, WHERE], obj: pedestrian,  motion: walking,       where: expressway}
+      - {label: "Pedestrians across the motorway",              fills: [OBJECT, WHERE], obj: pedestrian,  motion: crossing,      where: motorway}
+      - {label: "Pedestrians across the expressway",            fills: [OBJECT, WHERE], obj: pedestrian,  motion: crossing,      where: expressway}
+      - {label: "Motorcycles riding on the motorway",           fills: [OBJECT, WHERE], obj: motorcycle,                          where: motorway}
+      - {label: "Motorcycles riding on the expressway",         fills: [OBJECT, WHERE], obj: motorcycle,                          where: expressway}
+      - {label: "Bicycles riding on the motorway",              fills: [OBJECT, WHERE], obj: bicycle,                             where: motorway}
+      - {label: "Bicycles riding on the expressway",            fills: [OBJECT, WHERE], obj: bicycle,                             where: expressway}
+      - {label: "Pedestrian in danger area on motorway",        fills: [OBJECT, WHERE], obj: pedestrian,  distance: danger_zone, where: motorway}
+      - {label: "Pedestrian in danger area on expressway",      fills: [OBJECT, WHERE], obj: pedestrian,  distance: danger_zone, where: expressway}
+
+    note: |
+      CN 新增对象 atom 全部为"对象 × 场所"复合, 必须建绑定 E 表.
+      E 值由复合 atom 直接给定, 不走 min(E_object, E_where).
+      纯对象 atom (PU001-005, PU014, XP010) 才走 min 规则.
+
+# ═══════════════════════════════════════════════════════════════
+# 维度间的依赖图 
+# ═══════════════════════════════════════════════════════════════
+dimension_dependency:
+  primary_anchor: WHERE
+  generation_order: [WHERE, ROAD, EGO_DYNAMICS, EGO_ACTION, TRAFFIC_PATTERN, OBJECT]
+  strong_coupling:
+    - [WHERE, OBJECT]                    # 场景和对象强绑定, 例如"在高速上有行人"是高风险的
+    - [WHERE, TRAFFIC_PATTERN]           # 不同场景下的交通模式差异巨大, 例如高速上堵车和市区里堵车的风险程度不同
+    - [WHERE, EGO_DYNAMICS]              # 场景决定车速范围和加速度范围, 例如高速上车速高、加速度大; 市区里车速低、加速度小
+    - [EGO_ACTION, EGO_DYNAMICS]         # 动作和速度绑定，刹车——>低速; 急加速——>高速
+    - [EGO_ACTION, ROAD]                 # 动作依赖道路，上坡起步——> 坡度
+# ═══════════════════════════════════════════════════════════════
+# 缺值策略
+# ═══════════════════════════════════════════════════════════════
+missing_value_policy:
+  E_freq_marked_as_dash_or_tbd:
+    action: "set null + record e_freq_status"
+    do_not_default_to: [E1, E4]
+  e_v1_v2_mismatch:
+    action: "prefer V2 + audit V1 as historical record"
+  cn_atom_without_e_value:
+    action: "block generation + flag as 'CN atom needs E assessment'"
+  source_id_uses_v1_in_v2_column:
+    action: "treat ID by its semantic version (lookup in prefix_version_changes), not by column label"

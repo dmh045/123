@@ -1,0 +1,27 @@
+version: "1.0"
+source: "ISO 26262 + IEC 61508 + HAZOP guide words"
+
+types:
+  - id: loss
+    description: "完全失效 / 信号丢失 / 功能不可用"
+    guide_word: "no"
+  - id: unintended_activation
+    description: "非预期激活 / 误触发"
+    guide_word: "as_well_as"
+  - id: degraded
+    description: "性能下降但仍工作"
+    guide_word: "less"
+  - id: excessive
+    description: "过度输出"
+    guide_word: "more"
+  - id: delayed
+    description: "延迟（响应慢于设计目标）"
+  - id: stuck
+    description: "卡死 / 状态不更新"
+  - id: oscillation
+    description: "震荡 / 抖动"
+  - id: wrong_value
+    description: "输出错误值（方向反 / 数值偏移）"
+    guide_word: "reverse / other_than"
+  - id: intermittent
+    description: "间歇性失效"

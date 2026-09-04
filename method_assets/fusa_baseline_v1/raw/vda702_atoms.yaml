@@ -1,0 +1,611 @@
+version: "1.0-baseline"
+source: "VDA 702 (2023)"
+# vda702_atoms.yaml
+# Skill 资产 — atom 级数据库
+# 每个 atom 都能溯源到 VDA 702 V2 §5.3 原文 或 source HARA 表
+#
+# Schema 约定:
+#   id     - VDA atom ID (FA001, FB002, ...). CN 新增用 "CN_xxx" 前缀
+#   label  - 短描述
+#   dim    - 归属维度: WHERE | ROAD | EGO_ACTION | EGO_X_ROAD | TRAFFIC_PATTERN | EGO_DYNAMICS | OBJECT
+#            复合 atom 用 "A+B" 形式 (如 EGO_ACTION+EGO_DYNAMICS)
+#   ver    - 语义版本: V1 | V2 | both | non_vda (Audi/VW/CN)
+#   e_t    - E_time (E1-E4 或 null/dash/tbd)
+#   e_f    - E_freq (E1-E4 或 null/dash/tbd)
+#   src    - 来源 tag (见下方 source_tags)
+#   v1 / v2 - 跨版本对应 ID (如果有)
+#
+# 缺值表示:
+#   null  - source 中明确空白
+#   dash  - source 标 "-" / "--" / "[---]" (该维度不适用)
+#   tbd   - source 标 "tbd" (待评估)
+
+schema_version: "1.0"
+
+source_tags:
+  V2-Std:  "VDA 702 V2 (2023-06) §5.3 原文 PDF"
+  Src-CN:  "source HARA 表 (MQB Baseline V1/V2, EHYREEV) 中实际出现"
+  Src-CN+: "source HARA 表标 'New item from CN' 的新增"
+  Audi:    "source 标 'Audi E-Value' / 'Audi E-Werte'"
+  VW:      "source 标 'VW rating' / 'VW Abschätzung'"
+  Rating:  "source 标 'Rating' / 'Estimation' / 'Abschätzung' 来源未明"
+
+e_value_levels:
+  E1: "<1% Fahrzeit oder <1x/Jahr"
+  E2: "1-10% Fahrzeit oder wenige Male/Jahr"
+  E3: "10-100% Fahrzeit oder monatlich"
+  E4: "fast jede Fahrt oder >100x/Jahr"
+
+# ═══════════════════════════════════════════════════════════════
+# atoms — 主清单
+# 按维度分段, 每条都可溯源
+# ═══════════════════════════════════════════════════════════════
+atoms:
+
+  # ─────────────────────────────────────────────────────────────
+  # WHERE — 静态环境
+  # V2 VD 前缀 (来自 VDA 702 V2 §5.3 + source 现状.md 静态环境表)
+  # ─────────────────────────────────────────────────────────────
+  - {id: VD001, label: "Verkehrsberuhigte Zone / Traffic calmed area",        dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: FO070}
+  - {id: VD002, label: "30 kph zone / Residential street",                    dim: WHERE, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: FO080}
+  - {id: VD003, label: "City road / Innerstädtische Straße",                  dim: WHERE, ver: V2, e_t: E4, e_f: E4, src: V2-Std, v1: FO050}
+  - {id: VD004, label: "Arterial thoroughfare / Durchgangsstraße",            dim: WHERE, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: VD005, label: "Rural road / Country road / Landstraße",              dim: WHERE, ver: V2, e_t: E4, e_f: E4, src: V2-Std, v1: FO040}
+  - {id: VD006, label: "Motorway / Schnellstraße / Autobahn",                 dim: WHERE, ver: V2, e_t: E4, e_f: E3, src: V2-Std, v1: FO010}
+  - {id: VD007, label: "Motorway entrance / Autobahnauffahrt",                dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: FO020}
+  - {id: VD008, label: "Motorway exit / Autobahnausfahrt",                    dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: FO030}
+  - {id: VD009, label: "Driving alongside on-/off-ramp (no intent to exit)",  dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: VD010, label: "Lane splits into two on motorway",                    dim: WHERE, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: VD011, label: "Manual toll station",                                 dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: VD012, label: "Driving on hard shoulder opened by dynamic signage",  dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: VD013, label: "Parking in garage with direct link to living area",   dim: WHERE, ver: V2, e_t: E2, e_f: E2, src: V2-Std,
+     note: "VD 类别下但描述'停车 × 车库'复合, 焦点是中毒风险, 仍按场所处理"}
+  - {id: VD014, label: "Tunnel",                                              dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: FO110}
+  - {id: VD015, label: "Pass road / Passstraße",                              dim: WHERE, ver: V2, e_t: E2, e_f: E2, src: V2-Std, v1: FO060}
+  - {id: VD016, label: "Crossing / Roundabout",                               dim: WHERE, ver: V2, e_t: E3, e_f: E4, src: V2-Std,
+     note: "VDA 归 VD 类别, 描述过交叉口动作; HARA 工程实践常作动作处理, 允许 EGO_ACTION 引用"}
+  - {id: VD017, label: "Construction site (motorway) with structural separation",    dim: WHERE, ver: V2, e_t: E3, e_f: E3, src: V2-Std, v1: FO090,
+     cross_version_e_conflict: "V1 FO090 在 source 中 E2/dash, V2 VD017 在 PDF E3/E3"}
+  - {id: VD018, label: "Construction site (motorway) without structural separation", dim: WHERE, ver: V2, e_t: E2, e_f: E1, src: V2-Std, v1: FO100,
+     cross_version_e_conflict: "V1 FO100 在 source 中 E2/dash, V2 VD018 在 PDF E2/E1"}
+  - {id: VD019, label: "Bahnübergang / Railroad crossing",                    dim: WHERE, ver: V2, e_t: E1, e_f: E3, src: V2-Std, v1: FO120}
+  - {id: VD020, label: "Field / forest roads",                                dim: WHERE, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: VD021, label: "Cycle street (Fahrradstraße)",                        dim: WHERE, ver: V2, e_t: E2, e_f: E1, src: V2-Std}
+
+  # ─── V1 FO 前缀 (Src-CN: 现状.md V1 表) ───
+  - {id: FO010, label: "Motorway / Highway (V1)",                             dim: WHERE, ver: V1, e_t: E4, e_f: E3, src: Src-CN, v2: VD006}
+  - {id: FO020, label: "Motorway entrance (V1)",                              dim: WHERE, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: VD007}
+  - {id: FO030, label: "Motorway exit (V1)",                                  dim: WHERE, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: VD008}
+  - {id: FO040, label: "Country road (V1)",                                   dim: WHERE, ver: V1, e_t: E4, e_f: E4, src: Src-CN, v2: VD005}
+  - {id: FO050, label: "City traffic (V1)",                                   dim: WHERE, ver: V1, e_t: E4, e_f: E4, src: Src-CN, v2: VD003}
+  - {id: FO060, label: "Pass road (V1)",                                      dim: WHERE, ver: V1, e_t: E2, e_f: E2, src: Src-CN, v2: VD015}
+  - {id: FO070, label: "Traffic-free / calmed area (V1)",                     dim: WHERE, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: VD001}
+  - {id: FO080, label: "30 kph zone (V1)",                                    dim: WHERE, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: VD002}
+  - {id: FO090, label: "Construction site with structural separation (V1)",   dim: WHERE, ver: V1, e_t: E2, e_f: dash, src: Src-CN, v2: VD017}
+  - {id: FO100, label: "Construction site without structural separation (V1)",dim: WHERE, ver: V1, e_t: E2, e_f: dash, src: Src-CN, v2: VD018}
+  - {id: FO110, label: "Tunnel (V1)",                                         dim: WHERE, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: VD014}
+  - {id: FO120, label: "Railroad crossing (V1)",                              dim: WHERE, ver: V1, e_t: E1, e_f: E3, src: Src-CN, v2: VD019}
+
+  # ─── V1 SO 前缀 (Src-CN: 用作场所; V2 SO 已改义为 Sondersituationen) ───
+  - {id: SO010, label: "Parkplatz / Parkhaus / Garage (V1 usage)",            dim: WHERE, ver: V1, e_t: E4, e_f: E4, src: Src-CN,
+     note: "⚠ V1 数据中作场所; V2 标准 SO 类别 = Sondersituationen, 含义完全不同"}
+  - {id: SO020, label: "Parkplatz / Parkhaus / Garage (V1 usage)",            dim: WHERE, ver: V1, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: SO030, label: "Straßenrand Stadt (V1 usage)",                        dim: WHERE, ver: V1, e_t: E4, e_f: E4, src: Src-CN}
+
+  # ─── CN 扩展 (Src-CN+) ───
+  - {id: CN_on_off_ramp_city_expressway, label: "On/off ramp of city expressway", dim: WHERE, ver: non_vda, e_t: E3, e_f: E4, src: Src-CN+}
+  - {id: CN_expressway,                  label: "Expressway (CN inner city max 60-100 kph)", dim: WHERE, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN+,
+     note: "Inner city roads designed for max 60-100 kph. RHP mainly designed for this"}
+  - {id: CN_bridge,                      label: "Bridge",                          dim: WHERE, ver: non_vda, e_t: E3, e_f: E3, src: Src-CN+}
+  - {id: CN_parking_multistory,          label: "Parking in a multi-story car park/garage", dim: WHERE, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN+,
+     note: "Most vehicles in CN are parked in multi-story car parks"}
+
+  # ─── WHERE_MICRO (静态路型, 弯道) ───
+  - {id: CN_sharp_curve,    label: "Sharp curve (radius < 500m)",      dim: WHERE_MICRO, ver: non_vda, e_t: E2, e_f: tbd, src: Src-CN+}
+  - {id: CN_curve,          label: "Curve (radius > 500m)",            dim: WHERE_MICRO, ver: non_vda, e_t: E3, e_f: tbd, src: Src-CN+}
+  - {id: CN_elongated_curve,label: "Elongated curve (radius >> 500m)", dim: WHERE_MICRO, ver: non_vda, e_t: E4, e_f: tbd, src: Src-CN+}
+
+  # ─────────────────────────────────────────────────────────────
+  # ROAD — 路面情况 / 天气
+  # ─────────────────────────────────────────────────────────────
+  # ─── V2 FB 前缀 (V2-Std: 路面状况; ⚠ 与 V1 FB=动作/速度 完全不同) ───
+  - {id: FB001, label: "Slight slope ≤ 2% (driving on)",               dim: ROAD, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: FB002, label: "Medium slope > 2% (driving on, V2 std)",       dim: ROAD, ver: V2, e_t: E3, e_f: E4, src: V2-Std,
+     inconsistency: "source HARA 表把 FB002 用作'停在坡上 2-8%' (V1 语义), 归 EGO_X_ROAD. V2 标准是'行驶在坡上 >2%'"}
+  - {id: FB003, label: "Strong slope > 8% (driving on, V2 std)",       dim: ROAD, ver: V2, e_t: E2, e_f: E3, src: V2-Std,
+     inconsistency: "source HARA 表把 FB003 用作'停在坡上 >8%' (V1 语义), 归 EGO_X_ROAD"}
+  - {id: FB004, label: "Splitt / gravel",                              dim: ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: FB005, label: "Normal friction coefficient",                  dim: ROAD, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: FB006, label: "Reduced friction (µ < 0.8)",                   dim: ROAD, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: FB007, label: "Low friction (µ < 0.5, snow/ice)",             dim: ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: FB008, label: "µ-split (delta-µ > 0.3 left/right)",           dim: ROAD, ver: V2, e_t: E1, e_f: E2, src: V2-Std}
+  - {id: FB009, label: "µ-jump (longitudinal transition)",             dim: ROAD, ver: V2, e_t: dash, e_f: E3, src: V2-Std}
+  - {id: FB010, label: "Significant vertical excitation (pothole)",    dim: ROAD, ver: V2, e_t: E3, e_f: E3, src: V2-Std,
+     warning: "⚠ V2 含义=路面振动, 与 V1 FB010=Drive v>130kph 完全不同 ID 冲突"}
+  - {id: FB011, label: "Cobblestone road",                             dim: ROAD, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: FB012, label: "Rails on roadway (tram)",                      dim: ROAD, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+
+  # ─── V2 WS 前缀 (V2-Std: 天气/能见度) ───
+  - {id: WS001, label: "Hail (Hagel)",                                 dim: ROAD, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  - {id: WS002, label: "Snowfall (Schneefall)",                        dim: ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: WS005, label: "Heavy rain > 20 l/h/m²",                       dim: ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: WS006, label: "Very heavy rain > 25 l/h/m²",                  dim: ROAD, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  - {id: WS007, label: "Darkness without residual light",              dim: ROAD, ver: V2, e_t: E3, e_f: E2, src: V2-Std}
+  - {id: WS008, label: "Darkness with residual light",                 dim: ROAD, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: WS009, label: "Poor visibility < 150 m",                      dim: ROAD, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: WS010, label: "Poor visibility < 50 m",                       dim: ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: WS011, label: "Strong crosswind (needs counter-steering)",    dim: ROAD, ver: V2, e_t: E1, e_f: E2, src: V2-Std}
+
+  # ─────────────────────────────────────────────────────────────
+  # EGO_ACTION — 自车动作
+  # ─────────────────────────────────────────────────────────────
+  # ─── V2 FA 前缀 (动作子集; 速度/加速度档归 EGO_DYNAMICS) ───
+  - id: FA005
+    label: "Slow driving / starting (0 < v ≤ 15 kph in V2-Std; source HARA: 0<v<12)"
+    dim: EGO_ACTION+EGO_DYNAMICS
+    ver: V2
+    e_t: E3
+    e_f: E4
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, EGO_DYNAMICS], ego_dynamics: {v_range_kph: [0, 15]}}
+    inconsistency: "V2-Std 边界 ≤15 kph; source HARA 写 <12 kph"
+    v1: FB040
+  - {id: FA030, label: "Lane change (normal)",                         dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: FB150}
+  - {id: FA031, label: "Lane change (risky / forced / avoidance)",     dim: EGO_ACTION, ver: V2, e_t: E1, e_f: E2, src: V2-Std}
+  - id: FA033
+    label: "Reversing (v ≤ 10 kph, incl. parking/maneuvering)"
+    dim: EGO_ACTION+EGO_DYNAMICS
+    ver: V2
+    e_t: E2
+    e_f: E4
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, EGO_DYNAMICS], ego_dynamics: {direction: reverse, v_max_kph: 10}}
+    v1: FB160
+  - id: FA034
+    label: "Reversing (v > 10 kph)"
+    dim: EGO_ACTION+EGO_DYNAMICS
+    ver: V2
+    e_t: E1
+    e_f: E2
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, EGO_DYNAMICS], ego_dynamics: {direction: reverse, v_min_kph: 10}}
+  - {id: FA037, label: "Overtaking with lane change on opposite lane (normal dist)", dim: EGO_ACTION, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: FA040, label: "(Left/right) turn (normal distance)",          dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std}
+  - {id: FA042, label: "Turn across oncoming lane in dense traffic",   dim: EGO_ACTION, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+
+  # ─── V2 PH 前缀 (全部为停留/挪车动作) ───
+  - {id: PH001, label: "Parking in/out with trailer",                  dim: EGO_ACTION, ver: V2, e_t: E1, e_f: E2, src: V2-Std}
+  - {id: PH002, label: "Parking/holding with driver in vehicle",       dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std}
+  - {id: PH003, label: "Parking/holding: driver not in vehicle",       dim: EGO_ACTION, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: PH004, label: "Parking/holding: driver out, passengers in",   dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: PH005, label: "Parking in or out",                            dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: FV010}
+  - {id: PH006, label: "Parking in/out longitudinal direction",        dim: EGO_ACTION, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: FV020}
+  - {id: PH007, label: "Parking in/out transverse direction",          dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: FV030}
+  - {id: PH008, label: "Halten: roadside in city",                     dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: PH009, label: "Parking: roadside in city",                    dim: EGO_ACTION, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: PH010, label: "Parking/holding: roadside rural road",         dim: EGO_ACTION, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: PH011, label: "Parking/holding: shoulder of motorway",        dim: EGO_ACTION, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  - {id: PH015, label: "Traffic-induced halt on road",                 dim: EGO_ACTION, ver: V2, e_t: E4, e_f: E4, src: V2-Std, v1: FV060}
+  - {id: PH016, label: "Traffic-induced halt with front vehicle + peds between", dim: EGO_ACTION, ver: V2, e_t: E2, e_f: E3, src: V2-Std}
+  - {id: PH017, label: "Traffic-induced halt at first position",       dim: EGO_ACTION, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: FV070}
+
+  # ─── V2 PU 前缀 (动作子集: 跟车/堵车) ───
+  - id: PU008
+    label: "Traffic jam / Stop&Go on motorway+rural road"
+    dim: EGO_ACTION+TRAFFIC_PATTERN
+    ver: V2
+    e_t: E3
+    e_f: E3
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, TRAFFIC_PATTERN], pattern: jam_motorway_or_rural}
+  - id: PU009
+    label: "Traffic jam in city"
+    dim: EGO_ACTION+TRAFFIC_PATTERN
+    ver: V2
+    e_t: E3
+    e_f: E3
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, TRAFFIC_PATTERN], pattern: jam_city}
+  - id: PU015
+    label: "Following at normal distance (>=1/2 speedometer)"
+    dim: EGO_ACTION+OBJECT
+    ver: V2
+    e_t: E4
+    e_f: E4
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, OBJECT], object: {position: front, type: vehicle, distance: normal}}
+  - id: PU016
+    label: "Following at short distance (<1/2 speedometer)"
+    dim: EGO_ACTION+OBJECT
+    ver: V2
+    e_t: E4
+    e_f: E4
+    src: V2-Std
+    compound: {fills: [EGO_ACTION, OBJECT], object: {position: front, type: vehicle, distance: short}}
+
+  # ─── V1 FV 前缀 (全部动作) ───
+  - {id: FV010, label: "Parking in/out (V1)",                          dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: PH005}
+  - {id: FV020, label: "Parking longitudinal (V1)",                    dim: EGO_ACTION, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: PH006}
+  - {id: FV030, label: "Parking transverse (V1)",                      dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: PH007}
+  - {id: FV060, label: "Stop (light/sign/crosswalk) (V1)",              dim: EGO_ACTION, ver: V1, e_t: E4, e_f: E4, src: Src-CN, v2: PH015}
+  - {id: FV070, label: "Stop first place (V1)",                        dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: PH017}
+  - {id: FV080, label: "Crossing intersection (V1)",                   dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: VD016}
+  - {id: FV090, label: "Left turn normal distance (V1)",               dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: FA040}
+  - {id: FV100, label: "Free travel (V1)",                             dim: EGO_ACTION, ver: V1, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: FV110, label: "Follow normal distance (V1)",                  dim: EGO_ACTION, ver: V1, e_t: E4, e_f: E4, src: Src-CN, v2: PU015}
+
+  # ─── V1 FB 前缀白名单 (动作语义, 同 ID V2 FB 含义完全不同) ───
+  - id: FB040
+    label: "Slow drive (0 < v < 12 kph) (V1)"
+    dim: EGO_ACTION+EGO_DYNAMICS
+    ver: V1
+    e_t: E3
+    e_f: E4
+    src: Src-CN
+    compound: {fills: [EGO_ACTION, EGO_DYNAMICS], ego_dynamics: {v_range_kph: [0, 12]}}
+    v2: FA005
+  - {id: FB150, label: "Lane change normal (V1)",                      dim: EGO_ACTION, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: FA030}
+  - {id: FB160, label: "Reversing incl. maneuvering (V1)",             dim: EGO_ACTION, ver: V1, e_t: E2, e_f: E4, src: Src-CN, v2: FA033}
+  - {id: FB170, label: "Overtaking with oncoming traffic (V1)",        dim: EGO_ACTION, ver: V1, e_t: E2, e_f: E3, src: Src-CN, v2: FA037}
+
+  # ─── V1 其他 (FX, XP) ───
+  - {id: FX010, label: "Driving with trailer (V1)",                    dim: EGO_ACTION, ver: V1, e_t: E2, e_f: E2, src: Src-CN}
+
+  # ─────────────────────────────────────────────────────────────
+  # EGO_X_ROAD — 自车停留 × 坡度 复合
+  # ─────────────────────────────────────────────────────────────
+  # source HARA 表实际用法 (V1 语义套到 V2 ID)
+  - id: FB002_as_used_by_source
+    actual_id: FB002
+    label: "Stopping on mountain 2-8% (source HARA usage)"
+    dim: EGO_X_ROAD
+    ver: V2_id_with_V1_semantics
+    e_t: E3
+    e_f: E4
+    src: Src-CN
+    note: "source HARA 表把 FB002 用作'停在坡上'. V2 标准 FB002='行驶在坡上'. 真正 V2 atom 是 PH012"
+    v1: FV040
+    v2_proper: PH012
+  - id: FB003_as_used_by_source
+    actual_id: FB003
+    label: "Stopping on mountain > 8% (source HARA usage)"
+    dim: EGO_X_ROAD
+    ver: V2_id_with_V1_semantics
+    e_t: E2
+    e_f: E3
+    src: Src-CN
+    v1: FV050
+    v2_proper: PH013_or_PH014
+  # V2 标准 atom (停在坡上的真正 V2 ID)
+  - {id: PH012, label: "Parken/Halten 5% < slope ≤ 8%",                dim: EGO_X_ROAD, ver: V2, e_t: E3, e_f: E3, src: V2-Std}
+  - {id: PH013, label: "Parken/Halten 8% < slope ≤ 15%",               dim: EGO_X_ROAD, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+  - {id: PH014, label: "Parken/Halten slope > 15%",                    dim: EGO_X_ROAD, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  # V1 atom
+  - {id: FV040, label: "Halten an Hang 2-8% (V1)",                     dim: EGO_X_ROAD, ver: V1, e_t: E3, e_f: E3, src: Src-CN}
+  - {id: FV050, label: "Halten an Hang > 8% (V1)",                     dim: EGO_X_ROAD, ver: V1, e_t: E2, e_f: E2, src: Src-CN}
+
+  # ─────────────────────────────────────────────────────────────
+  # TRAFFIC_PATTERN — 周围交通模式 (全部 CN 新增)
+  # ─────────────────────────────────────────────────────────────
+  - id: CN_traffic_jam_expressway
+    label: "Traffic jam on expressway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E4
+    e_f: E4
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+  - id: CN_traffic_jam_motorway
+    label: "Traffic jam on motorway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E3
+    e_f: E3
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+  - id: CN_oncoming_expressway
+    label: "Oncoming traffic on expressway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E2
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+  - id: CN_oncoming_motorway
+    label: "Oncoming traffic on motorway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+  - id: CN_reverse_motorway
+    label: "Reverse traffic on motorway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: motorway}
+  - id: CN_reverse_expressway
+    label: "Reverse traffic on expressway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: expressway}
+  - id: CN_opposing_motorway_or_expressway
+    label: "Opposing traffic on motorway/expressway (e.g. road construction)"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E2
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: "motorway|expressway"}
+  - id: CN_reverse_motorway_or_expressway
+    label: "Reverse traffic on motorway/expressway"
+    dim: TRAFFIC_PATTERN+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [TRAFFIC_PATTERN, WHERE], where: "motorway|expressway"}
+  - {id: CN_cutting_in, label: "Cutting-in traffic",                   dim: TRAFFIC_PATTERN, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN+}
+  - id: CN_high_delta_speed
+    label: "High delta speed between neighboring lanes"
+    dim: TRAFFIC_PATTERN
+    ver: non_vda
+    e_t: E2
+    e_f: null
+    src: Src-CN+
+    soft_vda_relation:
+      v2_atom: FA032
+      v2_label: "Schnelles Vorbeifahren an langsameren Verkehr (passing slower traffic in adjacent lane)"
+      relation: "语义接近但不完全等同; source 单一文件标 FA032, 其他未标"
+
+  # ─────────────────────────────────────────────────────────────
+  # EGO_DYNAMICS — 动力学
+  # ─────────────────────────────────────────────────────────────
+  # ─── V2 FA 速度档 (V2-Std §5.3) ───
+  - {id: FA001, label: "Drive v ≤ 130 kph",                            dim: EGO_DYNAMICS, ver: V2, e_t: E4, e_f: E4, src: V2-Std}
+  - {id: FA002, label: "Drive v > 130 kph",                            dim: EGO_DYNAMICS, ver: V2, e_t: E3, e_f: E3, src: V2-Std, v1: FB010}
+  - {id: FA003, label: "Drive v > 180 kph",                            dim: EGO_DYNAMICS, ver: V2, e_t: E2, e_f: E2, src: V2-Std, v1: FB020}
+  - {id: FA004, label: "Drive v > 200 kph",                            dim: EGO_DYNAMICS, ver: V2, e_t: E1, e_f: E1, src: V2-Std, v1: FB030}
+
+  # ─── V2 FA 纵向加速度 (FA006-FA013, V2-Std §5.3) ───
+  - {id: FA006, label: "Longitudinal accel 0 < aX ≤ 1.5 m/s² (time)",  dim: EGO_DYNAMICS, ver: V2, e_t: E4, e_f: dash, src: V2-Std}
+  - {id: FA007, label: "Longitudinal accel 1.5 < aX ≤ 3 m/s² (time)",  dim: EGO_DYNAMICS, ver: V2, e_t: E3, e_f: dash, src: V2-Std}
+  - {id: FA008, label: "Longitudinal accel 3 < aX ≤ 4 m/s² (time)",    dim: EGO_DYNAMICS, ver: V2, e_t: E2, e_f: dash, src: V2-Std}
+  - {id: FA009, label: "Longitudinal accel aX > 4 m/s² (time)",        dim: EGO_DYNAMICS, ver: V2, e_t: E1, e_f: dash, src: V2-Std}
+  - {id: FA010, label: "Longitudinal accel 0 < aX ≤ 4 m/s² (freq)",    dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E4, src: V2-Std}
+  - {id: FA011, label: "Longitudinal accel 4 < aX ≤ 7 m/s² (freq)",    dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E3, src: V2-Std}
+  - {id: FA012, label: "Longitudinal accel 7 < aX ≤ 10 m/s² (freq)",   dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E2, src: V2-Std}
+  - {id: FA013, label: "Longitudinal accel aX > 10 m/s² (freq)",       dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E1, src: V2-Std}
+
+  # ─── V2 FA 纵向减速度 (FA014-FA021, V2-Std §5.3) ───
+  - {id: FA014, label: "Deceleration 0 < aX ≤ 1.5 m/s² (time)",        dim: EGO_DYNAMICS, ver: V2, e_t: E4, e_f: dash, src: V2-Std}
+  - {id: FA015, label: "Deceleration 1.5 < aX ≤ 3 m/s² (time)",        dim: EGO_DYNAMICS, ver: V2, e_t: E3, e_f: dash, src: V2-Std}
+  - {id: FA016, label: "Deceleration 3 < aX ≤ 4 m/s² (time)",          dim: EGO_DYNAMICS, ver: V2, e_t: E2, e_f: dash, src: V2-Std}
+  - {id: FA017, label: "Deceleration aX > 4 m/s² (time)",              dim: EGO_DYNAMICS, ver: V2, e_t: E1, e_f: dash, src: V2-Std}
+  - {id: FA018, label: "Deceleration 0 < aX ≤ 4 m/s² (freq)",          dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E4, src: V2-Std}
+  - {id: FA019, label: "Deceleration 4 < aX ≤ 6 m/s² (freq)",          dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E3, src: V2-Std}
+  - {id: FA020, label: "Deceleration 6 < aX ≤ 8 m/s² (freq)",          dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E2, src: V2-Std}
+  - {id: FA021, label: "Deceleration aX > 8 m/s² (emergency, freq)",   dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E1, src: V2-Std}
+
+  # ─── V2 FA 横向加速度 (FA022-FA029, V2-Std §5.3) ───
+  - {id: FA022, label: "Lateral accel 0 < aY ≤ 1.5 m/s² (time)",       dim: EGO_DYNAMICS, ver: V2, e_t: E4, e_f: dash, src: V2-Std}
+  - {id: FA023, label: "Lateral accel 1.5 < aY ≤ 3.5 m/s² (time)",     dim: EGO_DYNAMICS, ver: V2, e_t: E3, e_f: dash, src: V2-Std}
+  - {id: FA024, label: "Lateral accel 3.5 < aY ≤ 5 m/s² (time)",       dim: EGO_DYNAMICS, ver: V2, e_t: E2, e_f: dash, src: V2-Std}
+  - {id: FA025, label: "Lateral accel aY > 5 m/s² (time)",             dim: EGO_DYNAMICS, ver: V2, e_t: E1, e_f: dash, src: V2-Std}
+  - {id: FA026, label: "Lateral accel 0 < aY ≤ 4 m/s² (freq)",         dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E4, src: V2-Std}
+  - {id: FA027, label: "Lateral accel 4 < aY ≤ 6 m/s² (freq)",         dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E3, src: V2-Std}
+  - {id: FA028, label: "Lateral accel 6 < aY ≤ 8 m/s² (freq)",         dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E2, src: V2-Std}
+  - {id: FA029, label: "Lateral accel aY > 8 m/s² (freq)",             dim: EGO_DYNAMICS, ver: V2, e_t: dash, e_f: E1, src: V2-Std}
+
+  # ─── V1 FB 速度+加速度 (Src-CN, ⚠ 与 V2 FB 含义完全不同) ───
+  - {id: FB010_v1, actual_id: FB010, label: "Drive v > 130 kph (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E3, e_f: dash, src: Src-CN, v2: FA002,
+     warning: "⚠ V1 含义=速度档, 与 V2 FB010=路面振动 完全不同"}
+  - {id: FB020_v1, actual_id: FB020, label: "Drive v > 180 kph (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E2, e_f: dash, src: Src-CN, v2: FA003}
+  - {id: FB030_v1, actual_id: FB030, label: "Drive v > 200 kph (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E1, e_f: dash, src: Src-CN, v2: FA004}
+  - {id: FB090_v1, actual_id: FB090, label: "Accel normal a < 2 m/s² (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: FB100_v1, actual_id: FB100, label: "Accel medium a > 2 m/s² (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E3, e_f: E4, src: Src-CN}
+  - {id: FB110_v1, actual_id: FB110, label: "Accel strong a > 4 m/s² (V1)",  dim: EGO_DYNAMICS, ver: V1, e_t: E2, e_f: E3, src: Src-CN}
+
+  # ─── source HARA 无 VDA ID 速度档 (Src-CN) ───
+  - {id: CN_drive_lt_30,    label: "Driving (v < 30 kph)",             dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: E4, src: Src-CN}
+  - {id: CN_drive_30_50,    label: "Driving (30 < v < 50 kph)",        dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: CN_drive_60_120,   label: "Driving (60 < v < 120 kph)",       dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN}
+
+  # ─── Audi E-Value (减速度) ───
+  - {id: Audi_decel_normal,    label: "Deceleration normal (< 2.44 m/s²)",         dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: E4, src: Audi}
+  - {id: Audi_decel_medium,    label: "Deceleration medium (2.44 - 4 m/s²)",       dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: E4, src: Audi}
+  - {id: Audi_decel_strong,    label: "Deceleration strong (4 - 6.5 m/s²)",        dim: EGO_DYNAMICS, ver: non_vda, e_t: E2, e_f: E3, src: Audi}
+  - {id: Audi_decel_emergency, label: "Deceleration emergency braking (> 6.5 m/s²)", dim: EGO_DYNAMICS, ver: non_vda, e_t: E1, e_f: E2, src: Audi}
+
+  # ─── Audi E-Value (横向加速度) ───
+  - {id: Audi_lat_normal,    label: "Normal lateral accel (aY < 3 m/s²)",          dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Audi}
+  - {id: Audi_lat_increased, label: "Increased lateral accel (3 ≤ aY < 5 m/s²)",   dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: E4, src: Audi}
+  - {id: Audi_lat_high,      label: "High lateral accel (5 ≤ aY < 7 m/s²)",        dim: EGO_DYNAMICS, ver: non_vda, e_t: E2, e_f: E3, src: Audi}
+  - {id: Audi_lat_very_high, label: "Very high lateral accel (aY > 7 m/s²)",       dim: EGO_DYNAMICS, ver: non_vda, e_t: E1, e_f: E2, src: Audi}
+
+  # ─── Audi E-Value (车辆状态) ───
+  - {id: Audi_state_ready,    label: "Vehicle ready to start",                     dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Audi}
+  - {id: Audi_state_standing, label: "Vehicle stands",                             dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Audi}
+
+  # ─── VW rating (Rollers, 故障态滑行) ───
+  - {id: VW_roller_vlt30_d1040,  label: "Rollers v_max < 30 kph @ free roll 10-40 m",  dim: EGO_DYNAMICS, ver: non_vda, e_t: dash, e_f: E3, src: VW}
+  - {id: VW_roller_vgt30_dgt40,  label: "Rollers v_max > 30 kph @ free roll > 40 m",   dim: EGO_DYNAMICS, ver: non_vda, e_t: dash, e_f: E2, src: VW}
+  - {id: VW_roller_vgt30_d1040,  label: "Rollers v_max > 30 kph @ free roll 10-40 m",  dim: EGO_DYNAMICS, ver: non_vda, e_t: dash, e_f: E2, src: VW}
+  - {id: VW_roller_vlt15_d1040,  label: "Rollers v_max < 15 kph @ free roll 10-40 m",  dim: EGO_DYNAMICS, ver: non_vda, e_t: dash, e_f: E1, src: VW}
+
+  # ─── Rating 类 (来源未明) ───
+  - {id: Rating_unconfirmed_accel_pedal, label: "Unconfirmed accelerator pedal (push operation / push recuperation)",
+     dim: EGO_DYNAMICS, ver: non_vda, e_t: E4, e_f: E4, src: Rating}
+
+  # ─── CN 扩展 (Src-CN+) ───
+  - {id: CN_near_cut_in,           label: "Near cut-in",                           dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: E4, src: Src-CN+}
+  - {id: CN_approach_jam_expressway, label: "Approaching end of congestion (expressway)", dim: EGO_DYNAMICS, ver: non_vda, e_t: E3, e_f: dash, src: Src-CN+}
+  - {id: CN_approach_jam_motorway,   label: "Approaching end of congestion (motorway)",   dim: EGO_DYNAMICS, ver: non_vda, e_t: E2, e_f: dash, src: Src-CN+}
+
+  # ─────────────────────────────────────────────────────────────
+  # OBJECT — 交通对象
+  # ─────────────────────────────────────────────────────────────
+  # ─── V2 PU 前缀 (对象子集; 跟车/堵车在 EGO_ACTION) ───
+  - {id: PU001, label: "Persons on roof / hood",                       dim: OBJECT, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  - {id: PU002, label: "Persons on road (excl. motorway)",             dim: OBJECT, ver: V2, e_t: E3, e_f: E4, src: V2-Std}
+  - {id: PU003, label: "Persons on motorway road surface",             dim: OBJECT, ver: V2, e_t: E1, e_f: E1, src: V2-Std}
+  - {id: PU004, label: "Persons in restricted danger zone (< 2 m) around slow/parked vehicle", dim: OBJECT, ver: V2, e_t: E2, e_f: E3, src: V2-Std, v1: XP010}
+  - {id: PU005, label: "Persons in danger zone (~1 vehicle length) of moving vehicle",         dim: OBJECT, ver: V2, e_t: E3, e_f: E4, src: V2-Std, v1: XP010}
+  - {id: PU014, label: "Tram on roadway",                              dim: OBJECT, ver: V2, e_t: E2, e_f: E2, src: V2-Std}
+
+  # ─── V1 XP 前缀 ───
+  - {id: XP010, label: "Persons in danger area (V1 generic)",          dim: OBJECT, ver: V1, e_t: E3, e_f: E4, src: Src-CN, v2: PU005,
+     note: "V1 一个 ID 覆盖 V2 的 PU004+PU005, 取 PU005 的 E 值 (主流)"}
+
+  # ─── source 无 VDA ID 的纯对象描述 ───
+  - {id: CN_persons_in_vehicle,        label: "Persons in a vehicle",                       dim: OBJECT, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: CN_other_road_users,          label: "Other road users (cyclists, pedestrians)",   dim: OBJECT, ver: non_vda, e_t: E4, e_f: E4, src: Src-CN}
+  - {id: CN_occupants_own,             label: "Occupants (passenger) of own vehicle",       dim: OBJECT, ver: non_vda, e_t: tbd, e_f: tbd, src: Src-CN+}
+  - {id: CN_passengers_own_and_other,  label: "Passenger of own and other vehicles",        dim: OBJECT, ver: non_vda, e_t: tbd, e_f: tbd, src: Src-CN+}
+
+  # ─── CN 复合 atom (对象 × 场所) ───
+  - id: CN_peds_walking_motorway_shoulder
+    label: "Pedestrians walking in motorway shoulder"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E3
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, motion: walking, where: motorway}
+  - id: CN_peds_walking_expressway_shoulder
+    label: "Pedestrians walking in expressway shoulder"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E3
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, motion: walking, where: expressway}
+  - id: CN_peds_across_motorway
+    label: "Pedestrians across the motorway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, motion: crossing, where: motorway}
+  - id: CN_peds_across_expressway
+    label: "Pedestrians across the expressway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, motion: crossing, where: expressway}
+  - id: CN_motorcycles_motorway
+    label: "Motorcycles riding on motorway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E3
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: motorcycle, where: motorway}
+  - id: CN_motorcycles_expressway
+    label: "Motorcycles riding on expressway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E2
+    e_f: E3
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: motorcycle, where: expressway}
+  - id: CN_bicycles_motorway
+    label: "Bicycles riding on motorway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: bicycle, where: motorway}
+  - id: CN_bicycles_expressway
+    label: "Bicycles riding on expressway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E1
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: bicycle, where: expressway}
+  - id: CN_ped_danger_motorway
+    label: "Pedestrian in danger area on motorway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E2
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, distance: danger_zone, where: motorway}
+  - id: CN_ped_danger_expressway
+    label: "Pedestrian in danger area on expressway"
+    dim: OBJECT+WHERE
+    ver: non_vda
+    e_t: E1
+    e_f: E2
+    src: Src-CN+
+    compound: {fills: [OBJECT, WHERE], obj: pedestrian, distance: danger_zone, where: expressway}
+
+# ═══════════════════════════════════════════════════════════════
+# 已知的跨版本 E 值冲突 (Atom 同 ID 不同版本给出不同 E 值)
+# 用于 audit; 不阻塞生成, 但记录留痕
+# ═══════════════════════════════════════════════════════════════
+cross_version_e_conflicts:
+  - atom_pair: [FO090, VD017]
+    v1_e: {t: E2, f: dash}
+    v2_e: {t: E3, f: E3}
+    resolution: "prefer V2 + audit V1 as historical record"
+  - atom_pair: [FO100, VD018]
+    v1_e: {t: E2, f: dash}
+    v2_e: {t: E2, f: E1}
+    resolution: "prefer V2 + audit V1 as historical record"
+
+# ═══════════════════════════════════════════════════════════════
+# 同 ID 跨版本语义冲突 (危险: 同 ID 不同 ver 含义完全不同)
+# 必须在 atom 引用时校验 ver 字段, 不能仅按 ID 取
+# ═══════════════════════════════════════════════════════════════
+critical_id_collisions:
+  - id: FB010
+    v1_meaning: "Drive v > 130 kph (动作/动力学)"
+    v1_dimension: EGO_DYNAMICS
+    v2_meaning: "Significant vertical excitation / pothole (路面状况)"
+    v2_dimension: ROAD
+    note: "完全不同维度. 必须按 ver 字段判断"
+  - id: FB002
+    v1_semantics_in_source: "Stopping on mountain 2-8% (V1 语义被 source 套用)"
+    v1_dimension: EGO_X_ROAD
+    v2_meaning: "Driving on medium slope > 2% (V2-Std 标准)"
+    v2_dimension: ROAD
+    note: "source HARA 表用 V1 语义, V2 标准是不同含义. 看 atom entry 中的 inconsistency 标注"
+  - id: FB003
+    v1_semantics_in_source: "Stopping on mountain > 8%"
+    v1_dimension: EGO_X_ROAD
+    v2_meaning: "Driving on strong slope > 8%"
+    v2_dimension: ROAD
+
+# ═══════════════════════════════════════════════════════════════
+# atom 数量统计 (生成时校验用)
+# ═══════════════════════════════════════════════════════════════
+expected_counts:
+  # PR B：含 fills 口径 — compound atom 在 fills 多个维度都计 1 次。
+  # WHERE_MICRO atoms 已合并到 WHERE 维度（loader _SUB_DIM_MERGE）。
+  by_dimension:
+    WHERE: 61            # VD/FO/SO/CN base + compound fills + WHERE_MICRO 3 条
+    ROAD: 21             # FB x12 + WS x9
+    EGO_ACTION: 40       # FA/PH/PU/FV/FX base + compound fills
+    EGO_X_ROAD: 7        # FB002/003-as-used + PH012-014 + FV040/050
+    TRAFFIC_PATTERN: 12  # CN base + compound fills（含 FA025/FA026 进 TRAFFIC_PATTERN）
+    EGO_DYNAMICS: 59     # FA001-029 + Audi/VW/Rating + V1 FB + CN-extra + compound fills
+    OBJECT: 23           # PU/XP/CN-extensions + compound fills
+  by_source:
+    V2-Std: ~75
+    Src-CN: ~45
+    Src-CN+: ~30
+    Audi: 10
+    VW: 4
+    Rating: 1

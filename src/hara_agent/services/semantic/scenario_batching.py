@@ -6,7 +6,9 @@ from hara_agent.models import MalfunctionCandidate, ScenarioCandidate
 
 from .scenario_contract import RISK_DIMENSION_VALUES
 from .scenario_evidence import (
-    CausalBreakpoint, EvidenceBasisType, FactRegistry, build_fact_registry,
+    CausalBreakpoint, CausalEvidenceSelection, CausalEvidenceSelector,
+    DEFAULT_CAUSAL_EVIDENCE_BUDGET, EvidenceBasisType, FactRegistry,
+    build_fact_registry,
 )
 
 
@@ -38,28 +40,32 @@ def _scenario_json(
     malfunction: MalfunctionCandidate,
     scenario: ScenarioCandidate,
     project_registry: FactRegistry | None = None,
+    causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
 ) -> str:
     registry = build_fact_registry(malfunction, scenario, project_registry)
-    prompt_facts = {
-        key: value for key, value in scenario.facts.items()
-        if not (
-            value is None
-            or (isinstance(value, str) and not value.strip())
-            or (isinstance(value, (list, tuple, dict, set)) and not value)
-            or key.endswith("_source_status")
-            or key in {
-                "engineering_status", "review_reason", "method_scenario_dimensions",
-            }
-        )
-    }
+    selection = CausalEvidenceSelector(
+        max_evidence=causal_evidence_budget,
+    ).select(registry)
+    selected_facts = {}
+    for ref in selection.selected_refs:
+        if ref.startswith("SCN."):
+            key = ref[4:]
+        elif ref.startswith("DERIVED."):
+            key = ref[8:]
+        else:
+            continue
+        if key in scenario.facts and scenario.facts[key] not in (None, ""):
+            selected_facts[key] = scenario.facts[key]
     return json.dumps(
         {
             "scenario_id": scenario.scenario_id,
             "source_scenario_id": scenario.source_scenario_id,
             "atomic_variant": scenario.atomic_variant,
             "semantic_fingerprint": scenario.semantic_fingerprint,
-            "facts": prompt_facts,
-            "fact_registry": registry.to_prompt_dict(),
+            # Compatibility field: this is only the selected causal subset,
+            # never the complete Scenario facts map.
+            "facts": selected_facts,
+            "causal_evidence_view": selection.compact_view,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -78,15 +84,23 @@ def _prompt_parts(
         "Scenarios="
     )
     suffix = (
+        "The causal_evidence_view is a compact selected subset of the complete EvidenceRegistry. "
+        "Use only exact evidence_ref keys shown in that view; full provenance, source excerpts, "
+        "and downstream risk-method metadata are intentionally omitted from this prompt. "
+        "For m_to_b, finalized MF.description and MF.functional_effect are mandatory "
+        "DIRECT_FACT anchors for the malfunction's defined behavior/effect when present. "
+        "Do not treat missing Scenario trigger or applicability context as an M_TO_B failure; "
+        "that context may affect applicability or the downstream B_TO_I transition. "
+        "Never cite MF.vehicle_level_hazard as the m_to_b anchor. "
         "\n这里只评估当前batch列出的Scenario。必须逐一返回，不得遗漏，不得增加未提供Scenario。"
         "返回assessments数组，每项包含scenario_id、physically_feasible、functionally_relevant、"
-        "causally_relevant、breakpoint、causal_chain、risk_dimension_changes、rationale、hazardous_event、potential_harm、"
-        "confidence、status。保留场景的hazardous_event必须结合当前失效和具体场景，potential_harm"
-        "必须描述可能伤害；不得复制其他子系统模板。"
+        "causally_relevant、breakpoint、causal_chain、risk_dimension_changes、rationale、hazardous_event、"
+        "confidence、status。保留场景的hazardous_event必须结合当前失效和具体场景；Potential Harm"
+        "由下游确定性 MethodContract 计算，不在此阶段生成。不得复制其他子系统模板。"
         "risk_dimension_changes必须为JSON object array；每项包含dimension、evidence_refs、reason。"
         "dimension必须严格从以下canonical allowed values选择："
         f"{allowed_dimensions}。无变化返回[]；"
-        f"causal_chain包含m_to_b、b_to_i、i_to_h、h_to_harm；basis_type只能是"
+        f"causal_chain只包含m_to_b、b_to_i、i_to_h；后续潜在伤害由下游确定性计算；basis_type只能是"
         f"{json.dumps([item.value for item in EvidenceBasisType])}；breakpoint只能是"
         f"{json.dumps([item.value for item in CausalBreakpoint])}。"
         "evidence_refs只能逐字引用当前Scenario对象内fact_registry已给出的key；禁止自造ref。"
@@ -101,10 +115,13 @@ def build_scenario_user_prompt(
     malfunction: MalfunctionCandidate,
     scenarios: list[ScenarioCandidate],
     project_registry: FactRegistry | None = None,
+    causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
 ) -> str:
     prefix, suffix = _prompt_parts(malfunction)
     payload = "[" + ",".join(
-        _scenario_json(malfunction, item, project_registry) for item in scenarios
+        _scenario_json(
+            malfunction, item, project_registry, causal_evidence_budget,
+        ) for item in scenarios
     ) + "]"
     return prefix + payload + suffix
 
@@ -115,9 +132,10 @@ def estimate_scenario_prompt_chars(
     *,
     system_prompt: str,
     project_registry: FactRegistry | None = None,
+    causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
 ) -> int:
     return len(system_prompt) + len(build_scenario_user_prompt(
-        malfunction, scenarios, project_registry,
+        malfunction, scenarios, project_registry, causal_evidence_budget,
     ))
 
 
@@ -129,6 +147,7 @@ def build_scenario_batches(
     max_items: int | None = None,
     system_prompt: str = "",
     project_registry: FactRegistry | None = None,
+    causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
 ) -> list[list[ScenarioCandidate]]:
     """Stable prompt-budget batching; every input appears exactly once."""
     if max_chars <= 0:
@@ -141,7 +160,9 @@ def build_scenario_batches(
     current: list[ScenarioCandidate] = []
     current_payload_chars = 0
     for scenario in scenarios:
-        serialized_chars = len(_scenario_json(malfunction, scenario, project_registry))
+        serialized_chars = len(_scenario_json(
+            malfunction, scenario, project_registry, causal_evidence_budget,
+        ))
         single_chars = fixed_chars + serialized_chars
         if single_chars > max_chars:
             raise ScenarioBatchSizeError(
@@ -162,3 +183,15 @@ def build_scenario_batches(
     if current:
         batches.append(current)
     return batches
+
+
+def select_scenario_causal_evidence(
+    malfunction: MalfunctionCandidate,
+    scenario: ScenarioCandidate,
+    project_registry: FactRegistry | None = None,
+    causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
+) -> CausalEvidenceSelection:
+    """Return the same deterministic selection used by prompt serialization."""
+
+    registry = build_fact_registry(malfunction, scenario, project_registry)
+    return CausalEvidenceSelector(max_evidence=causal_evidence_budget).select(registry)

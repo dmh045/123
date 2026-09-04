@@ -209,6 +209,8 @@ class ReleaseGateValidator:
                     incomplete += 1
                 if evidence.status not in self._APPROVED:
                     unapproved += 1
+            if not str(risk.potential_harm).strip():
+                incomplete += 1
         return {
             "assessment_count": len(state.risk_results),
             "incomplete_field_count": incomplete,
@@ -219,7 +221,7 @@ class ReleaseGateValidator:
         goal_by_id = {item.sg_id: item for item in state.safety_goals}
         missing_links = 0
         for risk in state.risk_results:
-            if risk.asil.value not in {"QM", "NA", "N/A", ""}:
+            if risk.asil.value in {"A", "B", "C", "D"}:
                 if not risk.safety_goal_id or risk.safety_goal_id not in goal_by_id:
                     missing_links += 1
         invalid = sum(

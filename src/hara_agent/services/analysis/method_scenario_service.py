@@ -15,6 +15,9 @@ from hara_agent.models import (
     SourceRef,
 )
 from hara_agent.services.analysis.project_fact_resolver import SpeedResolutionResult
+from hara_agent.services.analysis.scenario_constraint_service import (
+    ScenarioConstraintExecutor, ScenarioConstraintStatus,
+)
 from .method_risk_fact_service import MethodRiskFactBindingService
 from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
 
@@ -25,6 +28,7 @@ class MethodScenarioCandidateService:
     def __init__(self, method: MethodContract):
         self.method = method
         self.risk_facts = MethodRiskFactBindingService(method)
+        self.constraints = ScenarioConstraintExecutor()
 
     @staticmethod
     def _normalize(value: str) -> str:
@@ -101,7 +105,22 @@ class MethodScenarioCandidateService:
         speed: SpeedResolutionResult,
     ) -> list[dict[str, str]]:
         name = dimension.canonical_name
-        if name == "OPERATING_SCENARIO":
+        if dimension.semantics == "VDA702_ATOM_ID_LABEL":
+            if name == "WHERE":
+                values = self._unique([
+                    *facts.odd_locations, *facts.odd_road_types,
+                ])
+            elif name == "ROAD":
+                values = self._unique([
+                    *facts.odd_weather_conditions, *facts.odd_road_surfaces,
+                ])
+            elif name == "EGO_ACTION":
+                values = self._unique([operating_mode])
+            elif name == "EGO_DYNAMICS":
+                return [self._speed_binding(dimension, speed.resolved_value)]
+            else:
+                values = []
+        elif name == "OPERATING_SCENARIO":
             values = self._unique(facts.odd_locations or facts.odd_road_types)
         elif name == "VEHICLE_STATE":
             values = self._unique([operating_mode])
@@ -164,6 +183,9 @@ class MethodScenarioCandidateService:
         candidates: list[ScenarioCandidate] = []
         risk_fact_audits: list[dict[str, Any]] = []
         unresolved_count = 0
+        dropped_constraint_count = 0
+        rare_constraint_count = 0
+        conflicting_constraint_count = 0
         project_sources = list(project_facts.sources)
         speed_sources = list(speed_resolution.source_refs)
         for dimension_values in product(*options):
@@ -171,6 +193,16 @@ class MethodScenarioCandidateService:
                 dimension.canonical_name: value
                 for dimension, value in zip(dimensions, dimension_values)
             }
+            constraint_evaluation = self.constraints.evaluate(
+                bindings, self.method.scenario_model.constraint_rules,
+            )
+            if constraint_evaluation.status is ScenarioConstraintStatus.DROP:
+                dropped_constraint_count += 1
+                continue
+            if constraint_evaluation.status is ScenarioConstraintStatus.KEEP_RARE:
+                rare_constraint_count += 1
+            if constraint_evaluation.status is ScenarioConstraintStatus.CONFLICT:
+                conflicting_constraint_count += 1
             unresolved = [
                 name for name, value in bindings.items()
                 if value["binding_status"] != "EXACT"
@@ -181,21 +213,80 @@ class MethodScenarioCandidateService:
                 "operating_mode": operating_mode,
                 "ego_speed_kph": speed_resolution.resolved_value,
             }
+            if self.method.scenario_model.source_type == "YAML_BASELINE_SCENARIO_ONTOLOGY":
+                facts["scenario_atom_ids"] = [
+                    str(value.get("method_value", "")).split("|", 1)[0].strip()
+                    for value in bindings.values()
+                    if value.get("binding_status") == "EXACT"
+                    and "|" in str(value.get("method_value", ""))
+                ]
+            exposure_context = []
+            structured = self.method.structured_risk_method
+            if structured is not None and "scenario_atom_ids" in facts:
+                selected_atoms = set(facts["scenario_atom_ids"])
+                coupling = [
+                    list(pair) for pair in structured.exposure.strong_couplings
+                    if any(atom_id in selected_atoms for atom_id in pair)
+                ]
+                for atom in structured.exposure.atoms:
+                    if atom.atom_id not in selected_atoms:
+                        continue
+                    exposure_context.append({
+                        "atom_id": atom.atom_id,
+                        "dimension": list(atom.dimensions),
+                        "e_z": atom.duration_level,
+                        "e_f": atom.frequency_level,
+                        "source_rule_id": atom.source_ref.range,
+                        "coupling": coupling,
+                        "method_source_hash": str(
+                            structured.method_source_hash
+                            or self.method.metadata.get("template_hash", "")
+                        ),
+                    })
+            if structured is None:
+                # Template mode has no VDA atom catalog, but compiled
+                # situation mappings can still carry equivalent Z/F context.
+                for dimension_name, binding in bindings.items():
+                    value = str(
+                        binding.get("method_value") or binding.get("project_value") or ""
+                    ).strip()
+                    if not value:
+                        continue
+                    matches = [
+                        entry for entry in self.method.exposure.situation_mappings
+                        if entry.entry_id in value or entry.description in value
+                    ]
+                    if len(matches) == 1:
+                        entry = matches[0]
+                        exposure_context.append({
+                            "atom_id": entry.entry_id,
+                            "dimension": [dimension_name],
+                            "e_z": entry.duration_rating,
+                            "e_f": entry.frequency_rating,
+                            "source_rule_id": entry.entry_id,
+                            "coupling": [],
+                            "method_source_hash": str(self.method.metadata.get("template_hash", "")),
+                        })
             canonical_keys = {
                 "OPERATING_SCENARIO": "operating_scenario",
                 "VEHICLE_STATE": "vehicle_state",
                 "WEATHER": "weather_conditions",
                 "ROAD_SURFACE": "road_surface_conditions",
+                "WHERE": "operating_scenario",
+                "EGO_ACTION": "vehicle_state",
+                "ROAD": "road_surface_conditions",
             }
             for dimension_name, key in canonical_keys.items():
                 binding = bindings.get(dimension_name, {})
                 facts[key] = binding.get("method_value") or binding.get("project_value", "")
             fact_provenance: dict[str, Any] = {}
             for dimension_name, key in canonical_keys.items():
-                dimension = next(
+                dimension = next((
                     item for item in dimensions
                     if item.canonical_name == dimension_name
-                )
+                ), None)
+                if dimension is None:
+                    continue
                 method_source = SourceRef(
                     "method_contract",
                     str(self.method.metadata["template_hash"]),
@@ -229,6 +320,21 @@ class MethodScenarioCandidateService:
                 speed_resolution.approval,
                 speed_sources,
             )
+            method_sources = [
+                SourceRef(
+                    "method_contract",
+                    str(self.method.metadata["template_hash"]),
+                    f"{item.source_ref.sheet}!{item.source_ref.range}",
+                    item.source_ref.raw_text,
+                )
+                for item in dimensions
+            ]
+            if "scenario_atom_ids" in facts:
+                fact_provenance["scenario_atom_ids"] = self._fact_metadata(
+                    FactProvenance.DERIVED,
+                    ReviewStatus.FINALIZED if facts["scenario_atom_ids"] else ReviewStatus.PENDING,
+                    method_sources,
+                )
             material = {
                 "contract": SCENARIO_CONTRACT_VERSION,
                 "template_hash": self.method.metadata["template_hash"],
@@ -254,15 +360,6 @@ class MethodScenarioCandidateService:
                 and speed_resolution.approval is ReviewStatus.FINALIZED
                 and bool(project_sources)
             )
-            method_sources = [
-                SourceRef(
-                    "method_contract",
-                    str(self.method.metadata["template_hash"]),
-                    f"{item.source_ref.sheet}!{item.source_ref.range}",
-                    item.source_ref.raw_text,
-                )
-                for item in dimensions
-            ]
             fact_provenance["operating_mode"] = self._fact_metadata(
                 FactProvenance.PROJECT_INPUT,
                 (
@@ -288,6 +385,20 @@ class MethodScenarioCandidateService:
                     "ego_speed_kph": speed_resolution.to_dict(),
                     "dimension_bindings": bindings,
                     "risk_fact_binding": risk_binding.audit,
+                    "dimension_compatibility": {
+                        "status": constraint_evaluation.status.value,
+                        "reason": constraint_evaluation.reason,
+                        "matched_rule_ids": list(
+                            constraint_evaluation.matched_rule_ids
+                        ),
+                    },
+                    "function_phase_binding": {
+                        "status": "UNRESOLVED_NO_COMPILED_BINDING",
+                        "reason": (
+                            "The global candidate is not yet bound to a function-specific "
+                            "operating phase; per-pair functional relevance remains downstream."
+                        ),
+                    },
                 },
                 fact_provenance=fact_provenance,
                 status=(ReviewStatus.FINALIZED if finalized else ReviewStatus.PENDING),
@@ -304,14 +415,26 @@ class MethodScenarioCandidateService:
                 atomic_variant="method_dimensions",
                 semantic_fingerprint=fingerprint,
                 scenario_contract_version=SCENARIO_CONTRACT_VERSION,
+                exposure_context=exposure_context,
             ))
         return candidates, {
             "candidate_count": len(candidates),
             "atomic_candidate_count": len(candidates),
-            "combination_strategy": "method_dimensions_constrained_by_project_facts",
+            "combination_strategy": (
+                "cartesian_project_fact_bindings_then_compiled_constraints"
+            ),
+            "dimension_compatibility_status": (
+                "COMPILED_CONSTRAINTS"
+                if self.method.scenario_model.constraint_rules
+                else "UNRESOLVED_NO_COMPILED_RULES"
+            ),
+            "function_phase_binding_status": "UNRESOLVED_NO_COMPILED_BINDING",
             "template_hash": self.method.metadata["template_hash"],
             "scenario_dimension_count": len(dimensions),
             "unresolved_binding_candidate_count": unresolved_count,
+            "dropped_by_constraint_count": dropped_constraint_count,
+            "rare_but_feasible_count": rare_constraint_count,
+            "constraint_conflict_count": conflicting_constraint_count,
             "ego_speed_kph": speed_resolution.resolved_value,
             "operating_mode": operating_mode,
             "speed_source_status": speed_resolution.resolution_status.value,

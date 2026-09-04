@@ -1,0 +1,71 @@
+version: "1.0"
+source: "VDA 702 + 物理常识 + ISO 26262 工程经验"
+purpose: "LLM fewshot：判断 atom 组合是否物理 / 现实可行"
+
+# 仅供 LLM 参考。feasibility_resolver 单层全 LLM。
+#
+# 定义：
+#   infeasible — 物理 / 法规 / 语义上完全不可能的组合，必须剪掉
+#   feasible   — 现实里能成立的组合（包括稀有但存在），不剪掉，
+#                稀有度由 exposure_evaluator 通过 E1/E2 体现
+#
+# 反例原则（重要）：罕见 ≠ infeasible。极端罕见但物理可能的组合（高速行人 / 高速拥堵）
+# 必须标 feasible；让 exposure 的 E1 档承载稀有度，不在剪枝层提前剪掉。
+
+examples:
+  # ── 物理不可行（速度 × 场所） ──────────────────────────────────────
+  - atoms: [VD_parking_lot, FA002_v_gt_130]
+    feasibility: infeasible
+    reason: "停车场的物理布局（车位间距、出入口宽度）使 130 km/h 行驶不可能；非稀有，而是不可达"
+
+  - atoms: [VD001_traffic_calmed, FA003_v_100_130]
+    feasibility: infeasible
+    reason: "Traffic-calmed area 限速 ≤30 km/h，100-130 km/h 超出道路物理 / 法规上限"
+
+  # ── 法规 + 物理不可行（动作 × 场所） ───────────────────────────────
+  - atoms: [VD006_motorway, FA033_reverse]
+    feasibility: infeasible
+    reason: "高速公路上倒车在法规和物理上不可行（中间无掉头口，逆向行驶违法且致命）"
+
+  - atoms: [VD_parking_lot, FA050_highway_overtake]
+    feasibility: infeasible
+    reason: "停车场内无相邻车道，超车动作物理不可能"
+
+  # ── 语义冲突 / 互斥 ──────────────────────────────────────────────
+  - atoms: [VD003_city, PU003_pedestrian_motorway]
+    feasibility: infeasible
+    reason: "城市道路场所 atom 与'高速行人'对象 atom 在 VDA 702 语义上互斥（PU003 仅适用于 motorway）"
+
+  - atoms: [VD006_motorway, WS_indoor_garage]
+    feasibility: infeasible
+    reason: "户外高速场所与室内车库照明 atom 互斥"
+
+  - atoms: [FA031_park_in, VD003_city]
+    feasibility: infeasible
+    reason: "Parking-in 动作必须发生在停车场/车位，城市道路主干道无可泊车位（边界 case：路边平行泊位另开 atom 处理）"
+
+  # ── 边界 case：稀有但仍可行（关键反例） ──────────────────────────
+  - atoms: [VD006_motorway, FA005_v_le_15]
+    feasibility: feasible
+    reason: "高速路低速（拥堵 / 事故 / 应急车道）虽稀有但现实存在；E 值在 E1 档体现稀有度，不在剪枝层剪"
+
+  - atoms: [VD006_motorway, PU002_pedestrian]
+    feasibility: feasible
+    reason: "高速上行人极稀有（VDA 702 PU003 标 E1），但现实存在（事故 / 抛锚 / 道路维护）；剪枝层放行，exposure E1 体现稀有"
+
+  - atoms: [VD003_city, WS_heavy_snow]
+    feasibility: feasible
+    reason: "城市道路 + 大雪虽地域受限（仅冬季北方城市），但属于 ODD 内合法工况；不应在 feasibility 层剪掉"
+
+  # ── ODD 内的常规可行 ───────────────────────────────────────────
+  - atoms: [VD_parking_lot, FA005_v_le_15, PU004_person_in_danger_zone]
+    feasibility: feasible
+    reason: "AVP 场景典型组合（低速 + 危险区行人）"
+
+  - atoms: [VD003_city, FA010_lane_keep, PU005_cyclist]
+    feasibility: feasible
+    reason: "城市道路车道保持遇骑行者是常规可行组合"
+
+  - atoms: [VD002_residential, FA005_v_le_15, PU002_pedestrian]
+    feasibility: feasible
+    reason: "居民区低速行驶遇行人是高频可行组合（VDA 702 PU002 在 VD002 下 E_t=E4）"

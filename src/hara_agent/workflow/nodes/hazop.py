@@ -2,28 +2,44 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+from hara_agent.contracts import Guideword
 from hara_agent.models import FunctionDefinition
 from hara_agent.services.semantic import GuidewordApplicabilityAgent
 from hara_agent.workflow.state import HARAState, WorkflowStage
+from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
 from .parallel import ordered_parallel_map
 
 
 def assess_guidewords(state: HARAState, agent: GuidewordApplicabilityAgent,
-                      functions: list[FunctionDefinition], guidewords: list[str],
+                      functions: list[FunctionDefinition],
+                      guidewords: list[str | Guideword],
                       max_workers: int = 1,
-                      progress=None) -> HARAState:
+                      progress=None,
+                      review_artifact_writer: ReviewArtifactWriter | None = None) -> HARAState:
     assessments = []
+
+    def record_result(_function, result) -> None:
+        if review_artifact_writer is None:
+            return
+        items, _audit = result
+        for assessment in items:
+            review_artifact_writer.record_guideword_assessment(assessment)
+
     batches = ordered_parallel_map(
         functions,
         lambda function: agent.assess(function, guidewords),
         max_workers=max_workers,
         on_progress=(lambda done, total: progress("guideword", done, total)) if progress else None,
+        on_result=record_result,
     )
     for items, audit in batches:
         assessments.extend(items)
         state.record("guideword_applicability_assessed", **audit)
-    state.malfunctions = [{"guideword_assessment": asdict(item)} for item in assessments]
+    state.guideword_assessments = [asdict(item) for item in assessments]
+    # HAZOP applicability is its own durable artifact.  Do not overload the
+    # downstream Malfunction collection or lose negative decisions later.
+    state.malfunctions = []
     incomplete_count = sum(not item.is_semantically_complete for item in assessments)
     review_pending_count = sum(
         item.status.value == "PENDING" and item.is_semantically_complete
@@ -53,5 +69,38 @@ def assess_guidewords(state: HARAState, agent: GuidewordApplicabilityAgent,
             function_count=len(blanket_function_ids),
             action="continue_to_malfunction_and_causal_filters",
         )
+    near_blanket_function_ids = [
+        str(audit.get("function_id", ""))
+        for _, audit in batches
+        if audit.get("near_blanket_applicability") is True
+    ]
+    if near_blanket_function_ids:
+        state.record(
+            "guideword_high_applicability_reviewed",
+            function_ids=near_blanket_function_ids,
+            function_count=len(near_blanket_function_ids),
+            review_mode="same_request_self_check_plus_deterministic_audit",
+            additional_llm_calls=0,
+        )
+
+    guideword_names = [
+        value.name if isinstance(value, Guideword) else str(value).strip()
+        for value in guidewords
+    ]
+    applicable_names = {
+        item.guideword
+        for item in assessments
+        if item.applicable
+        and item.is_semantically_complete
+        and item.status.value == "FINALIZED"
+    }
+    unmatched = [name for name in guideword_names if name not in applicable_names]
+    state.record(
+        "guideword_global_coverage_audited",
+        guideword_count=len(guideword_names),
+        matched_count=len(guideword_names) - len(unmatched),
+        unmatched_guidewords=unmatched,
+        action="audit_only_no_forced_match",
+    )
     state.stage = WorkflowStage.HAZOP
     return state

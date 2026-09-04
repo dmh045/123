@@ -33,6 +33,7 @@ setup(
         "openpyxl>=3.0.0",
         "PyPDF2>=2.0.0",
         "python-docx>=0.8.11",
+        "PyYAML>=6.0",
     ],
     extras_require={
         "dev": [

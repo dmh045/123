@@ -4,11 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from hara_agent.contracts import RequiredFactSpec
+from hara_agent.contracts import Guideword, MethodContract, RequiredFactSpec
 from hara_agent.infrastructure.llm import LLMClient
 from hara_agent.models import (
     FunctionDefinition,
     GuidewordAssessment,
+    GuidewordDisposition,
     MalfunctionCandidate,
     ReviewStatus,
     ScenarioCandidate,
@@ -48,12 +49,13 @@ from .nodes import (
     score_structured_scenarios,
 )
 from .state import HARAState, WorkflowStage
+from .review_artifacts import ReviewArtifactWriter
 
 
 @dataclass(frozen=True)
 class SemanticWorkflowInputs:
     item_path: str | Path
-    guidewords: list[str]
+    guidewords: list[str | Guideword]
     scenario_candidates: list[ScenarioCandidate] = field(default_factory=list)
     scenario_candidate_factory: Callable[[HARAState], tuple[list[ScenarioCandidate], dict]] | None = None
     project_context_preflight: Callable[[HARAState], dict] | None = None
@@ -63,6 +65,8 @@ class SemanticWorkflowInputs:
     artifact_cache: ValidatedArtifactCache | None = None
     required_fact_specs: tuple[RequiredFactSpec, ...] = ()
     requested_operating_modes: tuple[str, ...] = ()
+    method_contract: MethodContract | None = None
+    review_artifact_writer: ReviewArtifactWriter | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +108,24 @@ def _assessment(value: dict) -> GuidewordAssessment:
     payload = dict(value)
     payload["sources"] = _sources(payload.get("sources", []))
     payload["status"] = ReviewStatus(payload.get("status", ReviewStatus.PENDING.value))
+    raw_disposition = payload.get("disposition")
+    payload["disposition"] = (
+        GuidewordDisposition(raw_disposition) if raw_disposition else None
+    )
     return GuidewordAssessment(**payload)
+
+
+def _guideword_assessment_values(state: HARAState) -> list[dict]:
+    if state.guideword_assessments:
+        return state.guideword_assessments
+    # Backward compatibility for checkpoints written before the dedicated
+    # matrix field existed.  New runs never overload malfunctions this way.
+    return [
+        value["guideword_assessment"]
+        for value in state.malfunctions
+        if isinstance(value, dict)
+        and isinstance(value.get("guideword_assessment"), dict)
+    ]
 
 
 def _malfunction(value: dict) -> MalfunctionCandidate:
@@ -116,9 +137,21 @@ def _malfunction(value: dict) -> MalfunctionCandidate:
 
 def _scenario_candidates(state: HARAState, inputs: SemanticWorkflowInputs) -> list[ScenarioCandidate]:
     if inputs.scenario_candidate_factory is None:
-        return inputs.scenario_candidates
-    candidates, audit = inputs.scenario_candidate_factory(state)
-    state.record("scenario_candidates_prepared", **audit)
+        candidates, audit = inputs.scenario_candidates, {}
+    else:
+        candidates, audit = inputs.scenario_candidate_factory(state)
+    if inputs.review_artifact_writer is not None:
+        for candidate in candidates:
+            inputs.review_artifact_writer.record_scenario_candidate(
+                candidate,
+                generated_for_malfunction_ids=[
+                    str(item.get("malfunction_id", ""))
+                    for item in state.malfunctions
+                    if item.get("malfunction_id")
+                ],
+            )
+    if audit:
+        state.record("scenario_candidates_prepared", **audit)
     return candidates
 
 
@@ -137,6 +170,7 @@ def _assess_guidewords_after_project_context_preflight(
         inputs.guidewords,
         max_workers=inputs.max_workers,
         progress=inputs.progress,
+        review_artifact_writer=inputs.review_artifact_writer,
     )
 
 
@@ -146,7 +180,11 @@ def build_semantic_frontend_graph(
     checkpoint_repository: CheckpointRepository | None = None,
 ) -> WorkflowGraph:
     """Compose the reusable evidence-extraction and scenario-selection slice."""
-    graph = WorkflowGraph(checkpoint_repository, progress=inputs.stage_progress)
+    graph = WorkflowGraph(
+        checkpoint_repository,
+        progress=inputs.stage_progress,
+        review_artifact_writer=inputs.review_artifact_writer,
+    )
     graph.add_node(
         WorkflowStage.INITIALIZE,
         lambda state: read_item_document(state, str(inputs.item_path)),
@@ -166,6 +204,7 @@ def build_semantic_frontend_graph(
             cache=inputs.artifact_cache,
             required_fact_specs=inputs.required_fact_specs,
             requested_operating_modes=inputs.requested_operating_modes,
+            review_artifact_writer=inputs.review_artifact_writer,
         ),
     )
     graph.add_node(
@@ -180,9 +219,10 @@ def build_semantic_frontend_graph(
             state,
             agents.malfunctions,
             [_function(value) for value in state.functions],
-            [_assessment(value["guideword_assessment"]) for value in state.malfunctions],
+            [_assessment(value) for value in _guideword_assessment_values(state)],
             max_workers=inputs.max_workers,
             progress=inputs.progress,
+            review_artifact_writer=inputs.review_artifact_writer,
         ),
     )
     graph.add_node(
@@ -196,6 +236,12 @@ def build_semantic_frontend_graph(
             progress=inputs.progress,
             risk_fact_agent=agents.risk_facts,
             required_fact_specs=inputs.required_fact_specs,
+            method=inputs.method_contract,
+            checkpoint=(
+                checkpoint_repository.save
+                if checkpoint_repository is not None else None
+            ),
+            review_artifact_writer=inputs.review_artifact_writer,
         ),
     )
     return graph
