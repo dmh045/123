@@ -150,6 +150,9 @@ def _scenario_candidates(state: HARAState, inputs: SemanticWorkflowInputs) -> li
                     if item.get("malfunction_id")
                 ],
             )
+        # This factory is evaluated inside the long-running Scenario node.
+        # Refresh now instead of waiting for every feasibility worker.
+        inputs.review_artifact_writer.write_summary(state)
     if audit:
         state.record("scenario_candidates_prepared", **audit)
     return candidates

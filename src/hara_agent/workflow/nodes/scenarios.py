@@ -109,6 +109,24 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         state.item_definition["scenario_assessment_batches"] = cache
     batch_by_malfunction: dict[str, tuple[list, dict]] = {}
     pending_malfunctions = []
+
+    def persist_review_batch(malfunction, result) -> None:
+        """Persist one canonical malfunction result before other workers finish."""
+
+        if review_artifact_writer is None:
+            return
+        batch_assessments, audit = result
+        for assessment in batch_assessments:
+            review_artifact_writer.record_scenario_feasibility(
+                assessment,
+                function_id=malfunction.function_id,
+                guideword=malfunction.guideword,
+                audit=audit,
+            )
+        # Counts are rebuilt from successfully appended JSONL records, not
+        # workflow-local progress, so review remains correct after failure.
+        review_artifact_writer.write_summary(state)
+
     for malfunction in malfunctions:
         cache_key = _scenario_batch_cache_key(agent, malfunction, candidates)
         restored = _load_cached_scenario_batch(
@@ -121,6 +139,7 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
             pending_malfunctions.append(malfunction)
         else:
             batch_by_malfunction[malfunction.malfunction_id] = restored
+            persist_review_batch(malfunction, restored)
     cached_count = len(batch_by_malfunction)
     if cached_count:
         print(
@@ -133,6 +152,10 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
 
     def save_batch(malfunction, result) -> None:
         batch_assessments, audit = result
+        # ordered_parallel_map calls on_result for every completed worker
+        # before waiting for the remaining workers.  This preserves prior
+        # completed malfunction projections if a later provider call fails.
+        persist_review_batch(malfunction, result)
         cache_key = _scenario_batch_cache_key(agent, malfunction, candidates)
         cache[malfunction.malfunction_id] = {
             "cache_version": SCENARIO_BATCH_CHECKPOINT_VERSION,
@@ -173,18 +196,6 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
     audits = []
     for items, audit in batches:
         assessments.extend(items)
-        if review_artifact_writer is not None:
-            malfunction_by_id = {
-                item.malfunction_id: item for item in malfunctions
-            }
-            for assessment in items:
-                malfunction = malfunction_by_id.get(assessment.malfunction_id)
-                review_artifact_writer.record_scenario_feasibility(
-                    assessment,
-                    function_id=malfunction.function_id if malfunction else "",
-                    guideword=malfunction.guideword if malfunction else "",
-                    audit=audit,
-                )
         audits.append(audit)
         state.record("scenario_feasibility_assessed", **audit)
     retained_ids = {

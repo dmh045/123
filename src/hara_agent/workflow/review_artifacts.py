@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,17 @@ _IDENTITY_FIELDS = {
     "scenario_candidate": ("scenario_id",),
     "scenario_feasibility": ("malfunction_id", "scenario_id"),
 }
+_SCENARIO_FACT_KEYS = (
+    "operating_scenario", "operating_mode", "ego_speed_kph",
+    "weather_conditions", "road_surface_conditions", "vehicle_state",
+    "object", "object_type", "WHERE", "ROAD", "EGO_ACTION",
+    "EGO_X_ROAD", "TRAFFIC_PATTERN", "EGO_DYNAMICS", "OBJECT",
+    "method_scenario_dimensions", "scenario_atom_ids",
+)
+_SCENARIO_CONTEXT_KEYS = (
+    "ego_speed_kph", "dimension_bindings", "dimension_compatibility",
+    "function_phase_binding", "risk_fact_binding",
+)
 
 
 def _jsonable(value: Any) -> Any:
@@ -47,6 +59,126 @@ def _identity(kind: str, record: dict[str, Any]) -> tuple[str, ...] | None:
     fields = _IDENTITY_FIELDS[kind]
     values = tuple(str(record.get(field, "")).strip() for field in fields)
     return values if all(values) else None
+
+
+def _compact_source_ref(value: Any) -> dict[str, Any]:
+    """Keep a reviewable locator without duplicating governed source assets."""
+
+    source = _jsonable(value)
+    if not isinstance(source, dict):
+        return {"reference": str(source)}
+    excerpt = str(source.get("excerpt", ""))
+    result = {
+        key: source.get(key, "")
+        for key in ("source_type", "source_id", "location")
+        if source.get(key) not in (None, "")
+    }
+    if excerpt:
+        result["excerpt_sha256"] = hashlib.sha256(
+            excerpt.encode("utf-8")
+        ).hexdigest()
+        result["excerpt_chars"] = len(excerpt)
+        result["excerpt_preview"] = excerpt[:512]
+        result["excerpt_truncated"] = len(excerpt) > 512
+    return result
+
+
+def _compact_source_refs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_compact_source_ref(item) for item in value]
+
+
+def _compact_review_value(value: Any) -> Any:
+    """Recursively compact nested provenance source references."""
+
+    value = _jsonable(value)
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"sources", "source_refs"}:
+                result["source_refs"] = _compact_source_refs(item)
+            else:
+                result[str(key)] = _compact_review_value(item)
+        return result
+    if isinstance(value, list):
+        return [_compact_review_value(item) for item in value]
+    return value
+
+
+def _scenario_candidate_projection(
+    value: Any, *, generated_for_malfunction_ids: Iterable[str],
+) -> dict[str, Any] | None:
+    """Build a compact read-only Scenario review projection.
+
+    ScenarioCandidate remains canonical workflow data.  Only the review
+    projection replaces repeated, full method-asset excerpts with locators,
+    digests and bounded previews.
+    """
+
+    raw = _jsonable(value)
+    if not isinstance(raw, dict):
+        return None
+    facts = raw.get("facts") if isinstance(raw.get("facts"), dict) else {}
+    context = (
+        raw.get("context_resolution")
+        if isinstance(raw.get("context_resolution"), dict) else {}
+    )
+    provenance = (
+        raw.get("fact_provenance")
+        if isinstance(raw.get("fact_provenance"), dict) else {}
+    )
+    source_refs = _compact_source_refs(
+        raw.get("source_refs", raw.get("sources", []))
+    )
+    compact_provenance: dict[str, Any] = {}
+    for key in _SCENARIO_FACT_KEYS:
+        item = provenance.get(key)
+        if not isinstance(item, dict):
+            continue
+        compact_provenance[key] = {
+            name: (
+                _compact_source_refs(item[name])
+                if name == "source_refs" else _compact_review_value(item[name])
+            )
+            for name in ("provenance", "approval", "resolution_status", "source_refs")
+            if name in item
+        }
+        if "sources" in item and "source_refs" not in compact_provenance[key]:
+            compact_provenance[key]["source_refs"] = _compact_source_refs(item["sources"])
+    method_hashes = sorted({
+        str(item.get("source_id", ""))
+        for item in source_refs
+        if item.get("source_type") == "method_contract" and item.get("source_id")
+    })
+    return {
+        "projection_version": "scenario-review-v2",
+        "scenario_id": raw.get("scenario_id", ""),
+        "semantic_fingerprint": raw.get("semantic_fingerprint", ""),
+        "operating_scenario": raw.get("operating_scenario", ""),
+        "situational_description": raw.get("situational_description", ""),
+        "situational_detailing": raw.get("situational_detailing", ""),
+        "operating_mode": raw.get("operating_mode", facts.get("operating_mode", "")),
+        "facts": {
+            key: _compact_review_value(facts[key])
+            for key in _SCENARIO_FACT_KEYS if key in facts
+        },
+        "context_resolution": {
+            key: _compact_review_value(context[key])
+            for key in _SCENARIO_CONTEXT_KEYS if key in context
+        },
+        "fact_provenance": compact_provenance,
+        "source_refs": source_refs,
+        "method_source_hash": method_hashes[0] if len(method_hashes) == 1 else "",
+        "method_source_hashes": method_hashes if len(method_hashes) > 1 else [],
+        "rule_version": raw.get("rule_version", ""),
+        "scenario_contract_version": raw.get("scenario_contract_version", ""),
+        "review_reason": raw.get("review_reason", ""),
+        "source_scenario_id": raw.get("source_scenario_id", ""),
+        "atomic_variant": raw.get("atomic_variant", ""),
+        "status": raw.get("status", ""),
+        "generated_for_malfunction_ids": list(generated_for_malfunction_ids),
+    }
 
 
 class ReviewArtifactWriter:
@@ -154,10 +286,10 @@ class ReviewArtifactWriter:
     def record_scenario_candidate(
         self, scenario: Any, *, generated_for_malfunction_ids: Iterable[str] = (),
     ) -> bool:
-        payload = _jsonable(scenario)
-        if not isinstance(payload, dict):
-            return self._append("scenario_candidate", payload)
-        payload["generated_for_malfunction_ids"] = list(generated_for_malfunction_ids)
+        payload = _scenario_candidate_projection(
+            scenario,
+            generated_for_malfunction_ids=generated_for_malfunction_ids,
+        )
         return self._append("scenario_candidate", payload)
 
     def record_scenario_feasibility(
@@ -213,6 +345,12 @@ class ReviewArtifactWriter:
     def write_summary(self, state: Any, *, status: str | None = None, error: str = "") -> None:
         if self._disabled:
             return
+        with self._lock:
+            self._write_summary_locked(state, status=status, error=error)
+
+    def _write_summary_locked(
+        self, state: Any, *, status: str | None = None, error: str = "",
+    ) -> None:
         try:
             records = self.read_all()
             functions = records["function"]
@@ -226,7 +364,11 @@ class ReviewArtifactWriter:
                 if malfunction_id:
                     per_malfunction.setdefault(
                         malfunction_id,
-                        {"total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {}},
+                        {
+                            "expected_scenario_count": len(candidates),
+                            "total": 0, "feasible": 0, "infeasible": 0,
+                            "breakpoints": {},
+                        },
                     )
             for item in feasibility:
                 malfunction_id = str(item.get("malfunction_id", ""))
@@ -234,7 +376,11 @@ class ReviewArtifactWriter:
                     continue
                 summary = per_malfunction.setdefault(
                     malfunction_id,
-                    {"total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {}},
+                    {
+                        "expected_scenario_count": len(candidates),
+                        "total": 0, "feasible": 0, "infeasible": 0,
+                        "breakpoints": {},
+                    },
                 )
                 summary["total"] += 1
                 if bool(item.get("final_retain", item.get("retained", False))):
@@ -246,6 +392,14 @@ class ReviewArtifactWriter:
                     summary["breakpoints"][breakpoint] = (
                         summary["breakpoints"].get(breakpoint, 0) + 1
                     )
+            for item in per_malfunction.values():
+                expected = int(item.get("expected_scenario_count", len(candidates)))
+                observed = int(item.get("total", 0))
+                item["assessment_status"] = (
+                    "NOT_STARTED" if observed == 0 else
+                    "COMPLETED" if expected > 0 and observed >= expected else
+                    "PARTIAL"
+                )
             payload = {
                 "run_id": self.run_id,
                 "stage": getattr(getattr(state, "stage", None), "value", ""),
@@ -265,6 +419,18 @@ class ReviewArtifactWriter:
                 ),
                 "scenario_infeasible_count": sum(
                     not bool(item.get("final_retain", item.get("retained", False))) for item in feasibility
+                ),
+                "scenario_assessment_completed_malfunction_count": sum(
+                    item["assessment_status"] == "COMPLETED"
+                    for item in per_malfunction.values()
+                ),
+                "scenario_assessment_partial_malfunction_count": sum(
+                    item["assessment_status"] == "PARTIAL"
+                    for item in per_malfunction.values()
+                ),
+                "scenario_assessment_not_started_malfunction_count": sum(
+                    item["assessment_status"] == "NOT_STARTED"
+                    for item in per_malfunction.values()
                 ),
                 "per_malfunction_summary": per_malfunction,
                 "last_updated_at": _now(),
@@ -312,6 +478,9 @@ class ReviewArtifactReader:
 
     def read_all(self) -> dict[str, list[dict[str, Any]]]:
         result: dict[str, list[dict[str, Any]]] = {kind: [] for kind in _ARTIFACT_FILES}
+        seen: dict[str, set[tuple[str, ...]]] = {
+            kind: set() for kind in _ARTIFACT_FILES
+        }
         for kind, filename in _ARTIFACT_FILES.items():
             path = self.directory / filename
             if not path.is_file():
@@ -327,6 +496,14 @@ class ReviewArtifactReader:
                             self.warnings.append(f"ignored malformed {filename}:{line_number}: {exc}")
                             continue
                         if isinstance(value, dict):
+                            identity = _identity(kind, value)
+                            if identity is not None:
+                                if identity in seen[kind]:
+                                    self.warnings.append(
+                                        f"ignored duplicate {filename}:{line_number} identity={identity}"
+                                    )
+                                    continue
+                                seen[kind].add(identity)
                             result[kind].append(value)
             except OSError as exc:
                 self.warnings.append(f"could not read {path}: {exc}")
@@ -361,6 +538,81 @@ def _assessment_feasible(record: dict[str, Any]) -> bool:
     return bool(record.get("final_retain", record.get("retained", False)))
 
 
+def _assessment_status(*, expected: int, observed: int) -> str:
+    if observed == 0:
+        return "NOT_STARTED"
+    if expected > 0 and observed >= expected:
+        return "COMPLETED"
+    return "PARTIAL"
+
+
+def _summary_from_records(
+    summary: dict[str, Any], records: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Use JSONL as the read-only truth source if a persisted summary is stale."""
+
+    result = dict(summary)
+    candidates = records["scenario_candidate"]
+    feasibility = records["scenario_feasibility"]
+    per_malfunction: dict[str, dict[str, Any]] = {}
+    for malfunction in records["malfunction"]:
+        malfunction_id = str(malfunction.get("malfunction_id", ""))
+        if malfunction_id:
+            per_malfunction[malfunction_id] = {
+                "expected_scenario_count": len(candidates),
+                "total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {},
+            }
+    for assessment in feasibility:
+        malfunction_id = str(assessment.get("malfunction_id", ""))
+        if not malfunction_id:
+            continue
+        item = per_malfunction.setdefault(
+            malfunction_id,
+            {
+                "expected_scenario_count": len(candidates),
+                "total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {},
+            },
+        )
+        item["total"] += 1
+        if _assessment_feasible(assessment):
+            item["feasible"] += 1
+        else:
+            item["infeasible"] += 1
+        breakpoint = str(assessment.get("breakpoint", "")).strip()
+        if breakpoint:
+            item["breakpoints"][breakpoint] = item["breakpoints"].get(breakpoint, 0) + 1
+    for item in per_malfunction.values():
+        item["assessment_status"] = _assessment_status(
+            expected=int(item["expected_scenario_count"]), observed=int(item["total"]),
+        )
+    result.update({
+        "function_count": len(records["function"]),
+        "guideword_assessment_count": len(records["guideword_assessment"]),
+        "guideword_applicable_count": sum(
+            bool(item.get("applicable")) for item in records["guideword_assessment"]
+        ),
+        "guideword_filtered_count": sum(
+            not bool(item.get("applicable")) for item in records["guideword_assessment"]
+        ),
+        "malfunction_count": len(records["malfunction"]),
+        "scenario_candidate_count": len(candidates),
+        "scenario_feasibility_count": len(feasibility),
+        "scenario_feasible_count": sum(_assessment_feasible(item) for item in feasibility),
+        "scenario_infeasible_count": sum(not _assessment_feasible(item) for item in feasibility),
+        "scenario_assessment_completed_malfunction_count": sum(
+            item["assessment_status"] == "COMPLETED" for item in per_malfunction.values()
+        ),
+        "scenario_assessment_partial_malfunction_count": sum(
+            item["assessment_status"] == "PARTIAL" for item in per_malfunction.values()
+        ),
+        "scenario_assessment_not_started_malfunction_count": sum(
+            item["assessment_status"] == "NOT_STARTED" for item in per_malfunction.values()
+        ),
+        "per_malfunction_summary": per_malfunction,
+    })
+    return result
+
+
 def _sample(records: list[dict[str, Any]], *, all_records: bool, limit: int) -> list[dict[str, Any]]:
     return records if all_records else records[:max(0, limit)]
 
@@ -379,7 +631,7 @@ def render_review(
     """Render a read-only human review view without loading workflow state."""
 
     records = reader.read_all()
-    summary = reader.summary()
+    summary = _summary_from_records(reader.summary(), records)
     if scenario_id:
         return _render_scenario(records, scenario_id)
     if malfunction_id:
@@ -410,10 +662,27 @@ def _render_summary(summary: dict[str, Any], records: dict[str, list[dict[str, A
     ]
     per_malfunction = summary.get("per_malfunction_summary", {})
     if per_malfunction:
-        lines.extend(["", "Completed malfunctions:"])
+        lines.extend([
+            "", "Generated malfunctions: " + str(summary.get(
+                "malfunction_count", len(per_malfunction),
+            )),
+            "Scenario assessment:",
+            "  Completed: " + str(summary.get(
+                "scenario_assessment_completed_malfunction_count", 0,
+            )),
+            "  Partial/in-progress: " + str(summary.get(
+                "scenario_assessment_partial_malfunction_count", 0,
+            )),
+            "  Not started: " + str(summary.get(
+                "scenario_assessment_not_started_malfunction_count", 0,
+            )),
+            "", "Assessment coverage by malfunction:",
+        ])
         for malfunction_id, item in sorted(per_malfunction.items()):
             lines.append(
-                f"  {malfunction_id}: {item.get('feasible', 0)}/{item.get('total', 0)} feasible"
+                f"  {malfunction_id}: {item.get('assessment_status', 'UNKNOWN')} "
+                f"({item.get('total', 0)}/{item.get('expected_scenario_count', 0)} assessed; "
+                f"{item.get('feasible', 0)} feasible)"
             )
         breakpoint_counts: dict[str, int] = {}
         for item in per_malfunction.values():
@@ -471,7 +740,15 @@ def _render_malfunction(
     *, all_records: bool, limit: int, feasible: bool, infeasible: bool,
 ) -> str:
     malfunction = next((item for item in records["malfunction"] if item.get("malfunction_id") == malfunction_id), None)
-    assessments = [item for item in records["scenario_feasibility"] if item.get("malfunction_id") == malfunction_id]
+    all_assessments = [
+        item for item in records["scenario_feasibility"]
+        if item.get("malfunction_id") == malfunction_id
+    ]
+    expected_count = len(records["scenario_candidate"])
+    assessment_status = _assessment_status(
+        expected=expected_count, observed=len(all_assessments),
+    )
+    assessments = list(all_assessments)
     if feasible:
         assessments = [item for item in assessments if _assessment_feasible(item)]
     if infeasible:
@@ -485,7 +762,9 @@ def _render_malfunction(
         f"Functional Effect: {malfunction.get('functional_effect', '') if malfunction else ''}",
         f"Vehicle-level Hazard: {malfunction.get('vehicle_level_hazard', '') if malfunction else ''}",
         "", "SCENARIO SUMMARY", "-" * 50,
-        f"Total: {len(assessments)}",
+        f"Assessment status: {assessment_status}",
+        f"Coverage: {len(all_assessments)}/{expected_count}",
+        f"Total shown: {len(assessments)}",
         f"Feasible: {feasible_count}",
         f"Infeasible: {len(assessments) - feasible_count}",
     ]
