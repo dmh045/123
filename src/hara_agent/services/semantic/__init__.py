@@ -4,6 +4,10 @@ from .item_supplement_agent import EvidenceRoutingResult, ItemEvidenceRouter, It
 from .targeted_project_fact_agent import TargetedProjectFactExtractionAgent
 from .guideword_agent import GuidewordApplicabilityAgent
 from .malfunction_agent import MalfunctionHazardAgent
+from .malfunction_guideword_gate import (
+    MalfunctionGuidewordGateViolation,
+    validate_malfunction_guideword_gate,
+)
 from .scenario_agent import ScenarioFeasibilityAgent
 from .scenario_risk_fact_agent import ScenarioRiskFactAgent
 from .scenario_batching import ScenarioFactConsistencyError, ScenarioSchemaContractError
@@ -21,6 +25,7 @@ from .project_evidence_registry import (
 __all__ = [
     "FunctionNormalizer", "ItemArtifactExtractionAgent",
     "EvidenceRoutingResult", "ItemEvidenceRouter", "ItemSupplementAgent", "TargetedProjectFactExtractionAgent", "GuidewordApplicabilityAgent", "MalfunctionHazardAgent",
+    "MalfunctionGuidewordGateViolation", "validate_malfunction_guideword_gate",
     "ScenarioFeasibilityAgent", "ScenarioRiskFactAgent",
     "ScenarioFactConsistencyError",
     "ScenarioSchemaContractError",

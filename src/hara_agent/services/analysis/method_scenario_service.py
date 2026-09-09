@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from itertools import product
 from typing import Any
 
 from hara_agent.contracts import MethodContract, ScenarioDimension
 from hara_agent.models import (
     FactProvenance,
+    FunctionDefinition,
     ItemDefinitionFacts,
     ReviewStatus,
     ScenarioCandidate,
@@ -18,6 +18,8 @@ from hara_agent.services.analysis.project_fact_resolver import SpeedResolutionRe
 from hara_agent.services.analysis.scenario_constraint_service import (
     ScenarioConstraintExecutor, ScenarioConstraintStatus,
 )
+from hara_agent.services.analysis.method_atom_resolver import MethodAtomResolver
+from hara_agent.services.analysis.scenario_coverage_service import ScenarioCoverageRuleService
 from .method_risk_fact_service import MethodRiskFactBindingService
 from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
 
@@ -29,6 +31,8 @@ class MethodScenarioCandidateService:
         self.method = method
         self.risk_facts = MethodRiskFactBindingService(method)
         self.constraints = ScenarioConstraintExecutor()
+        self.atom_resolver = MethodAtomResolver(method)
+        self.coverage_rules = ScenarioCoverageRuleService(method)
 
     @staticmethod
     def _normalize(value: str) -> str:
@@ -40,22 +44,48 @@ class MethodScenarioCandidateService:
 
     def _text_binding(
         self, dimension: ScenarioDimension, project_value: str
-    ) -> dict[str, str]:
-        token = self._normalize(project_value)
-        matches = [
-            item for item in dimension.values
-            if token and (
-                token in self._normalize(item) or self._normalize(item) in token
-            )
-        ]
+    ) -> dict[str, Any]:
+        resolution = self.atom_resolver.resolve(
+            project_value, dimension.canonical_name,
+        )
+        if not self.atom_resolver.catalog and resolution.status == "PENDING":
+            matches = [
+                item for item in dimension.values
+                if self._normalize(project_value) == self._normalize(item)
+            ]
+            if len(matches) == 1:
+                return {
+                    "project_value": project_value,
+                    "method_value": matches[0],
+                    "binding_status": "EXACT",
+                    "resolution_status": "RESOLVED",
+                    "unresolved_reason": "",
+                    "candidate_atom_ids": [],
+                    "atom_id": "",
+                    "canonical_atom_id": "",
+                    "filled_dimensions": [dimension.canonical_name],
+                    "atom_provenance": {},
+                    "dimension_source": f"{dimension.source_ref.sheet}!{dimension.source_ref.range}",
+                }
+        legacy_status = {
+            "RESOLVED": "EXACT",
+            "AMBIGUOUS": "AMBIGUOUS",
+        }.get(resolution.status, "UNRESOLVED")
+        atom = self.atom_resolver.by_id.get(resolution.atom_id, {})
         return {
             "project_value": project_value,
-            "method_value": matches[0] if len(matches) == 1 else "",
-            "binding_status": (
-                "EXACT" if len(matches) == 1
-                else "AMBIGUOUS" if len(matches) > 1
-                else "UNRESOLVED"
+            "method_value": (
+                f"{resolution.atom_id} | {atom.get('label', '')}"
+                if resolution.status == "RESOLVED" else ""
             ),
+            "binding_status": legacy_status,
+            "resolution_status": resolution.status,
+            "unresolved_reason": "" if resolution.status == "RESOLVED" else resolution.reason,
+            "candidate_atom_ids": list(resolution.candidate_atom_ids),
+            "atom_id": resolution.atom_id,
+            "canonical_atom_id": resolution.canonical_atom_id,
+            "filled_dimensions": list(resolution.filled_dimensions),
+            "atom_provenance": resolution.provenance or {},
             "dimension_source": (
                 f"{dimension.source_ref.sheet}!{dimension.source_ref.range}"
             ),
@@ -68,18 +98,91 @@ class MethodScenarioCandidateService:
             value for value in dimension.values
             if self._speed_value_matches(value, speed_kph)
         ]
+        legacy_status = (
+            "EXACT" if len(matches) == 1
+            else "AMBIGUOUS" if len(matches) > 1
+            else "UNRESOLVED"
+        )
         return {
             "project_value": f"{speed_kph:g} km/h",
             "method_value": matches[0] if len(matches) == 1 else "",
-            "binding_status": (
-                "EXACT" if len(matches) == 1
-                else "AMBIGUOUS" if len(matches) > 1
-                else "UNRESOLVED"
+            "binding_status": legacy_status,
+            "resolution_status": (
+                "RESOLVED" if legacy_status == "EXACT" else "PENDING"
+            ),
+            "unresolved_reason": (
+                "" if legacy_status == "EXACT"
+                else "AMBIGUOUS_BINDING" if legacy_status == "AMBIGUOUS"
+                else "NO_COMPATIBLE_METHOD_ATOM"
             ),
             "dimension_source": (
                 f"{dimension.source_ref.sheet}!{dimension.source_ref.range}"
             ),
         }
+
+    @staticmethod
+    def _pending_binding(
+        dimension: ScenarioDimension, *, reason: str,
+        project_value: str = "", candidate_values: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "project_value": project_value,
+            "method_value": "",
+            "binding_status": "MISSING" if not project_value else "UNRESOLVED",
+            "resolution_status": "PENDING",
+            "unresolved_reason": reason,
+            "candidate_values": list(candidate_values or []),
+            "dimension_source": f"{dimension.source_ref.sheet}!{dimension.source_ref.range}",
+        }
+
+    def _speed_constraint_binding(
+        self, dimension: ScenarioDimension, speed: SpeedResolutionResult,
+    ) -> dict[str, Any]:
+        if speed.resolution_source == "ExplicitProjectInput":
+            return self._speed_binding(dimension, speed.resolved_value)
+        envelope = dict(speed.matched_envelope)
+        minimum = envelope.get("speed_min_kph")
+        maximum = envelope.get("speed_max_kph")
+        text = f"{minimum if minimum is not None else '-∞'}..{maximum if maximum is not None else '+∞'} km/h"
+        resolution = self.atom_resolver.resolve_speed_range(
+            minimum_kph=minimum,
+            maximum_kph=maximum,
+            dimension=dimension.canonical_name,
+        )
+        atom = self.atom_resolver.by_id.get(resolution.atom_id, {})
+        result = {
+            "project_value": text,
+            "method_value": (
+                f"{resolution.atom_id} | {atom.get('label', '')}"
+                if resolution.status == "RESOLVED" else ""
+            ),
+            "binding_status": (
+                "EXACT" if resolution.status == "RESOLVED"
+                else "AMBIGUOUS" if resolution.status == "AMBIGUOUS"
+                else "UNRESOLVED"
+            ),
+            "resolution_status": resolution.status,
+            "unresolved_reason": (
+                "" if resolution.status == "RESOLVED" else resolution.reason
+            ),
+            "candidate_atom_ids": list(resolution.candidate_atom_ids),
+            "atom_id": resolution.atom_id,
+            "canonical_atom_id": resolution.canonical_atom_id,
+            "filled_dimensions": list(resolution.filled_dimensions),
+            "atom_provenance": resolution.provenance or {},
+            "dimension_source": (
+                f"{dimension.source_ref.sheet}!{dimension.source_ref.range}"
+            ),
+        }
+        result["speed_constraint"] = {
+            "min_kph": minimum,
+            "max_kph": maximum,
+            "unit": envelope.get("unit", "km/h"),
+            "condition": envelope.get("condition", ""),
+        }
+        if resolution.status == "RESOLVED":
+            result["speed_constraint"]["resolved_by"] = resolution.reason
+        return result
 
     @staticmethod
     def _speed_value_matches(raw: str, speed_kph: float) -> bool:
@@ -117,7 +220,7 @@ class MethodScenarioCandidateService:
             elif name == "EGO_ACTION":
                 values = self._unique([operating_mode])
             elif name == "EGO_DYNAMICS":
-                return [self._speed_binding(dimension, speed.resolved_value)]
+                return [self._speed_constraint_binding(dimension, speed)]
             else:
                 values = []
         elif name == "OPERATING_SCENARIO":
@@ -129,19 +232,270 @@ class MethodScenarioCandidateService:
         elif name == "ROAD_SURFACE":
             values = self._unique(facts.odd_road_surfaces)
         elif name == "VEHICLE_SPEED":
-            return [self._speed_binding(dimension, speed.resolved_value)]
+            return [self._speed_constraint_binding(dimension, speed)]
         else:
             values = []
         if not values:
-            return [{
-                "project_value": "",
-                "method_value": "",
-                "binding_status": "MISSING",
-                "dimension_source": (
-                    f"{dimension.source_ref.sheet}!{dimension.source_ref.range}"
-                ),
-            }]
+            return [self._pending_binding(dimension, reason="NO_ITEM_FACT")]
         return [self._text_binding(dimension, value) for value in values]
+
+    @staticmethod
+    def _binding_sets(
+        dimensions: list[ScenarioDimension],
+        options: list[list[dict[str, Any]]],
+    ) -> list[dict[str, dict[str, Any]]]:
+        """Select one anchored world without inventing unsupported cross-products."""
+        anchor_index = next(
+            (
+                index for index, values in enumerate(options)
+                if len(values) > 1 and any(value.get("project_value") for value in values)
+            ),
+            None,
+        )
+        if anchor_index is None:
+            return [{
+                dimension.canonical_name: dict(values[0])
+                for dimension, values in zip(dimensions, options)
+            }]
+        results = []
+        for anchor in options[anchor_index]:
+            bindings: dict[str, dict[str, Any]] = {}
+            for index, (dimension, values) in enumerate(zip(dimensions, options)):
+                if index == anchor_index or len(values) == 1:
+                    bindings[dimension.canonical_name] = dict(
+                        anchor if index == anchor_index else values[0]
+                    )
+                    continue
+                bindings[dimension.canonical_name] = (
+                    MethodScenarioCandidateService._pending_binding(
+                        dimension,
+                        reason="AMBIGUOUS_BINDING",
+                        candidate_values=[
+                            str(value.get("project_value", ""))
+                            for value in values if value.get("project_value")
+                        ],
+                    )
+                )
+            results.append(bindings)
+        return results
+
+    def _function_phase_bindings(
+        self,
+        functions: list[FunctionDefinition],
+        speed: SpeedResolutionResult,
+        *,
+        dimension_bindings: dict[str, dict[str, Any]] | None = None,
+        operating_mode: str = "",
+    ) -> dict[str, Any]:
+        """Preserve Function context as binding evidence, not a Method dimension."""
+        bindings = {}
+        for function in functions:
+            entry = {
+                "function_id": function.function_id,
+                "nominal_operating_state": "NOMINAL_FUNCTION_EXECUTION",
+                "function_phase_label": function.name,
+                "function_phase_status": "PENDING_NO_STRUCTURED_PHASE_FACT",
+                "preconditions": list(function.preconditions),
+                "trigger_conditions": list(function.triggers),
+                "odd_predicates": list(function.odd_constraints),
+                "output": function.output,
+                "speed_constraint": dict(speed.matched_envelope),
+                "speed_constraint_status": (
+                    "EXPLICIT_VALUE" if speed.resolution_source == "ExplicitProjectInput"
+                    else "RANGE_CONSTRAINT"
+                ),
+                "source_refs": [
+                    MethodScenarioCandidateService._source_dict(source)
+                    for source in function.sources
+                ],
+            }
+            if self.coverage_rules.has_approved_rules and dimension_bindings is not None:
+                entry["scenario_coverage"] = self.coverage_rules.evaluate(
+                    function,
+                    dimension_bindings,
+                    operating_mode,
+                )
+            bindings[function.function_id] = entry
+        return {
+            "status": "BOUND_FUNCTION_CONTEXTS" if bindings else "NO_FUNCTION_CONTEXT",
+            "reason": (
+                "Function preconditions, triggers, ODD predicates and output are "
+                "preserved as per-function context; they are not Method dimensions."
+                if bindings else "No Function definitions were supplied to candidate generation."
+            ),
+            "bindings": bindings,
+        }
+
+    def _apply_compound_fills(self, bindings: dict[str, dict[str, Any]]) -> None:
+        """Propagate an already-resolved compound atom to its governed fills."""
+        for binding in list(bindings.values()):
+            if binding.get("resolution_status") != "RESOLVED":
+                continue
+            atom_id = str(binding.get("atom_id", "")).strip()
+            filled = [str(item) for item in binding.get("filled_dimensions", [])]
+            if not atom_id or len(filled) < 2:
+                continue
+            for dimension in filled:
+                target = bindings.get(dimension)
+                if not isinstance(target, dict):
+                    continue
+                if target.get("resolution_status") == "RESOLVED":
+                    continue
+                speed_constraint = target.get("speed_constraint")
+                if isinstance(speed_constraint, dict):
+                    range_resolution = self.atom_resolver.intersect_speed_range(
+                        minimum_kph=speed_constraint.get("min_kph"),
+                        maximum_kph=speed_constraint.get("max_kph"),
+                        atom_id=atom_id,
+                    )
+                    if range_resolution.status != "RESOLVED":
+                        target.update({
+                            "candidate_atom_ids": list(range_resolution.candidate_atom_ids),
+                            "unresolved_reason": range_resolution.reason,
+                            "atom_provenance": range_resolution.provenance or {},
+                        })
+                        continue
+                    minimum, maximum = range_resolution.compatible_range_kph or (None, None)
+                    target["speed_constraint"] = {
+                        **speed_constraint,
+                        "min_kph": minimum,
+                        "max_kph": maximum,
+                        "resolved_by": range_resolution.reason,
+                    }
+                target.update({
+                    "project_value": binding.get("project_value", ""),
+                    "method_value": binding.get("method_value", ""),
+                    "binding_status": "EXACT",
+                    "resolution_status": "RESOLVED",
+                    "unresolved_reason": "",
+                    "candidate_atom_ids": [atom_id],
+                    "atom_id": atom_id,
+                    "canonical_atom_id": binding.get("canonical_atom_id", atom_id),
+                    "filled_dimensions": filled,
+                    "atom_provenance": binding.get("atom_provenance", {}),
+                    "compound_fill": True,
+                    "filled_by_atom_id": atom_id,
+                })
+
+    def _binding_coverage(
+        self,
+        candidates: list[ScenarioCandidate],
+        functions: list[FunctionDefinition],
+        dimension_options: list[list[dict[str, Any]]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        coverage: dict[str, Any] = {
+            dimension.canonical_name: {
+                "total": 0,
+                "resolved": 0,
+                "ambiguous": 0,
+                "pending": 0,
+                "candidate_instance_count": 0,
+                "context_values": [],
+                "unresolved_source_terms": [],
+                "candidate_method_atoms": [],
+                "reasons": {},
+                "candidate_reasons": {},
+            }
+            for dimension in self.method.scenario_model.dimensions
+        }
+        gaps: list[dict[str, Any]] = []
+
+        def record_context_value(entry: dict[str, Any], binding: dict[str, Any]) -> None:
+            project_value = str(binding.get("project_value", "")).strip()
+            if not project_value:
+                return
+            entry["total"] += 1
+            status = str(binding.get("resolution_status", "PENDING"))
+            entry["context_values"].append({
+                "source_value": project_value,
+                "status": status,
+                "reason": str(binding.get("unresolved_reason", "")),
+                "candidate_method_atoms": list(
+                    binding.get("candidate_atom_ids", [])
+                ),
+            })
+            if status == "RESOLVED":
+                entry["resolved"] += 1
+                return
+            entry["ambiguous" if status == "AMBIGUOUS" else "pending"] += 1
+            reason = str(binding.get("unresolved_reason", "PENDING_BINDING"))
+            entry["reasons"][reason] = entry["reasons"].get(reason, 0) + 1
+            entry["unresolved_source_terms"].append(project_value)
+            entry["candidate_method_atoms"].extend(
+                str(item) for item in binding.get("candidate_atom_ids", [])
+            )
+
+        for dimension, values in zip(
+            self.method.scenario_model.dimensions, dimension_options,
+        ):
+            for value in values:
+                if isinstance(value, dict):
+                    record_context_value(coverage[dimension.canonical_name], value)
+
+        for candidate in candidates:
+            bindings = candidate.context_resolution.get("dimension_bindings", {})
+            if not isinstance(bindings, dict):
+                continue
+            for dimension, binding in bindings.items():
+                if not isinstance(binding, dict):
+                    continue
+                entry = coverage.setdefault(dimension, {
+                    "total": 0, "resolved": 0, "ambiguous": 0, "pending": 0,
+                    "candidate_instance_count": 0,
+                    "context_values": [],
+                    "unresolved_source_terms": [], "candidate_method_atoms": [],
+                    "reasons": {}, "candidate_reasons": {},
+                })
+                entry["candidate_instance_count"] += 1
+                status = str(binding.get("resolution_status", "PENDING"))
+                if status == "RESOLVED":
+                    continue
+                reason = str(binding.get("unresolved_reason", "PENDING_BINDING"))
+                entry["candidate_reasons"][reason] = (
+                    entry["candidate_reasons"].get(reason, 0) + 1
+                )
+                source_value = str(binding.get("project_value", "")).strip()
+                entry["candidate_method_atoms"].extend(
+                    str(item) for item in binding.get("candidate_atom_ids", [])
+                )
+                gaps.append({
+                    "scenario_id": candidate.scenario_id,
+                    "dimension": dimension,
+                    "source_value": source_value,
+                    "candidate_values": list(binding.get("candidate_values", [])),
+                    "status": status,
+                    "reason": reason,
+                    "candidate_atoms": list(binding.get("candidate_atom_ids", [])),
+                    "evidence": binding.get("atom_provenance", {}),
+                })
+        for entry in coverage.values():
+            entry["unresolved_source_terms"] = sorted(set(entry["unresolved_source_terms"]))
+            entry["candidate_method_atoms"] = sorted(set(entry["candidate_method_atoms"]))
+        dimensions = tuple(
+            item.canonical_name for item in self.method.scenario_model.dimensions
+        )
+        function_coverage = {}
+        for function in functions:
+            terms = [
+                function.name, function.output, *function.preconditions,
+                *function.triggers, *function.odd_constraints,
+            ]
+            resolved = sorted({
+                resolution.atom_id
+                for term in terms for dimension in dimensions
+                for resolution in [self.atom_resolver.resolve(term, dimension)]
+                if resolution.status == "RESOLVED" and resolution.atom_id
+            })
+            function_coverage[function.function_id] = {
+                "function_name": function.name,
+                "status": (
+                    "RESOLVED_EXPLICIT_METHOD_ATOM" if resolved
+                    else "PENDING_NO_EXPLICIT_METHOD_ATOM"
+                ),
+                "source_terms": terms,
+                "resolved_atom_ids": resolved,
+            }
+        return {"dimensions": coverage, "functions": function_coverage}, gaps
 
     @staticmethod
     def _source_dict(source: SourceRef) -> dict[str, str]:
@@ -172,6 +526,7 @@ class MethodScenarioCandidateService:
         project_facts: ItemDefinitionFacts,
         operating_mode: str,
         speed_resolution: SpeedResolutionResult,
+        functions: list[FunctionDefinition] | None = None,
     ) -> tuple[list[ScenarioCandidate], dict[str, Any]]:
         dimensions = list(self.method.scenario_model.dimensions)
         options = [
@@ -180,6 +535,10 @@ class MethodScenarioCandidateService:
             )
             for dimension in dimensions
         ]
+        binding_sets = self._binding_sets(dimensions, options)
+        function_phase_binding = self._function_phase_bindings(
+            list(functions or []), speed_resolution,
+        )
         candidates: list[ScenarioCandidate] = []
         risk_fact_audits: list[dict[str, Any]] = []
         unresolved_count = 0
@@ -188,14 +547,28 @@ class MethodScenarioCandidateService:
         conflicting_constraint_count = 0
         project_sources = list(project_facts.sources)
         speed_sources = list(speed_resolution.source_refs)
-        for dimension_values in product(*options):
-            bindings = {
-                dimension.canonical_name: value
-                for dimension, value in zip(dimensions, dimension_values)
-            }
-            constraint_evaluation = self.constraints.evaluate(
-                bindings, self.method.scenario_model.constraint_rules,
-            )
+        for bindings in binding_sets:
+            self._apply_compound_fills(bindings)
+            candidate_function_phase_binding = function_phase_binding
+            if self.coverage_rules.has_approved_rules:
+                candidate_function_phase_binding = self._function_phase_bindings(
+                    list(functions or []),
+                    speed_resolution,
+                    dimension_bindings=bindings,
+                    operating_mode=operating_mode,
+                )
+            unresolved = [
+                name for name, value in bindings.items()
+                if value.get("resolution_status") != "RESOLVED"
+            ]
+            if unresolved:
+                constraint_evaluation = self.constraints.pending(
+                    unresolved, bindings,
+                )
+            else:
+                constraint_evaluation = self.constraints.evaluate(
+                    bindings, self.method.scenario_model.constraint_rules,
+                )
             if constraint_evaluation.status is ScenarioConstraintStatus.DROP:
                 dropped_constraint_count += 1
                 continue
@@ -203,21 +576,22 @@ class MethodScenarioCandidateService:
                 rare_constraint_count += 1
             if constraint_evaluation.status is ScenarioConstraintStatus.CONFLICT:
                 conflicting_constraint_count += 1
-            unresolved = [
-                name for name, value in bindings.items()
-                if value["binding_status"] != "EXACT"
-            ]
             unresolved_count += bool(unresolved)
             facts: dict[str, Any] = {
                 "method_scenario_dimensions": bindings,
                 "operating_mode": operating_mode,
-                "ego_speed_kph": speed_resolution.resolved_value,
             }
+            if speed_resolution.resolution_source == "ExplicitProjectInput":
+                facts["ego_speed_kph"] = speed_resolution.resolved_value
+            else:
+                facts["ego_speed_constraint"] = dict(
+                    speed_resolution.matched_envelope
+                )
             if self.method.scenario_model.source_type == "YAML_BASELINE_SCENARIO_ONTOLOGY":
                 facts["scenario_atom_ids"] = [
                     str(value.get("method_value", "")).split("|", 1)[0].strip()
                     for value in bindings.values()
-                    if value.get("binding_status") == "EXACT"
+                    if value.get("resolution_status") == "RESOLVED"
                     and "|" in str(value.get("method_value", ""))
                 ]
             exposure_context = []
@@ -295,7 +669,7 @@ class MethodScenarioCandidateService:
                 )
                 binding = bindings.get(dimension_name, {})
                 project_value = str(binding.get("project_value", "")).strip()
-                exact_binding = binding.get("binding_status") == "EXACT"
+                exact_binding = binding.get("resolution_status") == "RESOLVED"
                 binding_approval = (
                     ReviewStatus.FINALIZED
                     if (
@@ -315,7 +689,12 @@ class MethodScenarioCandidateService:
                         if exact_binding else project_sources
                     ),
                 )
-            fact_provenance["ego_speed_kph"] = self._fact_metadata(
+            speed_fact_key = (
+                "ego_speed_kph"
+                if speed_resolution.resolution_source == "ExplicitProjectInput"
+                else "ego_speed_constraint"
+            )
+            fact_provenance[speed_fact_key] = self._fact_metadata(
                 speed_resolution.provenance,
                 speed_resolution.approval,
                 speed_sources,
@@ -382,7 +761,8 @@ class MethodScenarioCandidateService:
                 facts=facts,
                 operating_mode=operating_mode,
                 context_resolution={
-                    "ego_speed_kph": speed_resolution.to_dict(),
+                    "speed_resolution": speed_resolution.to_dict(),
+                    "speed_constraint": dict(speed_resolution.matched_envelope),
                     "dimension_bindings": bindings,
                     "risk_fact_binding": risk_binding.audit,
                     "dimension_compatibility": {
@@ -392,13 +772,7 @@ class MethodScenarioCandidateService:
                             constraint_evaluation.matched_rule_ids
                         ),
                     },
-                    "function_phase_binding": {
-                        "status": "UNRESOLVED_NO_COMPILED_BINDING",
-                        "reason": (
-                            "The global candidate is not yet bound to a function-specific "
-                            "operating phase; per-pair functional relevance remains downstream."
-                        ),
-                    },
+                    "function_phase_binding": candidate_function_phase_binding,
                 },
                 fact_provenance=fact_provenance,
                 status=(ReviewStatus.FINALIZED if finalized else ReviewStatus.PENDING),
@@ -409,7 +783,7 @@ class MethodScenarioCandidateService:
                 rule_version=self.method.contract_version,
                 review_reason=(
                     "" if finalized
-                    else "Project facts or MethodContract dimension bindings require review."
+                    else "Project facts, MethodContract dimension bindings or compatibility require review."
                 ),
                 source_scenario_id="METHOD_SCENARIO_ONTOLOGY",
                 atomic_variant="method_dimensions",
@@ -417,25 +791,33 @@ class MethodScenarioCandidateService:
                 scenario_contract_version=SCENARIO_CONTRACT_VERSION,
                 exposure_context=exposure_context,
             ))
+        binding_coverage, binding_gaps = self._binding_coverage(
+            candidates, list(functions or []), options,
+        )
         return candidates, {
             "candidate_count": len(candidates),
             "atomic_candidate_count": len(candidates),
             "combination_strategy": (
-                "cartesian_project_fact_bindings_then_compiled_constraints"
+                "primary_dimension_anchor_with_pending_unbound_dimensions"
             ),
             "dimension_compatibility_status": (
                 "COMPILED_CONSTRAINTS"
                 if self.method.scenario_model.constraint_rules
-                else "UNRESOLVED_NO_COMPILED_RULES"
+                else "PENDING_NO_COMPILED_RULES"
             ),
-            "function_phase_binding_status": "UNRESOLVED_NO_COMPILED_BINDING",
+            "function_phase_binding_status": function_phase_binding["status"],
             "template_hash": self.method.metadata["template_hash"],
             "scenario_dimension_count": len(dimensions),
             "unresolved_binding_candidate_count": unresolved_count,
             "dropped_by_constraint_count": dropped_constraint_count,
             "rare_but_feasible_count": rare_constraint_count,
             "constraint_conflict_count": conflicting_constraint_count,
-            "ego_speed_kph": speed_resolution.resolved_value,
+            "ego_speed_value_kph": (
+                speed_resolution.resolved_value
+                if speed_resolution.resolution_source == "ExplicitProjectInput"
+                else None
+            ),
+            "ego_speed_constraint": dict(speed_resolution.matched_envelope),
             "operating_mode": operating_mode,
             "speed_source_status": speed_resolution.resolution_status.value,
             "speed_resolution": speed_resolution.to_dict(),
@@ -455,4 +837,10 @@ class MethodScenarioCandidateService:
                 default=0,
             ),
             "scenario_contract_version": SCENARIO_CONTRACT_VERSION,
+            "method_atom_count": len(self.atom_resolver.catalog),
+            "normative_constraint_rule_count": len(
+                self.method.scenario_model.constraint_rules
+            ),
+            "scenario_binding_coverage": binding_coverage,
+            "scenario_binding_gaps": binding_gaps,
         }

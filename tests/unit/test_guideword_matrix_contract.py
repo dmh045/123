@@ -12,6 +12,9 @@ from hara_agent.models import (
     SourceRef,
 )
 from hara_agent.services.semantic import GuidewordApplicabilityAgent
+from hara_agent.services.semantic.malfunction_guideword_gate import (
+    validate_malfunction_guideword_gate,
+)
 from hara_agent.workflow.nodes.hazop import assess_guidewords
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
@@ -71,7 +74,7 @@ def test_full_semantic_context_and_high_applicability_self_check_use_one_call():
             self.requests.append(request)
             return LLMResponse(data={"assessments": [
                 {
-                    "guideword": item.name,
+                    "guideword": item.guideword_id,
                     "applicable": item.name != "always active",
                     "disposition": (
                         "DOWNSTREAM_CANDIDATE"
@@ -95,6 +98,9 @@ def test_full_semantic_context_and_high_applicability_self_check_use_one_call():
     assert "request a controlled stop" in prompt
     assert "Detailed function description / motion control" in prompt
     assert len(assessments) == 4
+    assert [item.guideword_id for item in assessments] == [
+        "GW-001", "GW-002", "GW-003", "GW-004",
+    ]
     assert audit["near_blanket_applicability"] is True
     assert audit["additional_llm_calls"] == 0
     assert client.requests[0].max_tokens == 4096
@@ -104,7 +110,7 @@ def test_full_semantic_context_and_high_applicability_self_check_use_one_call():
 def _guideword_payload(guidewords):
     return {"assessments": [
         {
-            "guideword": item.name,
+            "guideword": item.guideword_id,
             "applicable": False,
             "disposition": "NOT_APPLICABLE",
             "rationale": "The function has no matching deviation dimension.",
@@ -112,6 +118,24 @@ def _guideword_payload(guidewords):
         }
         for item in guidewords
     ]}
+
+
+def _real_provider_guidewords() -> list[Guideword]:
+    names = [
+        "No/Loss", "More", "Less", "Reverse/Opposite",
+        "As well as/Other than", "Stuck", "Early", "Late",
+    ]
+    stable_ids = [
+        "GW-NO-LOSS", "GW-MORE", "GW-LESS", "GW-REVERSE",
+        "GW-OTHER", "GW-STUCK", "GW-EARLY", "GW-LATE",
+    ]
+    return [
+        Guideword(
+            stable_id, name, "Bounded guideword definition", index,
+            _method_guideword(name, "Bounded guideword definition", index).source_ref,
+        )
+        for index, (stable_id, name) in enumerate(zip(stable_ids, names, strict=True), start=1)
+    ]
 
 
 def test_output_limit_retries_once_at_8192_and_preserves_eight_assessments():
@@ -232,9 +256,217 @@ def test_guideword_request_schema_is_exact_for_expected_identity_and_count():
     assert assessment_schema["minItems"] == 2
     assert assessment_schema["maxItems"] == 2
     assert assessment_schema["items"]["properties"]["guideword"]["enum"] == [
-        "loss", "too late",
+        "GW-001", "GW-002",
     ]
     assert assessment_schema["items"]["properties"]["rationale"]["maxLength"] == 240
+
+
+def test_real_provider_shaped_stable_ids_bind_to_display_names_and_pass_downstream_gate():
+    guidewords = [
+        _method_guideword(name, "Bounded guideword definition", index)
+        for index, name in enumerate((
+            "No/Loss", "More", "Less", "Reverse/Opposite",
+            "As well as/Other than", "Stuck", "Early", "Late",
+        ), start=1)
+    ]
+    stable_ids = [
+        "GW-NO-LOSS", "GW-MORE", "GW-LESS", "GW-REVERSE",
+        "GW-OTHER", "GW-STUCK", "GW-EARLY", "GW-LATE",
+    ]
+    guidewords = [
+        Guideword(stable_id, item.name, item.description, item.order, item.source_ref)
+        for stable_id, item in zip(stable_ids, guidewords, strict=True)
+    ]
+
+    class Client:
+        def complete_json(self, request):
+            return LLMResponse(data={"assessments": [
+                {
+                    "guideword": guideword.guideword_id,
+                    "applicable": True,
+                    "disposition": (
+                        "DOWNSTREAM_CANDIDATE" if index == 0 else "NO_CREDIBLE_HAZARD"
+                    ),
+                    "rationale": "The fixed Function has a bounded deviation dimension.",
+                    "confidence": 0.8,
+                }
+                for index, guideword in enumerate(guidewords)
+            ]}, model="fake")
+
+    assessments, audit = GuidewordApplicabilityAgent(Client()).assess(
+        _function(), guidewords,
+    )
+
+    assert audit["coverage_count"] == 8
+    assert [item.guideword_id for item in assessments] == stable_ids
+    assert [item.guideword for item in assessments] == [item.name for item in guidewords]
+    assessment = assessments[0]
+    assert validate_malfunction_guideword_gate(
+        function_id="F01",
+        guideword=assessment.guideword,
+        guideword_id=assessment.guideword_id,
+        assessment=assessment,
+        scheduled_guideword_ids=set(stable_ids),
+    ) is assessment
+
+
+@pytest.mark.parametrize("payload, message", [
+    ([{"guideword": "GW-UNKNOWN"}], "unknown guideword_id"),
+    ([{"guideword": "GW-001"}, {"guideword": "GW-001"}], "identity duplicate"),
+    ([{"guideword": ""}], "missing guideword_id"),
+    ([{"guideword": "GW-001", "guideword_name": "More"}], "expected_name='No/Loss'"),
+])
+def test_provider_identity_contract_fails_closed(payload, message):
+    guidewords = [
+        Guideword(
+            "GW-001", "No/Loss", "Complete absence", 1,
+            _method_guideword("No/Loss", "Complete absence", 1).source_ref,
+        ),
+    ]
+
+    class Client:
+        def complete_json(self, _request):
+            return LLMResponse(data={"assessments": [
+                {
+                    **item,
+                    "applicable": False,
+                    "disposition": "NOT_APPLICABLE",
+                    "rationale": "Not applicable for this fixed test.",
+                    "confidence": 0.8,
+                }
+                for item in payload
+            ]}, model="fake")
+
+    with pytest.raises(ValueError, match=message):
+        GuidewordApplicabilityAgent(Client()).assess(_function(), guidewords)
+
+
+@pytest.mark.parametrize("bad_disposition", [
+    "NO_CREDIBLE_HAZARD", "DOWNSTREAM_CANDIDATE",
+])
+def test_invalid_false_applicability_item_is_salvaged_without_recalling_siblings(
+    bad_disposition,
+):
+    guidewords = _real_provider_guidewords()
+    calls = []
+
+    class Client:
+        def complete_json(self, request):
+            calls.append(request)
+            if len(calls) == 1:
+                return LLMResponse(data={"assessments": [
+                    {
+                        "guideword": guideword.guideword_id,
+                        "applicable": False,
+                        "disposition": (
+                            bad_disposition if index == 7 else "NOT_APPLICABLE"
+                        ),
+                        "rationale": f"initial sibling {index}",
+                        "confidence": 0.8,
+                    }
+                    for index, guideword in enumerate(guidewords)
+                ]}, model="fake")
+            assert request.metadata["item_repair"] is True
+            assert request.metadata["guideword_id"] == "GW-LATE"
+            return LLMResponse(data={"assessments": [{
+                "guideword": "GW-LATE",
+                "applicable": False,
+                "disposition": "NOT_APPLICABLE",
+                "rationale": "repaired item only",
+                "confidence": 0.8,
+            }]}, model="fake")
+
+    assessments, audit = GuidewordApplicabilityAgent(Client()).assess(
+        _function(), guidewords,
+    )
+
+    assert len(calls) == 2
+    assert calls[0].metadata.get("item_repair") is None
+    assert len(assessments) == 8
+    assert [item.guideword_id for item in assessments] == [
+        item.guideword_id for item in guidewords
+    ]
+    assert [item.rationale for item in assessments[:-1]] == [
+        f"initial sibling {index}" for index in range(7)
+    ]
+    assert assessments[-1].rationale == "repaired item only"
+    assert audit["item_salvage_attempted_count"] == 1
+    assert audit["item_salvage_repaired_count"] == 1
+    assert audit["llm_call_count"] == 2
+
+
+def test_true_not_applicable_item_is_salvaged_once():
+    guidewords = _real_provider_guidewords()
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(data={"assessments": [
+                    {
+                        "guideword": guideword.guideword_id,
+                        "applicable": True,
+                        "disposition": (
+                            "NOT_APPLICABLE" if index == 0 else "DOWNSTREAM_CANDIDATE"
+                        ),
+                        "rationale": "initial assessment",
+                        "confidence": 0.8,
+                    }
+                    for index, guideword in enumerate(guidewords)
+                ]}, model="fake")
+            assert request.metadata["guideword_id"] == "GW-NO-LOSS"
+            return LLMResponse(data={"assessments": [{
+                "guideword": "GW-NO-LOSS",
+                "applicable": True,
+                "disposition": "DOWNSTREAM_CANDIDATE",
+                "rationale": "repaired legal assessment",
+                "confidence": 0.8,
+            }]}, model="fake")
+
+    client = Client()
+    assessments, audit = GuidewordApplicabilityAgent(client).assess(_function(), guidewords)
+    assert client.calls == 2
+    assert assessments[0].disposition is GuidewordDisposition.DOWNSTREAM_CANDIDATE
+    assert audit["item_salvage_repaired_count"] == 1
+
+
+def test_item_salvage_second_invalid_response_fails_closed_without_third_call():
+    guidewords = _real_provider_guidewords()
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, _request):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(data={"assessments": [
+                    {
+                        "guideword": guideword.guideword_id,
+                        "applicable": False,
+                        "disposition": (
+                            "NO_CREDIBLE_HAZARD" if index == 0 else "NOT_APPLICABLE"
+                        ),
+                        "rationale": "initial assessment",
+                        "confidence": 0.8,
+                    }
+                    for index, guideword in enumerate(guidewords)
+                ]}, model="fake")
+            return LLMResponse(data={"assessments": [{
+                "guideword": "GW-NO-LOSS",
+                "applicable": False,
+                "disposition": "NO_CREDIBLE_HAZARD",
+                "rationale": "still invalid",
+                "confidence": 0.8,
+            }]}, model="fake")
+
+    client = Client()
+    with pytest.raises(ValueError, match="GUIDEWORD_ITEM_REPAIR_CONTRACT_VIOLATION"):
+        GuidewordApplicabilityAgent(client).assess(_function(), guidewords)
+    assert client.calls == 2
 
 
 def test_no_credible_hazard_is_retained_but_does_not_enter_malfunction_generation():
@@ -251,14 +483,14 @@ def test_no_credible_hazard_is_retained_but_does_not_enter_malfunction_generatio
             self.requests.append(request)
             return LLMResponse(data={"assessments": [
                 {
-                    "guideword": "loss",
+                    "guideword": "GW-001",
                     "applicable": True,
                     "disposition": "DOWNSTREAM_CANDIDATE",
                     "rationale": "loss can remove the vehicle motion request",
                     "confidence": 0.8,
                 },
                 {
-                    "guideword": "different to",
+                    "guideword": "GW-002",
                     "applicable": True,
                     "disposition": "NO_CREDIBLE_HAZARD",
                     "rationale": "the stated difference cannot change vehicle behavior",
@@ -342,7 +574,7 @@ def test_case1_applicable_true_downstream_candidate_passes():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "loss",
+                "guideword": "GW-001",
                 "applicable": True,
                 "disposition": "DOWNSTREAM_CANDIDATE",
                 "rationale": "loss removes the output",
@@ -361,7 +593,7 @@ def test_case2_applicable_true_no_credible_hazard_passes_but_not_downstream():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "different to",
+                "guideword": "GW-001",
                 "applicable": True,
                 "disposition": "NO_CREDIBLE_HAZARD",
                 "rationale": "difference cannot form credible vehicle hazard",
@@ -380,7 +612,7 @@ def test_case3_applicable_false_not_applicable_passes():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "always active",
+                "guideword": "GW-001",
                 "applicable": False,
                 "disposition": "NOT_APPLICABLE",
                 "rationale": "no semantic dimension for always-active in this function",
@@ -398,7 +630,7 @@ def test_case4_pending_with_applicable_false_deterministic_repair_to_not_applica
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "always active",
+                "guideword": "GW-001",
                 "applicable": False,
                 "disposition": "NOT_APPLICABLE",
                 "rationale": "insufficient evidence to determine applicability",
@@ -418,7 +650,7 @@ def test_case5_pending_with_applicable_true_fails_closed():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "loss",
+                "guideword": "GW-001",
                 "applicable": True,
                 "disposition": "PENDING",
                 "rationale": "evidence is ambiguous",
@@ -440,14 +672,14 @@ def test_case6_llm_does_not_return_status_system_sets_review_status():
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [
                 {
-                    "guideword": "loss",
+                    "guideword": "GW-001",
                     "applicable": True,
                     "disposition": "DOWNSTREAM_CANDIDATE",
                     "rationale": "loss removes the output",
                     "confidence": 0.8,
                 },
                 {
-                    "guideword": "always active",
+                    "guideword": "GW-002",
                     "applicable": False,
                     "disposition": "NOT_APPLICABLE",
                     "rationale": "no semantic dimension",
@@ -468,7 +700,7 @@ def test_case7_missing_disposition_with_applicable_true_fails_closed():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "loss",
+                "guideword": "GW-001",
                 "applicable": True,
                 "rationale": "loss removes the output",
                 "confidence": 0.8,
@@ -484,7 +716,7 @@ def test_case8_missing_disposition_with_applicable_false_deterministic_repair():
     class Client:
         def complete_json(self, request):
             return LLMResponse(data={"assessments": [{
-                "guideword": "always active",
+                "guideword": "GW-001",
                 "applicable": False,
                 "rationale": "no semantic dimension",
                 "confidence": 0.9,

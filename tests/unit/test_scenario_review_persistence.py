@@ -129,13 +129,27 @@ def test_candidate_generation_refreshes_summary_inside_long_scenario_node(review
     candidates = _candidates()
     inputs = SemanticWorkflowInputs(
         item_path="item.docx", guidewords=[],
-        scenario_candidate_factory=lambda _state: (candidates, {"source": "test"}),
+        scenario_candidate_factory=lambda _state: (candidates, {
+            "source": "test",
+            "scenario_binding_coverage": {
+                "dimensions": {"OBJECT": {"resolved": 0, "pending": 45}},
+            },
+            "scenario_binding_gaps": [{
+                "dimension": "OBJECT", "reason": "NO_ITEM_FACT",
+            }],
+        }),
         review_artifact_writer=writer,
     )
 
     assert len(_scenario_candidates(state, inputs)) == 45
     summary = ReviewArtifactReader("c51-candidates", review_root).summary()
     assert summary["scenario_candidate_count"] == 45
+    gap_payload = json.loads(
+        (review_root / "c51-candidates" / "scenario_binding_gaps.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert gap_payload["gaps"] == [{"dimension": "OBJECT", "reason": "NO_ITEM_FACT"}]
 
 
 def test_completed_malfunction_is_persisted_before_later_transport_failure(review_root):

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from hara_agent.contracts import (
     CalculationStatus, ControllabilityAssessmentInput, ControllabilityBand,
-    ControllabilityJudgement, ControllabilityProfile, ExposureAssessment,
+    ControllabilityFactState, ControllabilityJudgement, ControllabilityProfile,
+    ExposureAssessment,
     ExposureAtom, ExposureMethod, ExposureMethodDomain,
     ExposureCombinationRule, ExposureCombinationStep,
     ExposureDimensionAssessment, SeverityAssessmentInput, SeverityMethod,
-    StructuredRiskMethod,
+    RuleMatchState, StructuredRiskMethod, UnknownOverridePolicy,
 )
 from hara_agent.models import ReviewStatus
 
@@ -188,6 +190,15 @@ class SeverityMethodExecutor:
         return True
 
     def lookup(self, assessment: SeverityAssessmentInput, method: SeverityMethod) -> dict:
+        if (
+            method.semantic.semantic_resolution.value
+            == "APPROVED_SOURCE_INTERNAL_CONFLICT"
+        ):
+            return {"value": "", "status": CalculationStatus.PENDING_METHOD_SEMANTICS,
+                    "reason": (
+                        "Confirmed Severity sources contain an unresolved internal semantic conflict."
+                    ),
+                    "rule_id": "", "source_ref": method.source_ref, "inputs_used": ()}
         consequence = assessment.consequence
         value_by_semantic = {
             "EGO_SPEED": consequence.ego_speed_kph,
@@ -196,6 +207,12 @@ class SeverityMethodExecutor:
             "DELTA_V": consequence.delta_v_kph,
         }
         semantic = method.speed_semantic.value
+        input_key = {
+            "EGO_SPEED": "ego_speed_kph",
+            "RELATIVE_SPEED": "relative_speed_kph",
+            "IMPACT_SPEED": "impact_speed_kph",
+            "DELTA_V": "delta_v_kph",
+        }.get(semantic, "")
         value = value_by_semantic.get(semantic)
         if value is None:
             return {"value": "", "status": CalculationStatus.PENDING_INPUT,
@@ -208,7 +225,7 @@ class SeverityMethodExecutor:
             return {"value": "", "status": CalculationStatus.PENDING_INPUT,
                     "reason": "Severity requires a canonical road-user type.",
                     "rule_id": "", "source_ref": method.source_ref,
-                    "inputs_used": (semantic.casefold(),)}
+                    "inputs_used": (input_key,)}
         collision_type = dict(method.collision_types).get(
             consequence.collision_type.strip().upper(), ""
         )
@@ -218,7 +235,7 @@ class SeverityMethodExecutor:
             return {"value": "", "status": CalculationStatus.PENDING_INPUT,
                     "reason": "Vehicle severity lookup requires a canonical collision type.",
                     "rule_id": "", "source_ref": method.source_ref,
-                    "inputs_used": (semantic.casefold(), "road_user_type")}
+                    "inputs_used": (input_key, "road_user_type")}
         matches = [
             band for band in method.bands
             if band.collision_group == group
@@ -229,12 +246,12 @@ class SeverityMethodExecutor:
             return {"value": "", "status": CalculationStatus.PENDING_METHOD_SEMANTICS,
                     "reason": "Severity table has a range gap or overlap at the supplied input.",
                     "rule_id": "", "source_ref": method.source_ref,
-                    "inputs_used": (semantic.casefold(), "road_user_type", "collision_type")}
+                    "inputs_used": (input_key, "road_user_type", "collision_type")}
         band = matches[0]
         return {"value": band.result, "status": CalculationStatus.FINALIZED,
                 "reason": "Deterministic structured severity lookup matched one approved band.",
                 "rule_id": band.rule_id, "source_ref": band.source_ref,
-                "inputs_used": (semantic.casefold(), "road_user_type", "collision_type")}
+                "inputs_used": (input_key, "road_user_type", "collision_type")}
 
 
 class ExposureMethodExecutor:
@@ -301,38 +318,117 @@ class StructuredControllabilityExecutor:
         self.profile_executor = ControllabilityProfileExecutor()
 
     @staticmethod
-    def _override_state(rule, scenario: dict) -> bool | None:
-        def value(condition):
-            actual = scenario.get(condition.field)
-            return None if not isinstance(actual, bool) else actual is condition.expected
+    def _fact_state(value: object) -> ControllabilityFactState:
+        if isinstance(value, ControllabilityFactState):
+            return value
+        if isinstance(value, bool):
+            return ControllabilityFactState.TRUE if value else ControllabilityFactState.FALSE
+        return ControllabilityFactState.UNKNOWN
+
+    @classmethod
+    def _condition_state(cls, actual: object, expected: bool) -> ControllabilityFactState:
+        state = cls._fact_state(actual)
+        if state in {ControllabilityFactState.UNKNOWN, ControllabilityFactState.CONFLICT}:
+            return state
+        value = state is ControllabilityFactState.TRUE
+        return ControllabilityFactState.TRUE if value is expected else ControllabilityFactState.FALSE
+
+    @classmethod
+    def _override_state(cls, rule, scenario: dict) -> RuleMatchState:
+        conditions = rule.all_of or rule.any_of
+        values = [cls._condition_state(scenario.get(item.field), item.expected) for item in conditions]
+        if ControllabilityFactState.CONFLICT in values:
+            return RuleMatchState.CONFLICT
         if rule.all_of:
-            values = [value(item) for item in rule.all_of]
-            if False in values:
-                return False
-            return True if all(item is True for item in values) else None
-        values = [value(item) for item in rule.any_of]
-        if True in values:
-            return True
-        return False if all(item is False for item in values) else None
+            if ControllabilityFactState.FALSE in values:
+                return RuleMatchState.NO_MATCH
+            if ControllabilityFactState.UNKNOWN in values:
+                return RuleMatchState.UNKNOWN
+            return RuleMatchState.MATCH
+        if ControllabilityFactState.TRUE in values:
+            return RuleMatchState.MATCH
+        if ControllabilityFactState.UNKNOWN in values:
+            return RuleMatchState.UNKNOWN
+        return RuleMatchState.NO_MATCH
+
+    @staticmethod
+    def _fields(rule) -> tuple[str, ...]:
+        return tuple(item.field for item in (*rule.all_of, *rule.any_of))
+
+    @staticmethod
+    def _with_branch_metadata(
+        judgement: ControllabilityJudgement, *, policy: UnknownOverridePolicy,
+        action: str, decision_status: str,
+        match_states: tuple[tuple[str, RuleMatchState], ...],
+    ) -> ControllabilityJudgement:
+        return replace(
+            judgement, decision_status=decision_status,
+            unknown_override_policy=policy, unknown_policy_action=action,
+            rule_match_states=match_states,
+        )
 
     def lookup(self, assessment: ControllabilityAssessmentInput, method: StructuredRiskMethod) -> ControllabilityJudgement:
         scenario = assessment.to_dict()
+        policy = method.controllability_branch_policy.unknown_override_policy
+        states: list[tuple[str, RuleMatchState]] = []
+        unknown_fields: list[str] = []
         for rule in sorted(method.controllability_overrides, key=lambda item: item.priority):
             state = self._override_state(rule, scenario)
-            if state is True:
-                fields = tuple(item.field for item in (*rule.all_of, *rule.any_of))
+            states.append((rule.rule_id, state))
+            fields = self._fields(rule)
+            if state is RuleMatchState.MATCH:
                 return ControllabilityJudgement(
                     value=rule.result, profile_id=method.controllability_profile.profile_id,
                     rule_id=rule.rule_id, inputs_used=fields,
                     status=CalculationStatus.FINALIZED,
                     reason="A higher-priority approved controllability override matched.",
+                    decision_status="OVERRIDE_MATCH", unknown_override_policy=policy,
+                    unknown_policy_action="NOT_APPLICABLE",
+                    rule_match_states=tuple(states),
                 )
-            if state is None:
+            if state is RuleMatchState.CONFLICT:
                 return ControllabilityJudgement(
                     value="", profile_id=method.controllability_profile.profile_id,
                     rule_id=rule.rule_id,
-                    inputs_used=tuple(item.field for item in (*rule.all_of, *rule.any_of)),
+                    inputs_used=fields,
                     status=CalculationStatus.PENDING_INPUT,
-                    reason="A higher-priority controllability override cannot be resolved from available inputs.",
+                    reason="Controllability override facts contain a source conflict.",
+                    decision_status="FACT_SOURCE_CONFLICT", unknown_override_policy=policy,
+                    unknown_policy_action="CONFLICT_BLOCKED",
+                    rule_match_states=tuple(states),
                 )
-        return self.profile_executor.lookup(assessment, method.controllability_profile)
+            if state is RuleMatchState.UNKNOWN:
+                unknown_fields.extend(fields)
+        match_states = tuple(states)
+        if unknown_fields:
+            fields = tuple(dict.fromkeys(unknown_fields))
+            if policy is UnknownOverridePolicy.UNSPECIFIED:
+                return ControllabilityJudgement(
+                    value="", profile_id=method.controllability_profile.profile_id,
+                    rule_id="", inputs_used=fields,
+                    status=CalculationStatus.PENDING_METHOD_SEMANTICS,
+                    reason="CONTROLLABILITY_UNKNOWN_BRANCH_POLICY_UNSPECIFIED",
+                    decision_status="METHOD_BRANCH_UNRESOLVED", unknown_override_policy=policy,
+                    unknown_policy_action="UNSPECIFIED_BLOCKED", rule_match_states=match_states,
+                )
+            if policy is UnknownOverridePolicy.BLOCK_TTC:
+                return ControllabilityJudgement(
+                    value="", profile_id=method.controllability_profile.profile_id,
+                    rule_id="", inputs_used=fields,
+                    status=CalculationStatus.PENDING_INPUT,
+                    reason="Controllability override inputs are required by the selected BLOCK_TTC branch policy.",
+                    decision_status="OVERRIDE_INPUT_PENDING", unknown_override_policy=policy,
+                    unknown_policy_action="BLOCK_TTC", rule_match_states=match_states,
+                )
+            if policy is not UnknownOverridePolicy.SKIP_TO_TTC:
+                raise ValueError(f"Unsupported unknown override policy: {policy}")
+            return self._with_branch_metadata(
+                self.profile_executor.lookup(assessment, method.controllability_profile),
+                policy=policy, action="SKIP_TO_TTC",
+                decision_status="TTC_AFTER_UNKNOWN_OVERRIDE", match_states=match_states,
+            )
+        return self._with_branch_metadata(
+            self.profile_executor.lookup(assessment, method.controllability_profile),
+            policy=policy, action="ALL_OVERRIDES_NO_MATCH",
+            decision_status="TTC_AFTER_NO_MATCH", match_states=match_states,
+        )

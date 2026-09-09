@@ -1,11 +1,14 @@
 import pytest
 
 from hara_agent.infrastructure.llm import LLMResponse
+from hara_agent.contracts import FailureModeTaxonomyValue
 from hara_agent.models import (
     FunctionDefinition, GuidewordAssessment, GuidewordDisposition,
     ReviewStatus, SourceRef,
 )
 from hara_agent.services.semantic import GuidewordApplicabilityAgent, MalfunctionHazardAgent
+from hara_agent.workflow.nodes.malfunctions import derive_malfunctions
+from hara_agent.workflow.state import HARAState
 
 
 def _candidate(identifier: str, guideword: str) -> dict:
@@ -35,6 +38,62 @@ def _inputs():
         for guideword in ("loss", "too late")
     ]
     return function, assessments
+
+
+def _failure_type_contract():
+    source = SourceRef("method", "failure_type_taxonomy.yaml", "types[0]", "loss")
+    return (
+        FailureModeTaxonomyValue("loss", (), source, "complete loss"),
+        FailureModeTaxonomyValue("degraded", (), source, "degraded performance"),
+    )
+
+
+def test_provider_contract_requires_canonical_failure_type_without_extra_call():
+    class Client:
+        def __init__(self):
+            self.requests = []
+
+        def complete_json(self, request):
+            self.requests.append(request)
+            payload = _candidate("M1", "loss")
+            payload["failure_type"] = "loss"
+            return LLMResponse(data={"candidates": [payload]}, model="fake")
+
+    function, assessments = _inputs()
+    client = Client()
+    candidates, audit = MalfunctionHazardAgent(
+        client, failure_types=_failure_type_contract(),
+    ).generate(function, [assessments[0]])
+
+    assert candidates[0].failure_type == "loss"
+    assert audit["llm_call_count"] == 1
+    schema = client.requests[0].response_schema
+    assert schema["properties"]["candidates"]["items"]["properties"]["failure_type"] == {
+        "type": "string", "enum": ["loss", "degraded"],
+    }
+    assert "failure_type" in schema["properties"]["candidates"]["items"]["required"]
+
+
+@pytest.mark.parametrize("failure_type", ["", "invented_type"])
+def test_missing_or_invalid_failure_type_fails_closed(failure_type):
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, _request):
+            self.calls += 1
+            payload = _candidate("M1", "loss")
+            if failure_type:
+                payload["failure_type"] = failure_type
+            return LLMResponse(data={"candidates": [payload]}, model="fake")
+
+    function, assessments = _inputs()
+    client = Client()
+    with pytest.raises(ValueError, match="MALFUNCTION_FAILURE_TYPE_CONTRACT_VIOLATION"):
+        MalfunctionHazardAgent(
+            client, failure_types=_failure_type_contract(),
+        ).generate(function, [assessments[0]])
+    assert client.calls == 1
 
 
 def test_missing_guideword_is_repaired_once_and_then_strictly_validated():
@@ -236,3 +295,142 @@ def test_no_credible_hazard_skips_malfunction_llm_call():
     assert audit["skipped"] is True
     assert audit["skip_reason"] == "no_credible_hazard_guidewords"
     assert audit["llm_call_count"] == 0
+
+
+def test_not_applicable_skips_malfunction_llm_call():
+    class Client:
+        def complete_json(self, request):
+            raise AssertionError("not-applicable disposition must not call the LLM")
+
+    function, _ = _inputs()
+    assessment = GuidewordAssessment(
+        "F001",
+        "different to",
+        False,
+        "the output has no alternate direction or target",
+        sources=list(function.sources),
+        status=ReviewStatus.FINALIZED,
+        confidence=0.8,
+        disposition=GuidewordDisposition.NOT_APPLICABLE,
+    )
+
+    candidates, audit = MalfunctionHazardAgent(Client()).generate(
+        function, [assessment],
+    )
+
+    assert candidates == []
+    assert audit["skipped"] is True
+    assert audit["skip_reason"] == "no_applicable_guidewords"
+    assert audit["llm_call_count"] == 0
+
+
+def test_downstream_candidate_generates_malfunction_with_bound_guideword_id():
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_json(self, request):
+            self.calls += 1
+            return LLMResponse(data={"candidates": [_candidate("M1", "loss")]}, model="fake")
+
+    function, assessments = _inputs()
+    assessments[0].guideword_id = "GW-LOSS"
+    client = Client()
+    candidates, audit = MalfunctionHazardAgent(client).generate(
+        function, [assessments[0]],
+    )
+
+    assert client.calls == 1
+    assert audit["llm_call_count"] == 1
+    assert candidates[0].guideword_id == "GW-LOSS"
+
+
+def test_provider_output_for_no_credible_hazard_fails_closed_instead_of_filtering():
+    class Client:
+        def complete_json(self, request):
+            return LLMResponse(
+                data={"candidates": [_candidate("M1", "different to")]},
+                model="fake",
+            )
+
+    function, assessments = _inputs()
+    assessments[0].guideword = "loss"
+    assessments[0].guideword_id = "GW-LOSS"
+    assessments[1].guideword = "different to"
+    assessments[1].guideword_id = "GW-DIFFERENT"
+    assessments[1].disposition = GuidewordDisposition.NO_CREDIBLE_HAZARD
+
+    with pytest.raises(ValueError, match="MALFUNCTION_GUIDEWORD_GATE_VIOLATION"):
+        MalfunctionHazardAgent(Client()).generate(function, assessments)
+
+
+def test_composite_output_less_considers_partial_safety_actuation_output():
+    source = SourceRef("item_definition", "item.docx", "p1", "parking completion")
+    function = FunctionDefinition(
+        "F05",
+        "parking completion",
+        "engage P; apply EPB; show HMI completion; return to home screen",
+        "complete the parking-end sequence",
+        sources=[source],
+        status=ReviewStatus.FINALIZED,
+    )
+
+    class Client:
+        def __init__(self):
+            self.request = None
+
+        def complete_json(self, request):
+            self.request = request
+            return LLMResponse(data={"assessments": [{
+                "guideword": "Less",
+                "applicable": True,
+                "disposition": "DOWNSTREAM_CANDIDATE",
+                "rationale": "partial completion can engage P while omitting EPB actuation",
+                "confidence": 0.8,
+            }]}, model="fake")
+
+    client = Client()
+    assessments, _ = GuidewordApplicabilityAgent(client).assess(function, ["Less"])
+
+    assert assessments[0].disposition is GuidewordDisposition.DOWNSTREAM_CANDIDATE
+    assert assessments[0].guideword_id == "Less"
+    assert "canonical_output_components" in client.request.user_prompt
+    assert "engage P" in client.request.user_prompt
+    assert "apply EPB" in client.request.user_prompt
+    assert "missing partial output" in client.request.system_prompt
+
+
+def test_workflow_fails_closed_if_an_alternate_agent_bypasses_guideword_gate():
+    function, _ = _inputs()
+    blocked_assessment = GuidewordAssessment(
+        "F001",
+        "loss",
+        True,
+        "the deviation is applicable but cannot create a credible vehicle hazard",
+        sources=list(function.sources),
+        status=ReviewStatus.FINALIZED,
+        confidence=0.8,
+        disposition=GuidewordDisposition.NO_CREDIBLE_HAZARD,
+        guideword_id="GW-LOSS",
+    )
+
+    class BypassingAgent:
+        def generate(self, generated_function, generated_assessments):
+            return [
+                MalfunctionHazardAgent._parse(
+                    generated_function,
+                    _candidate("M1", "loss"),
+                    generated_assessments[0],
+                )
+            ], {"function_id": generated_function.function_id, "skipped": False}
+
+    state = HARAState(run_id="guideword-gate-test")
+    with pytest.raises(ValueError, match="MALFUNCTION_GUIDEWORD_GATE_VIOLATION"):
+        derive_malfunctions(
+            state,
+            BypassingAgent(),
+            [function],
+            [blocked_assessment],
+        )
+
+    assert state.audit_trail[-1]["event"] == "malfunction_guideword_gate_violation"

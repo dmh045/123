@@ -90,6 +90,11 @@ class ScenarioFeasibilityAssessment:
         result["status"] = self.status.value
         if self.causal_assessment is not None:
             result["causal_assessment"] = self.causal_assessment.to_dict()
+        decision = evaluate_risk_eligibility(self)
+        result["final_retain"] = decision.final_retain_value
+        result["final_retain_role"] = decision.final_retain_role
+        result["risk_eligibility_status"] = decision.status.value
+        result["risk_eligibility_reason_codes"] = list(decision.reason_codes)
         return self._serialize(result)
 
     @classmethod
@@ -142,3 +147,134 @@ class ScenarioFeasibilityAssessment:
         if isinstance(value, (list, tuple)):
             return [cls._serialize(item) for item in value]
         return value
+
+
+class RiskEligibilityStatus(str, Enum):
+    ELIGIBLE = "ELIGIBLE"
+    INELIGIBLE_CAUSAL = "INELIGIBLE_CAUSAL"
+    PENDING_FEASIBILITY = "PENDING_FEASIBILITY"
+    NOT_FINALIZED = "NOT_FINALIZED"
+    NOT_COMMITTED = "NOT_COMMITTED"
+
+
+@dataclass(frozen=True)
+class RiskEligibilityDecision:
+    """The sole canonical Scenario feasibility-to-risk eligibility decision."""
+
+    status: RiskEligibilityStatus
+    reason_codes: tuple[str, ...]
+    authoritative_inputs: dict[str, Any]
+    final_retain_value: bool
+    final_retain_role: str = "DERIVED_FROM_RISK_ELIGIBILITY"
+
+    @property
+    def eligible(self) -> bool:
+        return self.status is RiskEligibilityStatus.ELIGIBLE
+
+
+def evaluate_risk_eligibility(
+    assessment: ScenarioFeasibilityAssessment, *, committed: bool = True,
+) -> RiskEligibilityDecision:
+    """Evaluate canonical output only; never reconstruct causal semantics."""
+
+    causal = assessment.causal_assessment
+    inputs = {
+        "assessment_status": assessment.status.value,
+        "physically_feasible": assessment.physically_feasible,
+        "functionally_relevant": assessment.functionally_relevant,
+        "causally_relevant": assessment.causally_relevant,
+        "causal_assessment_available": causal is not None,
+        "causal_review_status": causal.review_status.value if causal else "MISSING",
+        "causal_validation_status": causal.status.value if causal else "MISSING",
+        "committed_to_state": committed,
+    }
+    status = RiskEligibilityStatus.ELIGIBLE
+    reasons: tuple[str, ...] = ()
+    if causal is None:
+        status = RiskEligibilityStatus.PENDING_FEASIBILITY
+        reasons = ("PENDING_LEGACY_ELIGIBILITY", "MISSING_CAUSAL_ASSESSMENT")
+    elif assessment.status is not ReviewStatus.FINALIZED or causal.review_status is not ReviewStatus.FINALIZED:
+        status = RiskEligibilityStatus.NOT_FINALIZED
+        reasons = ("ASSESSMENT_OR_CAUSAL_REVIEW_NOT_FINALIZED",)
+    elif not causal.is_validated:
+        status = RiskEligibilityStatus.INELIGIBLE_CAUSAL
+        reasons = ("CAUSAL_NOT_VALIDATED", causal.status.value)
+    elif not all((
+        assessment.physically_feasible,
+        assessment.functionally_relevant,
+        assessment.causally_relevant,
+    )):
+        status = RiskEligibilityStatus.INELIGIBLE_CAUSAL
+        reasons = ("FEASIBILITY_OR_RELEVANCE_GATE_FALSE",)
+    elif not assessment.hazardous_event.strip():
+        status = RiskEligibilityStatus.PENDING_FEASIBILITY
+        reasons = ("MISSING_HAZARDOUS_EVENT",)
+    final_retain = status is RiskEligibilityStatus.ELIGIBLE
+    if not committed:
+        return RiskEligibilityDecision(
+            RiskEligibilityStatus.NOT_COMMITTED,
+            ("RUN_INTERRUPTED_BEFORE_RISK_HANDOFF",),
+            inputs,
+            final_retain,
+        )
+    return RiskEligibilityDecision(status, reasons, inputs, final_retain)
+
+
+def evaluate_risk_eligibility_payload(
+    value: dict[str, Any], *, committed: bool = True,
+    allow_legacy_boolean_gate: bool = False,
+) -> RiskEligibilityDecision:
+    """Adapt checkpoint payloads without defaulting incomplete legacy data true."""
+
+    try:
+        booleans = (
+            value["physically_feasible"], value["functionally_relevant"],
+            value["causally_relevant"],
+        )
+        if any(not isinstance(item, bool) for item in booleans):
+            raise ValueError("invalid feasibility booleans")
+        from hara_agent.contracts.scenario_causal_assessment import ScenarioCausalAssessment
+
+        causal_payload = value.get("causal_assessment")
+        if not isinstance(causal_payload, dict):
+            if allow_legacy_boolean_gate and all(booleans) and str(
+                value.get("status", "")
+            ).upper() == ReviewStatus.FINALIZED.value:
+                return RiskEligibilityDecision(
+                    RiskEligibilityStatus.ELIGIBLE,
+                    ("LEGACY_BOOLEAN_GATE",),
+                    {
+                        "assessment_status": value.get("status", ""),
+                        "physically_feasible": booleans[0],
+                        "functionally_relevant": booleans[1],
+                        "causally_relevant": booleans[2],
+                        "causal_assessment_available": False,
+                        "committed_to_state": committed,
+                    },
+                    True,
+                )
+            raise ValueError("missing typed causal assessment")
+        causal = ScenarioCausalAssessment.from_dict(causal_payload)
+        assessment = ScenarioFeasibilityAssessment(
+            malfunction_id=str(value["malfunction_id"]),
+            scenario_id=str(value["scenario_id"]),
+            physically_feasible=booleans[0],
+            functionally_relevant=booleans[1],
+            causally_relevant=booleans[2],
+            risk_dimensions_changed=[str(item) for item in value.get("risk_dimensions_changed", [])],
+            rationale=str(value.get("rationale") or "checkpoint eligibility evaluation"),
+            hazardous_event=str(value.get("hazardous_event", "")),
+            potential_harm=str(value.get("potential_harm", "")),
+            status=ReviewStatus(value.get("status", ReviewStatus.PENDING.value)),
+            confidence=float(value.get("confidence", 0.0)),
+            breakpoint=str(value.get("breakpoint", causal.breakpoint.value if causal.breakpoint else "")),
+            causal_assessment=causal,
+        )
+    except (KeyError, TypeError, ValueError):
+        return RiskEligibilityDecision(
+            RiskEligibilityStatus.PENDING_FEASIBILITY,
+            ("PENDING_LEGACY_ELIGIBILITY", "INVALID_CANONICAL_ASSESSMENT"),
+            {"committed_to_state": committed},
+            False,
+        )
+    return evaluate_risk_eligibility(assessment, committed=committed)

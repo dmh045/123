@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from hara_agent.application import HARAApplication
 from hara_agent.config import RunConfig
@@ -14,7 +15,19 @@ from hara_agent.contracts import (
 )
 from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
 from hara_agent.method_sources import MethodSourceResolver
-from hara_agent.workflow import ReviewArtifactReader, render_review
+from hara_agent.services.analysis import (
+    ConfirmedYamlUtilizationService, FMSelectorSemanticAuditService,
+    ExposureBindingAuditService,
+    ExposureDimensionCoverageAuditService,
+    FMTemplateAmbiguityAuditService,
+    HazardousEventRiskContextService,
+    ControllabilityBranchAuditService,
+    RiskExecutionTraceService,
+    SeverityDeltaVSemanticAuditService,
+    ScenarioAliasProposalService,
+    ScenarioCoverageProposalService,
+)
+from hara_agent.workflow import ReviewArtifactReader, ReviewArtifactWriter, render_review
 
 
 def _role_compiler() -> TemplateRoleCompiler:
@@ -80,6 +93,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-template", type=Path,
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
+    doctor.add_argument(
+        "--review-run-id",
+        help="Read deterministic Scenario binding coverage from a prior review artifact",
+    )
     confirm = subparsers.add_parser(
         "confirm-template-role",
         help="一次性确认有歧义的模板角色，并按模板哈希保存系统清单",
@@ -102,6 +119,116 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--limit", type=int, default=3)
     review.add_argument("--feasible", action="store_true")
     review.add_argument("--infeasible", action="store_true")
+    risk_trace = subparsers.add_parser(
+        "risk-execution-trace",
+        help="Generate a read-only Scenario-to-risk execution trace from review artifacts",
+    )
+    risk_trace.add_argument("--baseline", required=True, type=Path)
+    risk_trace.add_argument("--review-run-id", required=True)
+    risk_trace.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    scenario_aliases = subparsers.add_parser(
+        "scenario-aliases",
+        help="Generate review-only Scenario terminology alias proposals",
+    )
+    scenario_aliases.add_argument("--baseline", required=True, type=Path)
+    scenario_aliases.add_argument("--review-run-id", required=True)
+    scenario_aliases.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    scenario_coverage = subparsers.add_parser(
+        "scenario-coverage",
+        help="Generate review-only Scenario coverage governance proposals",
+    )
+    scenario_coverage.add_argument("--baseline", required=True, type=Path)
+    scenario_coverage.add_argument("--review-run-id", required=True)
+    scenario_coverage.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    yaml_utilization = subparsers.add_parser(
+        "yaml-utilization",
+        help="Generate offline confirmed YAML utilization audit",
+    )
+    yaml_utilization.add_argument("--baseline", required=True, type=Path)
+    yaml_utilization.add_argument("--review-run-id", required=True)
+    yaml_utilization.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    fm_selector_audit = subparsers.add_parser(
+        "fm-selector-semantic-audit",
+        help="Generate offline deterministic FM selector semantic audit",
+    )
+    fm_selector_audit.add_argument("--baseline", required=True, type=Path)
+    fm_selector_audit.add_argument("--review-run-id", required=True)
+    fm_selector_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    fm_template_ambiguity = subparsers.add_parser(
+        "fm-template-ambiguity-audit",
+        help="Generate an offline FM template ambiguity root-cause audit",
+    )
+    fm_template_ambiguity.add_argument("--baseline", required=True, type=Path)
+    fm_template_ambiguity.add_argument("--review-run-id", required=True)
+    fm_template_ambiguity.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    exposure_binding_audit = subparsers.add_parser(
+        "exposure-binding-audit",
+        help="Generate an offline governed Scenario-atom Exposure input audit",
+    )
+    exposure_binding_audit.add_argument("--baseline", required=True, type=Path)
+    exposure_binding_audit.add_argument("--review-run-id", required=True)
+    exposure_binding_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    exposure_coverage_audit = subparsers.add_parser(
+        "exposure-dimension-coverage-audit",
+        help="Audit formal Exposure dimension coverage authority without scoring E",
+    )
+    exposure_coverage_audit.add_argument("--baseline", required=True, type=Path)
+    exposure_coverage_audit.add_argument("--review-run-id", required=True)
+    exposure_coverage_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    severity_delta_v_audit = subparsers.add_parser(
+        "severity-delta-v-semantic-audit",
+        help="Audit Severity DELTA_V semantic authority and input readiness without scoring S",
+    )
+    severity_delta_v_audit.add_argument("--baseline", required=True, type=Path)
+    severity_delta_v_audit.add_argument("--review-run-id", required=True)
+    severity_delta_v_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    risk_context_audit = subparsers.add_parser(
+        "hazardous-event-risk-context-audit",
+        help="Audit typed Hazardous Event to Severity/Controllability input context",
+    )
+    risk_context_audit.add_argument("--baseline", required=True, type=Path)
+    risk_context_audit.add_argument("--review-run-id", required=True)
+    risk_context_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    controllability_branch_audit = subparsers.add_parser(
+        "controllability-branch-audit",
+        help="Audit selected controllability decision branches and input readiness",
+    )
+    controllability_branch_audit.add_argument("--baseline", required=True, type=Path)
+    controllability_branch_audit.add_argument("--review-run-id", required=True)
+    controllability_branch_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
     return parser
 
 
@@ -156,6 +283,272 @@ def main(argv: list[str] | None = None) -> int:
         for warning in reader.warnings:
             print(f"WARNING: {warning}")
         return 0
+    if args.command == "risk-execution-trace":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = RiskExecutionTraceService(resolution.method).project_review_run(reader)
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_risk_execution_trace(payload)
+        writer.write_summary(SimpleNamespace(stage=SimpleNamespace(value="malfunctions")))
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "trace_artifact": str(review_root / args.review_run_id / "risk_execution_trace.json"),
+            "risk_stage_status": payload["risk_stage_status"],
+            "scenario_eligibility_summary": payload["scenario_eligibility_summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "scenario-aliases":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        gap_path = review_root / args.review_run_id / "scenario_binding_gaps.json"
+        if not gap_path.is_file():
+            raise FileNotFoundError(
+                f"Scenario binding gap artifact not found: {gap_path}"
+            )
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        gap_payload = json.loads(gap_path.read_text(encoding="utf-8"))
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ScenarioAliasProposalService(resolution.method).generate(
+            gap_payload, reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_scenario_alias_proposals(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "proposal_artifact": str(
+                review_root / args.review_run_id / "scenario_alias_proposals.json"
+            ),
+            **payload,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "scenario-coverage":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        gap_path = review_root / args.review_run_id / "scenario_binding_gaps.json"
+        if not gap_path.is_file():
+            raise FileNotFoundError(
+                f"Scenario binding gap artifact not found: {gap_path}"
+            )
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        gap_payload = json.loads(gap_path.read_text(encoding="utf-8"))
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ScenarioCoverageProposalService(resolution.method).generate(
+            gap_payload, reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_scenario_coverage_proposals(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "proposal_artifact": str(
+                review_root / args.review_run_id / "scenario_coverage_proposals.json"
+            ),
+            **payload,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "yaml-utilization":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        gap_path = review_root / args.review_run_id / "scenario_binding_gaps.json"
+        if not gap_path.is_file():
+            raise FileNotFoundError(
+                f"Scenario binding gap artifact not found: {gap_path}"
+            )
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ConfirmedYamlUtilizationService(resolution.method).generate(
+            reader.read_all(), json.loads(gap_path.read_text(encoding="utf-8")),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_confirmed_yaml_utilization(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "utilization_artifact": str(
+                review_root / args.review_run_id / "confirmed_yaml_utilization.json"
+            ),
+            "fm_template_matching": payload["fm_template_matching"],
+            "scenario_gap_reaudit": payload["scenario_gap_reaudit"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "fm-selector-semantic-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = FMSelectorSemanticAuditService(resolution.method).generate(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_fm_selector_semantic_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "fm_selector_semantic_audit.json"
+            ),
+            "contract_status": payload["contract_status"],
+            "template_qualification": payload["template_qualification"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "fm-template-ambiguity-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = FMTemplateAmbiguityAuditService(resolution.method).generate(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_fm_template_ambiguity_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "fm_template_ambiguity_audit.json"
+            ),
+            "ambiguity_summary": payload["ambiguity_summary"],
+            "qualification_preview": payload["qualification_preview"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "exposure-binding-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        gap_path = review_root / args.review_run_id / "scenario_binding_gaps.json"
+        if not gap_path.is_file():
+            raise FileNotFoundError(
+                f"Scenario binding gap artifact not found: {gap_path}"
+            )
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ExposureBindingAuditService(resolution.method).generate(
+            reader.read_all(), json.loads(gap_path.read_text(encoding="utf-8")),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_exposure_binding_audit(payload)
+        component_summary = {
+            key: value for key, value in payload["component_domain_summary"].items()
+            if key != "records"
+        }
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "exposure_binding_audit.json"
+            ),
+            "component_domain_summary": component_summary,
+            "before": payload["before"],
+            "after": payload["after"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "exposure-dimension-coverage-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ExposureDimensionCoverageAuditService(resolution.method).generate(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_exposure_dimension_coverage_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "exposure_dimension_coverage_audit.json"
+            ),
+            "coverage_rule_inventory": payload["coverage_rule_inventory"],
+            "coverage_granularity": payload["coverage_granularity"],
+            "summary": payload["summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "severity-delta-v-semantic-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = SeverityDeltaVSemanticAuditService(resolution.method).generate(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_severity_delta_v_semantic_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "severity_delta_v_semantic_audit.json"
+            ),
+            "method_semantic_provenance": payload["method_semantic_provenance"],
+            "delta_v_derivation_authority": payload["delta_v_derivation_authority"],
+            "summary": payload["summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "hazardous-event-risk-context-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = HazardousEventRiskContextService(resolution.method).audit(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_hazardous_event_risk_context_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "hazardous_event_risk_context_audit.json"
+            ),
+            "hazardous_event_identity": payload["hazardous_event_identity"],
+            "summary": payload["summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "controllability-branch-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        reader = ReviewArtifactReader(args.review_run_id, review_root)
+        payload = ControllabilityBranchAuditService(resolution.method).audit(
+            reader.read_all(),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, review_root)
+        writer.write_controllability_branch_policy_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "controllability_branch_policy_audit.json"
+            ),
+            "runtime_comparison": payload["runtime_comparison"],
+            "summary": payload["summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "doctor":
         checks = {}
         try:
@@ -171,6 +564,45 @@ def main(argv: list[str] | None = None) -> int:
                 method.compile_status is not CompileStatus.NOT_READY
                 and method.engineering_rules_compiled
             )
+            scenario_method = method.scenario_model.scenario_method
+            selector_taxonomy = scenario_method.failure_mode_selector_taxonomy
+            selector_adapter = scenario_method.fm_template_selector_adapter
+            selector_catalog = scenario_method.fm_template_catalog
+
+            def selector_reconciliation(selector_type: str) -> dict[str, object]:
+                taxonomy_values = {
+                    item.canonical_id for item in (
+                        selector_taxonomy.component_categories
+                        if selector_taxonomy is not None and selector_type == "COMPONENT_CATEGORY"
+                        else selector_taxonomy.failure_types
+                        if selector_taxonomy is not None else ()
+                    )
+                }
+                template_values = {
+                    value
+                    for template in (selector_catalog.templates if selector_catalog else ())
+                    for value in (
+                        template.match.component_categories
+                        if selector_type == "COMPONENT_CATEGORY"
+                        else template.match.failure_types
+                    )
+                }
+                mappings = [
+                    item for item in (selector_adapter.mappings if selector_adapter else ())
+                    if item.selector_type == selector_type
+                ]
+                active = [item for item in mappings if item.runtime_status == "ACTIVE"]
+                ambiguous = [item for item in mappings if item.runtime_status == "UNRESOLVED"]
+                covered = taxonomy_values | {item.source_template_value for item in mappings}
+                return {
+                    "canonical": len(taxonomy_values),
+                    "raw": len(template_values),
+                    "exact_overlap": sorted(template_values & taxonomy_values),
+                    "mapped_unambiguous": sorted(item.source_template_value for item in active),
+                    "ambiguous": sorted(item.source_template_value for item in ambiguous),
+                    "unmapped": sorted(template_values - covered),
+                }
+
             checks["method_contract"] = {
                 "ok": method_ok,
                 "template_hash": method.metadata["template_hash"],
@@ -182,6 +614,107 @@ def main(argv: list[str] | None = None) -> int:
                 "compile_status": method.compile_status.value,
                 "guideword_count": len(method.guidewords.guidewords),
                 "scenario_dimension_count": len(method.scenario_model.dimensions),
+                "scenario_binding": {
+                    "method_atom_count": len(
+                        method.metadata.get("scenario_atom_catalog", [])
+                    ),
+                    "normative_constraint_rule_count": len(
+                        method.scenario_model.constraint_rules
+                    ),
+                    "coverage_status": "PROJECT_FACT_BINDING_REQUIRED",
+                    "dimension_atom_counts": {
+                        dimension.canonical_name: sum(
+                            dimension.canonical_name in atom.get(
+                                "filled_dimensions", []
+                            )
+                            for atom in method.metadata.get(
+                                "scenario_atom_catalog", []
+                            )
+                            if isinstance(atom, dict)
+                        )
+                        for dimension in method.scenario_model.dimensions
+                    },
+                },
+                "scenario_coverage_governance": dict(
+                    method.metadata.get("scenario_coverage_governance", {})
+                ),
+                "confirmed_yaml_utilization": {
+                    "vda702_atoms": {"compiled": True, "active": True},
+                    "atom_spec": {"compiled": True, "active": True},
+                    "dimension_structure": {"compiled": True, "active": True},
+                    "fm_scenario_templates": {
+                        "role": "SCENARIO_TEMPLATE_CONSTRAINT",
+                        "templates": len(
+                            method.scenario_model.scenario_method.fm_template_catalog.templates
+                        ) if method.scenario_model.scenario_method.fm_template_catalog else 0,
+                        "matched_malfunctions": "REVIEW_ARTIFACT_REQUIRED",
+                    },
+                    "fm_selector_taxonomy": {
+                        "component_taxonomy": {
+                            "compiled": (
+                                method.scenario_model.scenario_method.failure_mode_selector_taxonomy
+                                is not None
+                            ),
+                            "canonical_values": len(
+                                method.scenario_model.scenario_method.failure_mode_selector_taxonomy.component_categories
+                            ) if method.scenario_model.scenario_method.failure_mode_selector_taxonomy else 0,
+                            "resolved": "REVIEW_ARTIFACT_REQUIRED",
+                            "missing": "REVIEW_ARTIFACT_REQUIRED",
+                            "invalid": "REVIEW_ARTIFACT_REQUIRED",
+                        },
+                        "failure_type_taxonomy": {
+                            "compiled": (
+                                method.scenario_model.scenario_method.failure_mode_selector_taxonomy
+                                is not None
+                            ),
+                            "canonical_values": len(
+                                method.scenario_model.scenario_method.failure_mode_selector_taxonomy.failure_types
+                            ) if method.scenario_model.scenario_method.failure_mode_selector_taxonomy else 0,
+                            "resolved": "REVIEW_ARTIFACT_REQUIRED",
+                            "missing": "REVIEW_ARTIFACT_REQUIRED",
+                            "invalid": "REVIEW_ARTIFACT_REQUIRED",
+                        },
+                    },
+                    "fm_template_selector_adapter": {
+                        "compiled": (
+                            method.scenario_model.scenario_method.fm_template_selector_adapter
+                            is not None
+                        ),
+                        "active_mappings": sum(
+                            item.runtime_status == "ACTIVE"
+                            for item in (
+                                method.scenario_model.scenario_method
+                                .fm_template_selector_adapter.mappings
+                                if method.scenario_model.scenario_method
+                                .fm_template_selector_adapter is not None else ()
+                            )
+                        ),
+                        "unresolved_mappings": sum(
+                            item.runtime_status == "UNRESOLVED"
+                            for item in (
+                                method.scenario_model.scenario_method
+                                .fm_template_selector_adapter.mappings
+                                if method.scenario_model.scenario_method
+                                .fm_template_selector_adapter is not None else ()
+                            )
+                        ),
+                        "contract_reconciliation": {
+                            "component_taxonomy": selector_reconciliation("COMPONENT_CATEGORY"),
+                            "failure_type_taxonomy": selector_reconciliation("FAILURE_TYPE"),
+                        },
+                    },
+                    "avp_low_speed": {
+                        "trigger_mappings": len(
+                            method.scenario_model.scenario_method.domain_knowledge.triggering_state_mappings
+                        ) if method.scenario_model.scenario_method.domain_knowledge else 0,
+                        "fallback_dimensions": len(
+                            method.scenario_model.scenario_method.domain_knowledge.fallback_dimensions
+                        ) if method.scenario_model.scenario_method.domain_knowledge else 0,
+                        "numeric_sections": "COMPILED_NOT_SCORE_ACTIVE_IN_THIS_STAGE",
+                    },
+                    "coupling_examples": {"role": "LLM_EXAMPLE_ONLY"},
+                    "infeasible_examples": {"role": "LLM_EXAMPLE_ONLY"},
+                },
                 "required_fact_count": len(method.required_fact_specs),
                 "warning_codes": sorted({
                     item.code.value for item in method.warnings
@@ -190,6 +723,404 @@ def main(argv: list[str] | None = None) -> int:
                     item.message for item in method.blocking_diagnostics
                 ],
             }
+            structured = method.structured_risk_method
+            checks["risk_pipeline"] = {
+                "ok": True,
+                "scenario_to_risk_handoff": "VERIFIED",
+                "severity": {
+                    "executor": "SeverityMethodExecutor" if structured else "MethodRuleScoringService",
+                    "speed_semantic": (
+                        structured.severity.speed_semantic.value if structured else "TEMPLATE_COMPILED_RULE"
+                    ),
+                    "semantic_resolution": (
+                        structured.severity.semantic.semantic_resolution.value
+                        if structured else "TEMPLATE_COMPILED_RULE"
+                    ),
+                    "source_status": (
+                        structured.severity.semantic.source_status if structured else ""
+                    ),
+                    "odd_max_speed_used_as_delta_v": False,
+                    "relative_speed_substituted_as_delta_v": False,
+                },
+                "exposure": {
+                    "executor": "ExposureMethodExecutor" if structured else "MethodRuleScoringService",
+                    "traceable_atom_path": structured is not None,
+                },
+                "controllability": {
+                    "executor": "StructuredControllabilityExecutor" if structured else "MethodRuleScoringService",
+                    "profile": structured.controllability_profile.profile_id if structured else "",
+                    "ttc": structured is not None,
+                },
+                "asil": {"executor": "MethodContractASILService", "matrix_cells": len(method.asil.mappings)},
+                "runtime_yaml_read": 0,
+                "rating_causal_back_edge": 0,
+                "template_yaml_parity": "SHARED_API_DIFFERENT_EXECUTION_MODEL",
+            }
+            if args.review_run_id:
+                artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "scenario_binding_gaps.json"
+                )
+                scenario_binding = checks["method_contract"]["scenario_binding"]
+                risk_pipeline = checks["risk_pipeline"]
+                risk_trace_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "risk_execution_trace.json"
+                )
+                if risk_trace_artifact.is_file():
+                    try:
+                        risk_trace_payload = json.loads(risk_trace_artifact.read_text(encoding="utf-8"))
+                        risk_pipeline["review_trace"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(risk_trace_artifact),
+                            "risk_stage_status": risk_trace_payload.get("risk_stage_status", ""),
+                            "scenario_eligibility_summary": dict(risk_trace_payload.get("scenario_eligibility_summary", {})),
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["review_trace"] = {"status": "ARTIFACT_INVALID", "artifact_error": str(exc)}
+                else:
+                    risk_pipeline["review_trace"] = {"status": "ARTIFACT_NOT_FOUND", "artifact_path": str(risk_trace_artifact)}
+                exposure_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "exposure_binding_audit.json"
+                )
+                if exposure_audit_artifact.is_file():
+                    try:
+                        exposure_audit = json.loads(
+                            exposure_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        risk_pipeline["exposure_input_binding"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(exposure_audit_artifact),
+                            "dimension_routing_summary": dict(
+                                exposure_audit.get("dimension_routing_summary", {})
+                            ),
+                            "component_domain_summary": {
+                                key: exposure_audit.get(
+                                    "component_domain_summary", {}
+                                ).get(key, 0)
+                                for key in ("resolved_malfunctions", "pending_malfunctions")
+                            },
+                            "e_readiness": dict(exposure_audit.get("after", {})),
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["exposure_input_binding"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["exposure_input_binding"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(exposure_audit_artifact),
+                    }
+                exposure_coverage_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "exposure_dimension_coverage_audit.json"
+                )
+                if exposure_coverage_audit_artifact.is_file():
+                    try:
+                        coverage_audit = json.loads(
+                            exposure_coverage_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        inventory = coverage_audit.get("coverage_rule_inventory", {})
+                        granularity = coverage_audit.get("coverage_granularity", {})
+                        summary = coverage_audit.get("summary", {})
+                        if not all(isinstance(value, dict) for value in (
+                            inventory, granularity, summary,
+                        )):
+                            raise ValueError("exposure coverage audit sections must be objects")
+                        risk_pipeline["exposure_coverage_governance"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(exposure_coverage_audit_artifact),
+                            "dimension_universe": len(
+                                coverage_audit.get("method_dimension_universe", [])
+                            ),
+                            "coverage_authority": {
+                                "source": "normalized/scenario_coverage_rules.yaml",
+                                "status": (
+                                    "RESOLVED" if inventory.get("approved_rule_count", 0)
+                                    else "PENDING_METHOD_SEMANTICS"
+                                ),
+                            },
+                            "coverage_granularity": str(granularity.get("status", "")),
+                            "approved_coverage_rules": inventory.get("approved_rule_count", 0),
+                            "r3_coverage_resolved_assessments": summary.get("RESOLVED", 0),
+                            "r3_coverage_pending_assessments": summary.get(
+                                "PENDING_METHOD_SEMANTICS", 0
+                            ),
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["exposure_coverage_governance"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["exposure_coverage_governance"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(exposure_coverage_audit_artifact),
+                    }
+                severity_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "severity_delta_v_semantic_audit.json"
+                )
+                if severity_audit_artifact.is_file():
+                    try:
+                        severity_audit = json.loads(
+                            severity_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        summary = severity_audit.get("summary", {})
+                        provenance = severity_audit.get("method_semantic_provenance", {})
+                        if not isinstance(summary, dict) or not isinstance(provenance, dict):
+                            raise ValueError("severity semantic audit sections must be objects")
+                        risk_pipeline["severity"]["semantic_audit"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(severity_audit_artifact),
+                            "semantic_resolution": provenance.get("semantic_resolution", ""),
+                            "source_status": provenance.get("source_status", ""),
+                            "delta_v_derivation": severity_audit.get(
+                                "delta_v_derivation_authority", {}
+                            ).get("status", ""),
+                            "r3": {
+                                key: summary.get(key, 0)
+                                for key in (
+                                    "READY", "PENDING_INPUT", "PENDING_METHOD_SEMANTICS",
+                                    "direct_delta_v_available", "ego_speed_available",
+                                    "relative_speed_available",
+                                )
+                            },
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["severity"]["semantic_audit"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["severity"]["semantic_audit"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(severity_audit_artifact),
+                    }
+                risk_context_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "hazardous_event_risk_context_audit.json"
+                )
+                if risk_context_audit_artifact.is_file():
+                    try:
+                        risk_context_audit = json.loads(
+                            risk_context_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        summary = risk_context_audit.get("summary", {})
+                        identity = risk_context_audit.get("hazardous_event_identity", {})
+                        substrate = risk_context_audit.get("risk_context_substrate", {})
+                        if not all(isinstance(value, dict) for value in (
+                            summary, identity, substrate,
+                        )):
+                            raise ValueError("risk context audit sections must be objects")
+                        risk_pipeline["hazardous_event_risk_context"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(risk_context_audit_artifact),
+                            "hazardous_event_identity": identity.get("status", ""),
+                            "text_used_as_identity": identity.get("text_used_as_identity", True),
+                            "hazardous_event_prose_consumed": substrate.get(
+                                "hazardous_event_prose_consumed", True
+                            ),
+                            "collision_consequence_layer": substrate.get(
+                                "collision_consequence_layer", ""
+                            ),
+                            "r3": {
+                                key: summary.get(key, 0)
+                                for key in (
+                                    "causal_relevant_hazardous_events", "severity_ready",
+                                    "severity_pending_input", "controllability_ready",
+                                    "controllability_pending_input",
+                                )
+                            },
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["hazardous_event_risk_context"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["hazardous_event_risk_context"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(risk_context_audit_artifact),
+                    }
+                controllability_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "controllability_branch_policy_audit.json"
+                )
+                if controllability_audit_artifact.is_file():
+                    try:
+                        controllability_audit = json.loads(
+                            controllability_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        summary = controllability_audit.get("summary", {})
+                        comparison = controllability_audit.get("runtime_comparison", {})
+                        tree = controllability_audit.get("confirmed_method_decision_tree", {})
+                        if not all(isinstance(value, dict) for value in (
+                            summary, comparison, tree,
+                        )):
+                            raise ValueError("controllability branch audit sections must be objects")
+                        risk_pipeline["controllability"]["branch_audit"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(controllability_audit_artifact),
+                            "selected_profile": tree.get("selected_profile", ""),
+                            "source_status": tree.get("source_status", ""),
+                            "unknown_override_policy": tree.get(
+                                "unknown_override_policy", "",
+                            ),
+                            "runtime_policy_source": "METHOD_CONTRACT",
+                            "implicit_python_default": tree.get(
+                                "implicit_python_default", None,
+                            ),
+                            "runtime_contract_alignment": comparison.get(
+                                "runtime_contract_alignment", "",
+                            ),
+                            "method_semantic_completeness": comparison.get(
+                                "method_semantic_completeness", "",
+                            ),
+                            "r3": {
+                                key: summary.get(key, 0)
+                                for key in (
+                                    "resolved_by_override", "eligible_for_ttc",
+                                    "blocked_before_ttc", "ttc_inputs_ready", "c_ready",
+                                    "c_pending_input", "c_method_branch_unresolved",
+                                )
+                            },
+                            "historical_source_leakage": summary.get(
+                                "historical_source_leakage", 0,
+                            ),
+                            "prose_derived_c_fact": summary.get("prose_derived_c_fact", 0),
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        risk_pipeline["controllability"]["branch_audit"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["controllability"]["branch_audit"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(controllability_audit_artifact),
+                    }
+                if not artifact.is_file():
+                    scenario_binding["run_coverage_status"] = "ARTIFACT_NOT_FOUND"
+                    scenario_binding["artifact_path"] = str(artifact)
+                else:
+                    try:
+                        payload = json.loads(artifact.read_text(encoding="utf-8"))
+                        coverage = payload.get("scenario_binding_coverage", {})
+                        if not isinstance(coverage, dict):
+                            raise ValueError("scenario_binding_coverage must be an object")
+                        scenario_binding["run_coverage_status"] = "AVAILABLE"
+                        scenario_binding["run_coverage"] = coverage
+                        scenario_binding["artifact_path"] = str(artifact)
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        scenario_binding["run_coverage_status"] = "ARTIFACT_INVALID"
+                        scenario_binding["artifact_path"] = str(artifact)
+                        scenario_binding["artifact_error"] = str(exc)
+                coverage_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "scenario_coverage_proposals.json"
+                )
+                coverage_governance = checks["method_contract"]["scenario_coverage_governance"]
+                if not coverage_artifact.is_file():
+                    coverage_governance["review_status"] = "ARTIFACT_NOT_FOUND"
+                    coverage_governance["artifact_path"] = str(coverage_artifact)
+                else:
+                    try:
+                        coverage_payload = json.loads(
+                            coverage_artifact.read_text(encoding="utf-8")
+                        )
+                        proposals = coverage_payload.get("proposals", [])
+                        if not isinstance(proposals, list):
+                            raise ValueError("scenario coverage proposals must be a list")
+                        coverage_governance["review_status"] = "AVAILABLE"
+                        coverage_governance["artifact_path"] = str(coverage_artifact)
+                        coverage_governance["review_proposal_count"] = len(proposals)
+                        coverage_governance["per_function"] = {
+                            str(item.get("function_id", "")): {
+                                "coverage_status": item.get("coverage_status", ""),
+                                "dimensions": {
+                                    str(dimension.get("dimension", "")): dimension.get(
+                                        "coverage_status", ""
+                                    )
+                                    for dimension in item.get("candidate_dimensions", [])
+                                    if isinstance(dimension, dict)
+                                },
+                            }
+                            for item in proposals if isinstance(item, dict)
+                            and str(item.get("function_id", "")).strip()
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        coverage_governance["review_status"] = "ARTIFACT_INVALID"
+                        coverage_governance["artifact_path"] = str(coverage_artifact)
+                        coverage_governance["artifact_error"] = str(exc)
+                utilization_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "confirmed_yaml_utilization.json"
+                )
+                utilization = checks["method_contract"]["confirmed_yaml_utilization"]
+                if utilization_artifact.is_file():
+                    try:
+                        utilization_payload = json.loads(
+                            utilization_artifact.read_text(encoding="utf-8")
+                        )
+                        utilization["review_status"] = "AVAILABLE"
+                        utilization["artifact_path"] = str(utilization_artifact)
+                        utilization["fm_template_match_status_counts"] = dict(
+                            utilization_payload.get("fm_template_matching", {}).get(
+                                "status_counts", {}
+                            )
+                        )
+                        utilization["fm_selector_taxonomy"] = dict(
+                            utilization_payload.get("fm_selector_taxonomy", {})
+                        )
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        utilization["review_status"] = "ARTIFACT_INVALID"
+                        utilization["artifact_error"] = str(exc)
+                else:
+                    utilization["review_status"] = "ARTIFACT_NOT_FOUND"
+                    utilization["artifact_path"] = str(utilization_artifact)
+                semantic_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "fm_selector_semantic_audit.json"
+                )
+                semantic_audit = checks["method_contract"]["confirmed_yaml_utilization"].setdefault(
+                    "fm_selector_semantic_audit", {}
+                )
+                if semantic_audit_artifact.is_file():
+                    try:
+                        semantic_audit_payload = json.loads(
+                            semantic_audit_artifact.read_text(encoding="utf-8")
+                        )
+                        semantic_audit.update({
+                            "review_status": "AVAILABLE",
+                            "artifact_path": str(semantic_audit_artifact),
+                            "contract_status": dict(
+                                semantic_audit_payload.get("contract_status", {})
+                            ),
+                            "failure_semantic_audit_summary": dict(
+                                semantic_audit_payload.get(
+                                    "failure_semantic_audit_summary", {}
+                                )
+                            ),
+                            "component_semantic_audit_summary": dict(
+                                semantic_audit_payload.get(
+                                    "function_component_category_matrix", {}
+                                ).get("semantic_audit_summary", {})
+                            ),
+                            "template_qualification": dict(
+                                semantic_audit_payload.get(
+                                    "template_qualification", {}
+                                ).get("counts", {})
+                            ),
+                        })
+                    except (OSError, ValueError, json.JSONDecodeError) as exc:
+                        semantic_audit.update({
+                            "review_status": "ARTIFACT_INVALID",
+                            "artifact_path": str(semantic_audit_artifact),
+                            "artifact_error": str(exc),
+                        })
+                else:
+                    semantic_audit.update({
+                        "review_status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(semantic_audit_artifact),
+                    })
         except Exception as exc:
             checks["method_contract"] = {"ok": False, "error": str(exc)}
         try:

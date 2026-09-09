@@ -11,7 +11,8 @@ from hara_agent.models import (
     ScenarioCandidate, SourceRef,
 )
 from hara_agent.services.analysis import (
-    MethodRuleScoringService, PotentialHarmResolver,
+    ExposureDimensionCoverageService, MethodRuleScoringService,
+    PotentialHarmResolver,
 )
 from hara_agent.services.semantic import (
     CausalEvidenceSelector, ScenarioFeasibilityAgent,
@@ -133,9 +134,18 @@ def test_potential_harm_is_resolved_from_method_severity_semantics():
         report_contract=report,
     )
     scenario = {
-        "scenario_id": "SCN-1", "malfunction_id": "MF-1", "delta_v_kph": 20.0,
+        "scenario_id": "SCN-1", "malfunction_id": "MF-1", "relative_speed_kph": 20.0,
         "collision_type": "FRONTAL", "road_user_type": "VEHICLE",
+        "_fact_provenance": {"relative_speed_kph": {
+            "provenance": "PROJECT_INPUT",
+            "source_refs": [{"location": "tests/test_p0b_pre_causal_risk_boundary.py"}],
+        }},
     }
+    scenario["_exposure_dimension_coverage_decision"] = (
+        ExposureDimensionCoverageService(method).decide(
+            assessment_key="MF-1::SCN-1", function=None, operating_mode="Active",
+        )
+    )
     scored = MethodRuleScoringService(method).score(scenario, "hazard")
     registry = build_project_evidence_registry(
         ItemDefinitionFacts(system_description="system", item_boundary="vehicle", sources=[_source()]), method,

@@ -16,10 +16,17 @@ sources:
   ftti_budgets: raw/ftti_budgets.yaml
   component_taxonomy: raw/component_taxonomy.yaml
   failure_type_taxonomy: raw/failure_type_taxonomy.yaml
+  scenario_templates: raw/fm_scenario_templates.yaml
+  scenario_domain: raw/domain_rules/avp_low_speed.yaml
+  coupling_examples: raw/coupling_examples.yaml
+  infeasible_examples: raw/infeasible_examples.yaml
 
 normalized_sources:
   guidewords: normalized/guidewords.yaml
   scenario_constraints: normalized/scenario_constraints.yaml
+  scenario_aliases: normalized/scenario_aliases.yaml
+  scenario_coverage_rules: normalized/scenario_coverage_rules.yaml
+  fm_template_selector_map: normalized/fm_template_selector_map.yaml
   derivation_rules: normalized/derivation_rules.yaml
   exposure_policy: normalized/exposure_policy.yaml
   controllability_aliases: normalized/controllability_aliases.yaml
@@ -28,7 +35,12 @@ normalized_sources:
 excluded_numeric_authorities:
   - raw/controllability_rules.yaml
   - raw/c_iso26262.yaml
-  - raw/domain_rules/avp_low_speed.yaml
+
+excluded_numeric_sections:
+  raw/domain_rules/avp_low_speed.yaml:
+    - exposure
+    - controllability
+    - severity
 
 policies:
   asil_zero_short_circuit: QM
@@ -59,3 +71,6 @@ asset_hashes:
   raw/kb_retrieval.yaml: b2c379c6397424f765f6438d7adbcb14572321caa57f94bed56f3906897bfee8
   raw/severity_table.yaml: 1c2797d399874125d05c2c3cbe27865dc17dc03efb52dbfabdd99f092a8481d2
   raw/vda702_atoms.yaml: 5c76536491dc8795007f7dbad9a29f37a5ebb974e42d40f717276767fccfeb5c
+  normalized/scenario_aliases.yaml: e3cfbac84282bd83e164348807d4bd276b67b6408fcf0aac1958bf63f63c3ef1
+  normalized/scenario_coverage_rules.yaml: 9c755819cb08c09d57a21b5ad5576c296d14f7490af31152fe456002804bd86a
+  normalized/fm_template_selector_map.yaml: e7beb284c2f9e67fcd22383ba87f7b70e41dfa3049fc5f754877909f953afabe

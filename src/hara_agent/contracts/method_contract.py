@@ -276,6 +276,145 @@ class ScenarioConstraintDisposition(str, Enum):
 
 
 @dataclass(frozen=True)
+class FMTemplateMatch:
+    """Exact, source-defined selectors for an FM scenario template."""
+
+    keywords: tuple[str, ...]
+    component_categories: tuple[str, ...]
+    failure_types: tuple[str, ...]
+    matching_semantics: str = "KEYWORD_OR_COMPONENT_CATEGORY_OR_FAILURE_TYPE"
+
+
+@dataclass(frozen=True)
+class FailureModeTaxonomyValue:
+    """One source-governed selector value and its explicit aliases."""
+
+    canonical_id: str
+    aliases: tuple[str, ...]
+    source_ref: SourceRef
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class FailureModeSelectorTaxonomy:
+    """Typed vocabulary used to validate FM template selectors.
+
+    This is deliberately a vocabulary contract, not a classifier: a value is
+    resolved only when it is an exact canonical ID or a source-declared alias.
+    """
+
+    component_categories: tuple[FailureModeTaxonomyValue, ...]
+    failure_types: tuple[FailureModeTaxonomyValue, ...]
+    component_source_ref: SourceRef
+    failure_type_source_ref: SourceRef
+    source_role: str = "TAXONOMY"
+
+
+@dataclass(frozen=True)
+class FMTemplateSelectorMapping:
+    """A reviewed vocabulary bridge from one template selector to one taxonomy ID."""
+
+    mapping_id: str
+    selector_type: str
+    source_template_value: str
+    canonical_target: str
+    mapping_semantics: str
+    runtime_status: str
+    template_source_ref: SourceRef
+    taxonomy_source_ref: SourceRef | None
+    candidate_targets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FMTemplateSelectorAdapter:
+    """Typed reconciliation of confirmed template and FM taxonomy vocabularies."""
+
+    mappings: tuple[FMTemplateSelectorMapping, ...]
+    source_ref: SourceRef
+    source_role: str = "FM_TEMPLATE_SELECTOR_ADAPTER"
+
+
+@dataclass(frozen=True)
+class FMTemplateScenario:
+    label: str
+    obj_type: str
+    obj_position: str
+    obj_distance_m: float | None
+    obj_v_kph: float | None
+    collision_type: str
+    source_ref: SourceRef
+
+
+@dataclass(frozen=True)
+class FMScenarioTemplate:
+    template_id: str
+    match: FMTemplateMatch
+    required_scenarios: tuple[FMTemplateScenario, ...]
+    source_ref: SourceRef
+    source_role: str = "SCENARIO_TEMPLATE_CONSTRAINT"
+    original_precedence: int = 0
+
+
+@dataclass(frozen=True)
+class FMScenarioTemplateCatalog:
+    templates: tuple[FMScenarioTemplate, ...]
+    odd_geometry_m: tuple[tuple[str, float], ...]
+    source_ref: SourceRef
+    source_role: str = "SCENARIO_TEMPLATE_CONSTRAINT"
+
+
+@dataclass(frozen=True)
+class DomainTriggeringStateMapping:
+    rule_id: str
+    collision_type: str
+    target: str
+    v_other_min_kmh: float | None
+    v_other_max_kmh: float | None
+    triggering_state_key: str
+    source_ref: SourceRef
+    source_role: str = "CONFIRMED_DOMAIN_MAPPING"
+
+
+@dataclass(frozen=True)
+class DomainKinematicDefaults:
+    v_other_kmh: tuple[float, ...]
+    gap_m: tuple[tuple[str, float], ...]
+    reaction_delay_s: float | None
+    source_ref: SourceRef
+    source_role: str = "DOMAIN_DEFAULT"
+
+
+@dataclass(frozen=True)
+class ConfirmedFallbackDimension:
+    source_dimension: str
+    terms: tuple[str, ...]
+    target_dimension: str
+    source_ref: SourceRef
+    source_role: str = "CONFIRMED_FALLBACK_TERM"
+    target_status: str = "TARGET_DIMENSION_PENDING"
+
+
+@dataclass(frozen=True)
+class ScenarioDomainKnowledge:
+    triggering_state_mappings: tuple[DomainTriggeringStateMapping, ...]
+    kinematic_defaults: DomainKinematicDefaults | None
+    fallback_dimensions: tuple[ConfirmedFallbackDimension, ...]
+    numeric_sections: tuple[str, ...]
+    source_ref: SourceRef
+
+
+@dataclass(frozen=True)
+class ScenarioMethodContract:
+    """Typed, non-causal Scenario knowledge compiled from selected method assets."""
+
+    fm_template_catalog: FMScenarioTemplateCatalog | None = None
+    failure_mode_selector_taxonomy: FailureModeSelectorTaxonomy | None = None
+    fm_template_selector_adapter: FMTemplateSelectorAdapter | None = None
+    domain_knowledge: ScenarioDomainKnowledge | None = None
+    example_catalogs: tuple[SourceRef, ...] = ()
+
+
+@dataclass(frozen=True)
 class ScenarioConstraintPredicate:
     dimension: str
     values: tuple[str, ...]
@@ -307,6 +446,7 @@ class ScenarioModel:
     source_binding: RoleBinding
     source_type: str = "METHOD_SCENARIO_ONTOLOGY"
     constraint_rules: tuple[ScenarioConstraintRule, ...] = ()
+    scenario_method: ScenarioMethodContract = field(default_factory=ScenarioMethodContract)
 
 
 @dataclass(frozen=True)
@@ -497,6 +637,17 @@ class MethodContract:
         result = _serialize(self)
         if self.structured_risk_method is None:
             result.pop("structured_risk_method", None)
+        scenario_method = result.get("scenario_model", {}).get("scenario_method")
+        if scenario_method == {
+            "fm_template_catalog": None,
+            "failure_mode_selector_taxonomy": None,
+            "fm_template_selector_adapter": None,
+            "domain_knowledge": None,
+            "example_catalogs": [],
+        }:
+            # Preserve the existing template-route contract/checkpoint shape when
+            # no YAML Scenario method source has been compiled.
+            result["scenario_model"].pop("scenario_method", None)
         result["blocking_diagnostics"] = _serialize(self.blocking_diagnostics)
         result["warnings"] = _serialize(self.warnings)
         return result

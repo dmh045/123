@@ -12,19 +12,20 @@ from hara_agent.models import (
     ItemDefinitionFacts,
     MalfunctionCandidate,
     ScenarioCandidate,
-    ScenarioFeasibilityAssessment,
+    ScenarioFeasibilityAssessment, evaluate_risk_eligibility,
 )
 from hara_agent.services.semantic import (
     DEFAULT_CAUSAL_EVIDENCE_BUDGET, ScenarioFeasibilityAgent,
     ScenarioRiskFactAgent, build_project_evidence_registry,
 )
+from hara_agent.services.analysis import RiskExecutionTraceService, ScenarioMethodService
 from hara_agent.workflow.state import HARAState, WorkflowStage
 
 from .parallel import ordered_parallel_map
 from ..review_artifacts import ReviewArtifactWriter
 
 
-SCENARIO_BATCH_CHECKPOINT_VERSION = "scenario-malfunction-batch-v3"
+SCENARIO_BATCH_CHECKPOINT_VERSION = "scenario-malfunction-batch-v4"
 
 
 def _scenario_batch_cache_key(
@@ -50,6 +51,9 @@ def _scenario_batch_cache_key(
             "scenario_contract_version": item.scenario_contract_version,
             "facts": item.facts,
             "fact_provenance": item.fact_provenance,
+            "malfunction_template_context": item.context_resolution.get(
+                "malfunction_template_context", {}
+            ),
         } for item in candidates],
     }
     serialized = json.dumps(
@@ -86,6 +90,28 @@ def _load_cached_scenario_batch(
     return assessments, audit
 
 
+def _assess_with_template_context(
+    agent: ScenarioFeasibilityAgent,
+    malfunction: MalfunctionCandidate,
+    candidates: list[ScenarioCandidate],
+    bindings: list[dict],
+    project_registry,
+) -> tuple[list[ScenarioFeasibilityAssessment], dict]:
+    """Keep M-specific template context out of global ScenarioCandidate state."""
+    assessments, audit = agent.assess(
+        malfunction, candidates, project_registry=project_registry,
+    )
+    audit["template_context_bindings"] = bindings
+    audit["template_context_injected_count"] = sum(
+        bool(item.get("injected")) for item in bindings
+    )
+    audit["template_context_qualification_counts"] = {
+        status: sum(item.get("qualification") == status for item in bindings)
+        for status in ("STRONG_MATCH", "WEAK_MATCH", "AMBIGUOUS", "NO_MATCH")
+    }
+    return assessments, audit
+
+
 def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
                      malfunctions: list[MalfunctionCandidate],
                      candidates: list[ScenarioCandidate],
@@ -109,6 +135,23 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         state.item_definition["scenario_assessment_batches"] = cache
     batch_by_malfunction: dict[str, tuple[list, dict]] = {}
     pending_malfunctions = []
+    template_service = ScenarioMethodService(method) if method is not None else None
+    contextual_candidates: dict[str, list[ScenarioCandidate]] = {}
+    template_binding_audit: dict[str, list[dict]] = {}
+    for malfunction in malfunctions:
+        bindings = []
+        contextual = []
+        for candidate in candidates:
+            if template_service is None:
+                contextual.append(candidate)
+                continue
+            bound, binding = template_service.bind_template_context(
+                malfunction, candidate,
+            )
+            contextual.append(bound)
+            bindings.append(binding)
+        contextual_candidates[malfunction.malfunction_id] = contextual
+        template_binding_audit[malfunction.malfunction_id] = bindings
 
     def persist_review_batch(malfunction, result) -> None:
         """Persist one canonical malfunction result before other workers finish."""
@@ -128,7 +171,9 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         review_artifact_writer.write_summary(state)
 
     for malfunction in malfunctions:
-        cache_key = _scenario_batch_cache_key(agent, malfunction, candidates)
+        cache_key = _scenario_batch_cache_key(
+            agent, malfunction, contextual_candidates[malfunction.malfunction_id],
+        )
         restored = _load_cached_scenario_batch(
             cache.get(malfunction.malfunction_id),
             cache_key=cache_key,
@@ -156,7 +201,9 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         # before waiting for the remaining workers.  This preserves prior
         # completed malfunction projections if a later provider call fails.
         persist_review_batch(malfunction, result)
-        cache_key = _scenario_batch_cache_key(agent, malfunction, candidates)
+        cache_key = _scenario_batch_cache_key(
+            agent, malfunction, contextual_candidates[malfunction.malfunction_id],
+        )
         cache[malfunction.malfunction_id] = {
             "cache_version": SCENARIO_BATCH_CHECKPOINT_VERSION,
             "cache_key": cache_key,
@@ -176,8 +223,9 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
 
     new_batches = ordered_parallel_map(
         pending_malfunctions,
-        lambda malfunction: agent.assess(
-            malfunction, candidates, project_registry=project_registry
+        lambda malfunction: _assess_with_template_context(
+            agent, malfunction, contextual_candidates[malfunction.malfunction_id],
+            template_binding_audit[malfunction.malfunction_id], project_registry,
         ),
         max_workers=max_workers,
         on_progress=(
@@ -200,7 +248,7 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         state.record("scenario_feasibility_assessed", **audit)
     retained_ids = {
         item.scenario_id for item in assessments
-        if item.retain and item.status.value == "FINALIZED"
+        if evaluate_risk_eligibility(item).eligible
     }
     state.scenarios = [item for item in candidates if item.scenario_id in retained_ids]
     serialized_assessments = [item.to_dict() for item in assessments]
@@ -299,6 +347,22 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         retained_count=len(state.scenarios),
         assessment_count=len(assessments),
     )
+    if review_artifact_writer is not None:
+        binding_gaps = []
+        for event in reversed(state.audit_trail):
+            if event.get("event") == "scenario_candidates_prepared":
+                binding_gaps = list(event.get("scenario_binding_gaps", []))
+                break
+        review_artifact_writer.write_risk_execution_trace(
+            RiskExecutionTraceService(method).project(
+                run_id=state.run_id,
+                assessments=serialized_assessments,
+                candidates=candidates,
+                committed=True,
+                binding_gaps=binding_gaps,
+            )
+        )
+        review_artifact_writer.write_summary(state)
     state.item_definition.pop("scenario_assessment_batches", None)
     initial_batches = sum(item.get("initial_batch_count", 0) for item in audits)
     adaptive_splits = sum(item.get("adaptive_split_count", 0) for item in audits)

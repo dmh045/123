@@ -22,8 +22,11 @@ class GuidewordAssessment:
     status: ReviewStatus = ReviewStatus.PENDING
     confidence: float = 0.0
     disposition: GuidewordDisposition | None = None
+    # The governed method identifier. Legacy callers fall back to the name.
+    guideword_id: str = ""
 
     def __post_init__(self):
+        self.guideword_id = str(self.guideword_id or self.guideword).strip()
         if self.disposition is None:
             self.disposition = (
                 GuidewordDisposition.DOWNSTREAM_CANDIDATE
@@ -82,8 +85,13 @@ class MalfunctionCandidate:
     model_local_id: str = ""
     component_category: str = ""
     failure_type: str = ""
+    # Deterministic, non-semantic taxonomy audit populated after generation.
+    selector_resolution: dict[str, object] = field(default_factory=dict)
+    # Copied from the accepted GuidewordAssessment; never model-authored.
+    guideword_id: str = ""
 
     def __post_init__(self):
+        self.guideword_id = str(self.guideword_id or self.guideword).strip()
         required = (
             self.malfunction_id, self.function_id, self.guideword, self.description,
             self.functional_effect, self.vehicle_level_hazard,

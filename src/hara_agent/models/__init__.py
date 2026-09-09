@@ -12,7 +12,11 @@ from .malfunction import (
 )
 from .risk import RiskAssessment
 from .safety_goal import SafetyGoal
-from .scenario import ScenarioCandidate, ScenarioFeasibilityAssessment
+from .scenario import (
+    RiskEligibilityDecision, RiskEligibilityStatus, ScenarioCandidate,
+    ScenarioFeasibilityAssessment, evaluate_risk_eligibility,
+    evaluate_risk_eligibility_payload,
+)
 
 __all__ = [
     "EvidenceValue", "EvidenceKind", "EvidenceRecord", "EVIDENCE_NAMESPACES",
@@ -21,5 +25,7 @@ __all__ = [
     "ProjectFactOutputType", "GuidewordAssessment", "GuidewordDisposition",
     "MalfunctionCandidate",
     "ReviewStatus", "RiskAssessment", "SafetyGoal",
-    "ScenarioCandidate", "ScenarioFeasibilityAssessment", "SourceRef",
+    "ScenarioCandidate", "ScenarioFeasibilityAssessment",
+    "RiskEligibilityDecision", "RiskEligibilityStatus",
+    "evaluate_risk_eligibility", "evaluate_risk_eligibility_payload", "SourceRef",
 ]

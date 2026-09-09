@@ -16,7 +16,7 @@ from hara_agent.services.analysis import (
     SpeedResolutionResult,
     UnresolvedProjectContextError,
 )
-from hara_agent.models import ItemDefinitionFacts, SourceRef
+from hara_agent.models import FunctionDefinition, ItemDefinitionFacts, ReviewStatus, SourceRef
 from hara_agent.services.extraction import ValidatedArtifactCache
 from hara_agent.services.reporting import HARAExcelRenderer
 from hara_agent.services.semantic import (
@@ -182,6 +182,12 @@ class HARAApplication:
                         }))
                         if method.structured_risk_method is not None else ()
                     ),
+                    failure_types=(
+                        method.scenario_model.scenario_method
+                        .failure_mode_selector_taxonomy.failure_types
+                        if method.scenario_model.scenario_method
+                        .failure_mode_selector_taxonomy is not None else ()
+                    ),
                 ),
                 scenarios=ScenarioFeasibilityAgent(self.llm_client),
                 risk_facts=ScenarioRiskFactAgent(self.llm_client),
@@ -270,8 +276,22 @@ class HARAApplication:
             )
         facts = ItemDefinitionFacts.from_dict(typed)
         resolution = self.resolve_project_speed_context(state)
+        functions = []
+        for value in state.functions:
+            if not isinstance(value, dict):
+                continue
+            payload = dict(value)
+            payload["sources"] = [
+                item if isinstance(item, SourceRef) else SourceRef(**item)
+                for item in payload.get("sources", [])
+            ]
+            payload["status"] = ReviewStatus(
+                payload.get("status", ReviewStatus.PENDING.value)
+            )
+            functions.append(FunctionDefinition(**payload))
         return candidate_service.generate(
             project_facts=facts,
             operating_mode=resolution.operating_mode,
             speed_resolution=resolution,
+            functions=functions,
         )

@@ -5,6 +5,7 @@ import re
 import sys
 from typing import Any
 
+from hara_agent.contracts import FailureModeTaxonomyValue
 from hara_agent.infrastructure.llm import LLMClient, LLMRequest
 from hara_agent.models import (
     FunctionDefinition,
@@ -13,8 +14,19 @@ from hara_agent.models import (
     ReviewStatus,
 )
 
+from . import malfunction_guideword_gate
 from .parsing import CONFIDENCE_PROMPT_CONTRACT, parse_confidence
 from .traceability import resolve_malfunction_sources
+
+
+# Preserve the established import surface for callers of this module.
+MalfunctionGuidewordGateViolation = (
+    malfunction_guideword_gate.MalfunctionGuidewordGateViolation
+)
+
+
+class _FailureTypeContractViolation(ValueError):
+    """A configured canonical failure_type was omitted or not governed."""
 
 
 class MalfunctionHazardAgent:
@@ -25,9 +37,61 @@ class MalfunctionHazardAgent:
 
     INJURY_TERMS = ("死亡", "致命伤", "骨折", "窒息", "fatality", "death", "injury")
 
-    def __init__(self, client: LLMClient, *, component_categories: tuple[str, ...] = ()):
+    def __init__(
+        self,
+        client: LLMClient,
+        *,
+        component_categories: tuple[str, ...] = (),
+        failure_types: tuple[FailureModeTaxonomyValue, ...] = (),
+    ):
         self.client = client
         self.component_categories = tuple(component_categories)
+        self.failure_types = tuple(failure_types)
+        self.failure_type_ids = tuple(item.canonical_id for item in self.failure_types)
+        if len(set(self.failure_type_ids)) != len(self.failure_type_ids):
+            raise ValueError("Malfunction failure_type contract has duplicate canonical IDs")
+
+    def _response_schema(self) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            "malfunction_id": {"type": "string"},
+            "guideword": {"type": "string"},
+            "description": {"type": "string"},
+            "functional_effect": {"type": "string"},
+            "vehicle_level_hazard": {"type": "string"},
+            "causal_chain": {"type": "array", "items": {"type": "string"}, "minItems": 2},
+            "confidence": {"type": "number"},
+            "status": {"type": "string"},
+        }
+        required = [
+            "malfunction_id", "guideword", "description", "functional_effect",
+            "vehicle_level_hazard", "causal_chain", "confidence", "status",
+        ]
+        if self.component_categories:
+            properties["component_category"] = {
+                "type": "string", "enum": list(self.component_categories),
+            }
+            required.append("component_category")
+        if self.failure_types:
+            properties["failure_type"] = {
+                "type": "string", "enum": list(self.failure_type_ids),
+            }
+            required.append("failure_type")
+        return {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["candidates"],
+            "additionalProperties": False,
+        }
 
     def generate(self, function: FunctionDefinition,
                  assessments: list[GuidewordAssessment]
@@ -35,7 +99,8 @@ class MalfunctionHazardAgent:
         applicable = [
             item for item in assessments
             if (
-                item.is_semantically_complete
+                item.applicable is True
+                and item.is_semantically_complete
                 and item.enters_downstream
                 and item.status is ReviewStatus.FINALIZED
             )
@@ -79,7 +144,7 @@ class MalfunctionHazardAgent:
         request = self._request(function, applicable)
         response = self.client.complete_json(request)
         candidates = self._parse_candidates(
-            function, response.data, assessments,
+            function, response.data, assessments, applicable,
         )
         self._validate(candidates, applicable, require_coverage=False)
         missing = self._missing_guidewords(candidates, applicable)
@@ -102,6 +167,7 @@ class MalfunctionHazardAgent:
             repaired = self._parse_candidates(
                 function,
                 repair_response.data,
+                assessments,
                 [item for item in applicable if item.guideword in set(missing)],
             )
             self._validate(
@@ -129,7 +195,7 @@ class MalfunctionHazardAgent:
             targeted_response = self.client.complete_json(targeted_request)
             repair_responses.append(targeted_response)
             targeted = self._parse_candidates(
-                function, targeted_response.data, target,
+                function, targeted_response.data, assessments, target,
             )
             self._validate(targeted, target, require_coverage=False)
             self._merge_candidates(function, candidates, targeted)
@@ -178,6 +244,17 @@ class MalfunctionHazardAgent:
                 f"component_category必须从{list(self.component_categories)}中选择一个；"
                 "它表示该失效直接所属的部件/能力类别，不得自行创造类别。"
             )
+        failure_type_contract = ""
+        if self.failure_types:
+            taxonomy_context = [
+                {"id": item.canonical_id, "description": item.description}
+                for item in self.failure_types
+            ]
+            failure_type_contract = (
+                "failure_type is required and must be exactly one canonical ID from "
+                f"FailureTypeTaxonomy={json.dumps(taxonomy_context, ensure_ascii=False)}. "
+                "Choose according to the malfunction's concrete semantics; do not map it mechanically from the guideword and do not invent a free-string value."
+            )
         repair_instruction = ""
         if coverage_repair:
             repair_instruction = (
@@ -201,7 +278,9 @@ class MalfunctionHazardAgent:
                 "candidates每项包含malfunction_id、guideword、description、functional_effect、"
                 "vehicle_level_hazard、causal_chain、confidence、status"
                 + ("、component_category。" if self.component_categories else "。")
+                + (" failure_type is also required." if self.failure_types else "")
                 + classification_contract +
+                failure_type_contract +
                 "causal_chain必须是至少包含两个非空字符串的JSON array，例如"
                 "[\"功能偏差\",\"车辆行为异常\",\"车辆级危险状态\"]；"
                 "即使因果关系可写成一句话，也禁止把causal_chain写成string。"
@@ -216,6 +295,7 @@ class MalfunctionHazardAgent:
                 "guideword_count": len(guidewords),
             },
             max_tokens=8192,
+            response_schema=self._response_schema(),
         )
 
     def _parse_candidates(
@@ -223,6 +303,7 @@ class MalfunctionHazardAgent:
         function: FunctionDefinition,
         data: dict[str, Any],
         assessments: list[GuidewordAssessment],
+        allowed_assessments: list[GuidewordAssessment],
     ) -> list[MalfunctionCandidate]:
         raw = data.get("candidates")
         if not isinstance(raw, list):
@@ -230,6 +311,9 @@ class MalfunctionHazardAgent:
         assessment_by_guideword = {item.guideword: item for item in assessments}
         assessment_by_folded = {
             item.guideword.casefold(): item for item in assessments
+        }
+        allowed_guideword_ids = {
+            item.guideword_id for item in allowed_assessments
         }
         candidates: list[MalfunctionCandidate] = []
         seen_ids: set[str] = set()
@@ -268,9 +352,15 @@ class MalfunctionHazardAgent:
                     flush=True,
                 )
             try:
-                if assessment is None:
-                    raise ValueError("guideword is not an approved applicable input")
+                malfunction_guideword_gate.validate_malfunction_guideword_gate(
+                    function_id=function.function_id,
+                    guideword=guideword,
+                    guideword_id=(assessment.guideword_id if assessment else ""),
+                    assessment=assessment,
+                    scheduled_guideword_ids=allowed_guideword_ids,
+                )
                 candidate = self._parse(function, normalized_item, assessment)
+                self._validate_failure_type(candidate)
                 if (
                     self.component_categories
                     and candidate.component_category not in self.component_categories
@@ -303,6 +393,17 @@ class MalfunctionHazardAgent:
                     )
                 if candidate.description in seen_descriptions:
                     raise ValueError("duplicate malfunction description")
+            except MalfunctionGuidewordGateViolation as error:
+                print(
+                    "[HARA] malfunction guideword gate violation "
+                    f"function={function.function_id} index={index} "
+                    f"guideword={guideword or '<missing>'} reason={error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
+            except _FailureTypeContractViolation:
+                raise
             except (TypeError, ValueError) as error:
                 print(
                     "[HARA] malfunction candidate filtered "
@@ -316,6 +417,21 @@ class MalfunctionHazardAgent:
             seen_descriptions.add(candidate.description)
             candidates.append(candidate)
         return candidates
+
+    def _validate_failure_type(self, candidate: MalfunctionCandidate) -> None:
+        if not self.failure_types:
+            return
+        value = candidate.failure_type.strip()
+        if not value:
+            raise _FailureTypeContractViolation(
+                "MALFUNCTION_FAILURE_TYPE_CONTRACT_VIOLATION: missing failure_type "
+                f"malfunction={candidate.malfunction_id}"
+            )
+        if value not in self.failure_type_ids:
+            raise _FailureTypeContractViolation(
+                "MALFUNCTION_FAILURE_TYPE_CONTRACT_VIOLATION: invalid failure_type "
+                f"malfunction={candidate.malfunction_id} value={value!r}"
+            )
 
     @staticmethod
     def _merge_candidates(
@@ -392,6 +508,7 @@ class MalfunctionHazardAgent:
             functional_effect=str(item.get("functional_effect", "")).strip(),
             vehicle_level_hazard=str(item.get("vehicle_level_hazard", "")).strip(),
             causal_chain=causal_chain,
+            guideword_id=assessment.guideword_id if assessment is not None else "",
             component_category=str(item.get("component_category", "")).strip(),
             failure_type=str(item.get("failure_type", "")).strip(),
             sources=sources,
@@ -465,6 +582,7 @@ class MalfunctionHazardAgent:
                   applicable: list[GuidewordAssessment], *,
                   require_coverage: bool = True):
         allowed = {item.guideword for item in applicable}
+        allowed_by_name = {item.guideword: item for item in applicable}
         ids = [item.malfunction_id for item in candidates]
         descriptions = [item.description for item in candidates]
         if len(ids) != len(set(ids)) or len(descriptions) != len(set(descriptions)):
@@ -477,6 +595,14 @@ class MalfunctionHazardAgent:
         if require_coverage and missing:
             raise ValueError(f"适用Guideword缺少Malfunction候选: {missing}")
         for item in candidates:
+            assessment = allowed_by_name[item.guideword]
+            malfunction_guideword_gate.validate_malfunction_guideword_gate(
+                function_id=item.function_id,
+                guideword=item.guideword,
+                guideword_id=item.guideword_id,
+                assessment=assessment,
+                scheduled_guideword_ids={entry.guideword_id for entry in applicable},
+            )
             hazard_lower = item.vehicle_level_hazard.lower()
             if any(term in hazard_lower for term in self.INJURY_TERMS):
                 raise ValueError(f"Hazard不得直接写伤害结果: {item.malfunction_id}")

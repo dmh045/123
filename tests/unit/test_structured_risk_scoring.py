@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
-from hara_agent.contracts import CalculationStatus
+import pytest
+
+from hara_agent.contracts import (
+    CalculationStatus, ExposureDimensionCoverage,
+    ExposureDimensionCoverageDecision, ExposureDimensionCoverageStatus,
+    ExposureDimensionRequirementStatus, SeveritySemanticResolution, SpeedSemantic,
+    UnknownOverridePolicy,
+)
 from hara_agent.method_sources import YamlBaselineCompiler
-from hara_agent.services.analysis import StructuredRiskScoringService
+from hara_agent.services.analysis import (
+    ExposureDimensionCoverageService, StructuredRiskScoringService,
+)
 from hara_agent.template import TemplateRoleCompiler
 
 
@@ -22,12 +32,45 @@ def _service() -> StructuredRiskScoringService:
     return StructuredRiskScoringService(method)
 
 
-def _scenario(delta_v: float) -> dict:
+def _resolved_coverage(service: StructuredRiskScoringService) -> ExposureDimensionCoverageDecision:
+    dimensions = []
+    for item in service.method.scenario_model.dimensions:
+        status = (
+            ExposureDimensionRequirementStatus.REQUIRED
+            if item.canonical_name in {"WHERE", "EGO_ACTION"}
+            else ExposureDimensionRequirementStatus.NOT_APPLICABLE
+        )
+        dimensions.append(ExposureDimensionCoverage(
+            dimension=item.canonical_name,
+            status=status,
+            rule_id="TEST-COVERAGE",
+            source_ref="tests/test_structured_risk_scoring.py#TEST-COVERAGE",
+        ))
+    return ExposureDimensionCoverageDecision(
+        assessment_key="MF-1::SC-1",
+        method_contract_hash=str(service.method.metadata["template_hash"]),
+        coverage_status=ExposureDimensionCoverageStatus.RESOLVED,
+        dimensions=tuple(dimensions),
+        coverage_rule_ids=("TEST-COVERAGE",),
+        granularity="TEST",
+    )
+
+
+def _scenario(service: StructuredRiskScoringService, relative_speed: float) -> dict:
     return {
         "scenario_id": "SC-1", "malfunction_id": "MF-1",
-        "delta_v_kph": delta_v, "collision_type": "FRONTAL",
+        "relative_speed_kph": relative_speed, "collision_type": "FRONTAL",
         "road_user_type": "VEHICLE", "component_category": "sensor_camera",
+        "_fact_provenance": {"relative_speed_kph": {
+            "provenance": "PROJECT_INPUT",
+            "source_refs": [{"location": "tests/test_structured_risk_scoring.py"}],
+        }},
         "scenario_atom_ids": ["SO010", "PH005"],
+        "method_scenario_dimensions": {
+            "WHERE": {"resolution_status": "RESOLVED", "atom_id": "SO010"},
+            "EGO_ACTION": {"resolution_status": "RESOLVED", "atom_id": "PH005"},
+        },
+        "_exposure_dimension_coverage_decision": _resolved_coverage(service),
         "ttc_s": 4.1, "driver_in_vehicle": True,
         "remote_intervention_available": False,
         "other_road_user_avoidance_possible": False,
@@ -36,8 +79,8 @@ def _scenario(delta_v: float) -> dict:
 
 def test_structured_severity_boundaries_and_c_profile():
     service = _service()
-    assert service.score(_scenario(3.9), "hazard")["severity"]["severity_score"] == "S0"
-    scored = service.score(_scenario(4.0), "hazard")
+    assert service.score(_scenario(service, 3.9), "hazard")["severity"]["severity_score"] == "S0"
+    scored = service.score(_scenario(service, 4.0), "hazard")
     assert scored["severity"]["severity_score"] == "S1"
     assert scored["exposure"]["exposure_score"] in {"E1", "E2", "E3", "E4"}
     assert scored["controllability"]["controllability_score"] == "C1"
@@ -45,7 +88,7 @@ def test_structured_severity_boundaries_and_c_profile():
 
 def test_structured_c_override_precedes_ttc():
     service = _service()
-    scenario = _scenario(20.0)
+    scenario = _scenario(service, 20.0)
     scenario.update({
         "ttc_s": 10.0, "driver_in_vehicle": False,
         "remote_intervention_available": False,
@@ -56,9 +99,111 @@ def test_structured_c_override_precedes_ttc():
     assert scored["controllability"]["engineering_rule_id"] == "driver_outside_no_intervention"
 
 
+def test_unknown_override_policy_is_explicit_and_does_not_implicitly_enter_ttc():
+    service = _service()
+    scenario = _scenario(service, 20.0)
+    scenario.pop("driver_in_vehicle")
+    scored = service.score(scenario, "hazard")["controllability"]
+    assert scored["calculation_status"] == CalculationStatus.PENDING_METHOD_SEMANTICS.value
+    assert scored["reasoning"] == "CONTROLLABILITY_UNKNOWN_BRANCH_POLICY_UNSPECIFIED"
+    assert scored["unknown_override_policy"] == UnknownOverridePolicy.UNSPECIFIED.value
+    assert scored["unknown_policy_action"] == "UNSPECIFIED_BLOCKED"
+    assert scored["decision_status"] == "METHOD_BRANCH_UNRESOLVED"
+
+
+def test_skip_to_ttc_fixture_preserves_unknown_in_runtime_trace():
+    service = _service()
+    service.structured = replace(
+        service.structured,
+        controllability_branch_policy=replace(
+            service.structured.controllability_branch_policy,
+            unknown_override_policy=UnknownOverridePolicy.SKIP_TO_TTC,
+        ),
+    )
+    scenario = _scenario(service, 20.0)
+    scenario.pop("driver_in_vehicle")
+    scored = service.score(scenario, "hazard")["controllability"]
+    assert scored["controllability_score"] == "C1"
+    assert scored["unknown_policy_action"] == "SKIP_TO_TTC"
+    assert scored["decision_status"] == "TTC_AFTER_UNKNOWN_OVERRIDE"
+    assert scored["rule_match_states"][0]["state"] == "UNKNOWN"
+
+
 def test_structured_exposure_missing_atom_is_pending_input():
     service = _service()
-    scenario = _scenario(20.0)
+    scenario = _scenario(service, 20.0)
     scenario["scenario_atom_ids"] = []
     scored = service.score(scenario, "hazard")
     assert scored["exposure"]["calculation_status"] == CalculationStatus.PENDING_INPUT.value
+    assert scored["exposure"]["executor_invoked"] is False
+
+
+def test_pending_coverage_does_not_invoke_exposure_with_available_atom(monkeypatch):
+    service = _service()
+    scenario = _scenario(service, 20.0)
+    scenario["scenario_atom_ids"] = ["FA001"]
+    scenario["_exposure_dimension_coverage_decision"] = (
+        ExposureDimensionCoverageService(service.method).decide(
+            assessment_key="MF-1::SC-1", function=None, operating_mode="Active",
+        )
+    )
+    calls = 0
+    original = service.exposure.lookup
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.exposure, "lookup", counted)
+    scored = service.score(scenario, "hazard")
+
+    assert calls == 0
+    assert scored["exposure"]["calculation_status"] == CalculationStatus.PENDING_METHOD_SEMANTICS.value
+    assert scored["exposure"]["exposure_score"] == ""
+    assert scored["exposure"]["exposure_result"] is None
+    assert scored["exposure"]["executor_invoked"] is False
+    assert scored["exposure"]["missing_method_semantics"] == "EXPOSURE_DIMENSION_COVERAGE"
+
+
+def test_structured_scoring_requires_typed_coverage_decision():
+    service = _service()
+    scenario = _scenario(service, 20.0)
+    scenario.pop("_exposure_dimension_coverage_decision")
+
+    with pytest.raises(ValueError, match="ExposureDimensionCoverageDecision"):
+        service.score(scenario, "hazard")
+
+
+def test_approved_source_conflict_prevents_severity_executor_invocation(monkeypatch):
+    original = _service()
+    severity = original.method.structured_risk_method.severity
+    semantic = replace(
+        severity.semantic,
+        compiled_semantic=SpeedSemantic.UNRESOLVED,
+        semantic_resolution=SeveritySemanticResolution.APPROVED_SOURCE_INTERNAL_CONFLICT,
+    )
+    method = replace(
+        original.method,
+        structured_risk_method=replace(
+            original.method.structured_risk_method,
+            severity=replace(severity, speed_semantic=SpeedSemantic.UNRESOLVED, semantic=semantic),
+        ),
+    )
+    service = StructuredRiskScoringService(method)
+    calls = 0
+
+    def forbidden(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Severity executor must not run for source conflict")
+
+    monkeypatch.setattr(service.severity, "lookup", forbidden)
+    scenario = _scenario(original, 8.0)
+    scenario["delta_v_kph"] = 8.0
+    scored = service.score(scenario, "hazard")
+
+    assert calls == 0
+    assert scored["severity"]["calculation_status"] == CalculationStatus.PENDING_METHOD_SEMANTICS.value
+    assert scored["severity"]["executor_invoked"] is False
+    assert scored["severity"]["pending_reason"] == "APPROVED_SOURCE_SEMANTIC_CONFLICT"

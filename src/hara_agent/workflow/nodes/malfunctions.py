@@ -3,12 +3,81 @@ from __future__ import annotations
 from dataclasses import asdict
 import sys
 
-from hara_agent.models import FunctionDefinition, GuidewordAssessment
+from hara_agent.models import (
+    FunctionDefinition,
+    GuidewordAssessment,
+    MalfunctionCandidate,
+)
 from hara_agent.services.semantic import MalfunctionHazardAgent
+from hara_agent.services.semantic import malfunction_guideword_gate
+from hara_agent.services.analysis import FailureModeSelectorResolver
 from hara_agent.workflow.state import HARAState, WorkflowStage
 from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
 from .parallel import ordered_parallel_map
+
+
+def _validate_malfunction_guideword_gate(
+    state: HARAState,
+    candidates: list[MalfunctionCandidate],
+    assessments: list[GuidewordAssessment],
+) -> None:
+    """Protect the stage boundary even if an alternate agent bypasses its parser."""
+    by_identity: dict[tuple[str, str], GuidewordAssessment] = {}
+    for assessment in assessments:
+        key = (assessment.function_id, assessment.guideword_id)
+        if key in by_identity:
+            state.record(
+                "malfunction_guideword_gate_violation",
+                reason="duplicate_guideword_assessment_identity",
+                function_id=assessment.function_id,
+                guideword_id=assessment.guideword_id,
+            )
+            raise ValueError(
+                "MALFUNCTION_GUIDEWORD_GATE_VIOLATION "
+                f"duplicate assessment function_id={assessment.function_id} "
+                f"guideword_id={assessment.guideword_id}"
+            )
+        by_identity[key] = assessment
+
+    for candidate in candidates:
+        guideword_id = candidate.guideword_id
+        assessment = by_identity.get((candidate.function_id, guideword_id))
+        scheduled_guideword_ids = {
+            item.guideword_id
+            for item in assessments
+            if item.function_id == candidate.function_id
+        }
+        try:
+            malfunction_guideword_gate.validate_malfunction_guideword_gate(
+                function_id=candidate.function_id,
+                guideword=candidate.guideword,
+                guideword_id=candidate.guideword_id,
+                assessment=assessment,
+                scheduled_guideword_ids=scheduled_guideword_ids,
+            )
+        except malfunction_guideword_gate.MalfunctionGuidewordGateViolation:
+            state.record(
+                "malfunction_guideword_gate_violation",
+                reason="candidate_not_downstream_candidate",
+                function_id=candidate.function_id,
+                guideword=candidate.guideword,
+                guideword_id=guideword_id,
+                assessment_applicable=(assessment.applicable if assessment else None),
+                assessment_disposition=(
+                    assessment.disposition.value if assessment else None
+                ),
+                assessment_status=(assessment.status.value if assessment else None),
+            )
+            raise ValueError(
+                "MALFUNCTION_GUIDEWORD_GATE_VIOLATION "
+                f"function_id={candidate.function_id} guideword={candidate.guideword!r} "
+                f"guideword_id={guideword_id!r}"
+            )
+    state.record(
+        "malfunction_guideword_gate_validated",
+        candidate_count=len(candidates),
+    )
 
 
 def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
@@ -16,7 +85,8 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
                         assessments: list[GuidewordAssessment],
                         max_workers: int = 1,
                         progress=None,
-                        review_artifact_writer: ReviewArtifactWriter | None = None) -> HARAState:
+                        review_artifact_writer: ReviewArtifactWriter | None = None,
+                        selector_resolver: FailureModeSelectorResolver | None = None) -> HARAState:
     candidates = []
     def generate(function):
         related = [item for item in assessments if item.function_id == function.function_id]
@@ -33,6 +103,7 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         candidates.extend(items)
         audits.append(audit)
         state.record("malfunction_hazard_candidates_generated", **audit)
+    _validate_malfunction_guideword_gate(state, candidates, assessments)
     normalized = []
     seen_ids = set()
     function_counts = {}
@@ -45,6 +116,8 @@ def derive_malfunctions(state: HARAState, agent: MalfunctionHazardAgent,
         seen_ids.add(authoritative_id)
         item.malfunction_id = authoritative_id
         item.model_local_id = model_local_id
+        if selector_resolver is not None:
+            item.selector_resolution = selector_resolver.resolve(item).to_dict()
         value = asdict(item)
         normalized.append(value)
         if review_artifact_writer is not None:

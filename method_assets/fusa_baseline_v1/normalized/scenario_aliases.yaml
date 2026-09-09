@@ -1,0 +1,5 @@
+schema_version: "1.0"
+source: "governed Scenario terminology aliases"
+# Only APPROVED records are compiled.  PROPOSED and REJECTED records remain
+# review data and must never alter runtime Scenario binding.
+aliases: []

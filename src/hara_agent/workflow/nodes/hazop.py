@@ -83,22 +83,29 @@ def assess_guidewords(state: HARAState, agent: GuidewordApplicabilityAgent,
             additional_llm_calls=0,
         )
 
-    guideword_names = [
-        value.name if isinstance(value, Guideword) else str(value).strip()
+    guideword_id_to_name = {
+        (value.guideword_id if isinstance(value, Guideword) else str(value).strip()): (
+            value.name if isinstance(value, Guideword) else str(value).strip()
+        )
         for value in guidewords
-    ]
-    applicable_names = {
-        item.guideword
+    }
+    applicable_ids = {
+        item.guideword_id
         for item in assessments
         if item.applicable
         and item.is_semantically_complete
         and item.status.value == "FINALIZED"
     }
-    unmatched = [name for name in guideword_names if name not in applicable_names]
+    unmatched_ids = [
+        guideword_id for guideword_id in guideword_id_to_name
+        if guideword_id not in applicable_ids
+    ]
+    unmatched = [guideword_id_to_name[guideword_id] for guideword_id in unmatched_ids]
     state.record(
         "guideword_global_coverage_audited",
-        guideword_count=len(guideword_names),
-        matched_count=len(guideword_names) - len(unmatched),
+        guideword_count=len(guideword_id_to_name),
+        matched_count=len(guideword_id_to_name) - len(unmatched_ids),
+        unmatched_guideword_ids=unmatched_ids,
         unmatched_guidewords=unmatched,
         action="audit_only_no_forced_match",
     )

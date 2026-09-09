@@ -27,6 +27,7 @@ from hara_agent.services.semantic import (
 )
 from hara_agent.services.analysis import (
     ASILLookupService,
+    FailureModeSelectorResolver,
     MethodRiskFactBindingService,
     SafetyGoalService,
     ScenarioScoringService,
@@ -141,6 +142,10 @@ def _scenario_candidates(state: HARAState, inputs: SemanticWorkflowInputs) -> li
     else:
         candidates, audit = inputs.scenario_candidate_factory(state)
     if inputs.review_artifact_writer is not None:
+        inputs.review_artifact_writer.write_scenario_binding_gaps(
+            audit.get("scenario_binding_coverage", {}),
+            audit.get("scenario_binding_gaps", []),
+        )
         for candidate in candidates:
             inputs.review_artifact_writer.record_scenario_candidate(
                 candidate,
@@ -226,6 +231,10 @@ def build_semantic_frontend_graph(
             max_workers=inputs.max_workers,
             progress=inputs.progress,
             review_artifact_writer=inputs.review_artifact_writer,
+            selector_resolver=(
+                FailureModeSelectorResolver(inputs.method_contract)
+                if inputs.method_contract is not None else None
+            ),
         ),
     )
     graph.add_node(
@@ -271,6 +280,7 @@ def build_hara_agent_graph(
             risk_services.scoring,
             risk_services.asil_table,
             risk_services.risk_fact_binding,
+            inputs.review_artifact_writer,
         ),
     )
     graph.add_node(

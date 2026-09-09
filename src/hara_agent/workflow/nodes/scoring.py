@@ -5,11 +5,14 @@ from typing import Any
 from hara_agent.contracts import ScenarioCausalAssessment
 from hara_agent.models import (
     EvidenceValue, ItemDefinitionFacts, MalfunctionCandidate, ReviewStatus,
-    RiskAssessment, ScenarioCandidate, SourceRef,
+    RiskAssessment, ScenarioCandidate, SourceRef, evaluate_risk_eligibility_payload,
 )
 from hara_agent.services.analysis import (
     ASILLookupService, MethodRiskFactBindingService,
-    PotentialHarmResolver, RiskCalculationInputService, ScenarioScoringService,
+    ExposureDimensionCoverageService, PotentialHarmResolver,
+    HazardousEventRiskContextService,
+    RiskCalculationInputService, RiskExecutionTraceService,
+    ScenarioScoringService,
 )
 from hara_agent.services.semantic.scenario_evidence import FactRegistry, build_fact_registry
 from hara_agent.services.semantic.project_evidence_registry import (
@@ -17,6 +20,7 @@ from hara_agent.services.semantic.project_evidence_registry import (
 )
 from hara_agent.services.analysis.scenario_physics import derive_scenario_physics
 from hara_agent.workflow.state import HARAState, WorkflowStage
+from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
 
 def _unique_index(values, key, label: str):
@@ -108,27 +112,51 @@ def score_structured_scenarios(
     scoring: ScenarioScoringService,
     asil_table: ASILLookupService,
     risk_fact_binding: MethodRiskFactBindingService | None = None,
+    review_artifact_writer: ReviewArtifactWriter | None = None,
 ) -> HARAState:
     """Score each retained malfunction-scenario association without prose heuristics."""
     scenario_by_id = _unique_index(state.scenarios, lambda item: item.scenario_id, "Scenario")
     malfunction_by_id = _unique_index(
         state.malfunctions, lambda item: str(item.get("malfunction_id", "")), "Malfunction",
     )
+    function_by_id = _unique_index(
+        state.functions, lambda item: str(item.get("function_id", "")), "Function",
+    )
+    coverage_service = (
+        ExposureDimensionCoverageService(scoring.method)
+        if getattr(scoring, "method", None) is not None
+        and getattr(scoring.method, "structured_risk_method", None) is not None
+        else None
+    )
+    risk_context_service = (
+        HazardousEventRiskContextService(scoring.method)
+        if getattr(scoring, "method", None) is not None
+        and getattr(scoring.method, "structured_risk_method", None) is not None
+        else None
+    )
     assessments = state.item_definition.get("scenario_assessments", [])
-    typed_assessments = [
-        (item, _validated_causal_assessment(item)) for item in assessments
-    ]
-    retained = [(item, causal) for item, causal in typed_assessments if all((
-        item.get("status") == ReviewStatus.FINALIZED.value,
-        causal.review_status is ReviewStatus.FINALIZED,
-        item.get("physically_feasible") is True,
-        item.get("functionally_relevant") is True,
-        causal.is_validated,
-    ))]
+    retained = []
+    for item in assessments:
+        if not isinstance(item, dict):
+            continue
+        decision = evaluate_risk_eligibility_payload(item)
+        if decision.eligible:
+            retained.append((item, _validated_causal_assessment(item)))
+        elif (
+            "PENDING_LEGACY_ELIGIBILITY" in decision.reason_codes
+            and all(item.get(field) is True for field in (
+                "physically_feasible", "functionally_relevant", "causally_relevant",
+            ))
+        ):
+            # A legacy payload cannot promote itself through positive flags.  Keep
+            # the historical explicit failure rather than silently reaching the
+            # risk stage with no typed causal contract.
+            _validated_causal_assessment(item)
     risks: list[RiskAssessment] = []
     pending: list[dict[str, Any]] = []
     binding_audits: list[dict[str, Any]] = []
     calculation_audits: list[dict[str, Any]] = []
+    scored_by_pair: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]] = {}
     calculation_inputs = RiskCalculationInputService()
     harm_resolver = PotentialHarmResolver()
     project_facts = (
@@ -187,6 +215,10 @@ def score_structured_scenarios(
                 "scenario_id": scenario_id,
                 "atomic_variant": candidate.atomic_variant,
             })
+            if risk_context_service is not None:
+                risk_context_service.validate_source_conflicts(
+                    scenario, binding.values,
+                )
             scenario.update(binding.values)
             scenario["_fact_provenance"].update(binding.provenance)
             binding_audits.append({
@@ -199,8 +231,30 @@ def score_structured_scenarios(
             raise ValueError(
                 f"保留场景缺少Hazardous Event: {malfunction_id}/{scenario_id}"
             )
+        risk_context = None
+        if risk_context_service is not None:
+            risk_context = risk_context_service.build(
+                malfunction_id=malfunction_id,
+                scenario_id=scenario_id,
+                hazard_node_id=causal_assessment.causal_chain[-1],
+                scenario=scenario,
+            )
+            scenario = risk_context_service.scoring_facts(risk_context, scenario)
 
+        if coverage_service is not None:
+            function = coverage_service.function_from_projection(
+                function_by_id.get(str(malfunction.get("function_id", "")), {})
+            )
+            scenario["_exposure_dimension_coverage_decision"] = coverage_service.decide(
+                assessment_key=f"{malfunction_id}::{scenario_id}",
+                function=function,
+                operating_mode=candidate.operating_mode,
+            )
         scored = scoring.score(scenario, hazard_event)
+        scored_by_pair[(malfunction_id, scenario_id)] = (
+            scored["severity"], scored["exposure"], scored["controllability"],
+            dict(scenario),
+        )
         severity = _scoring_evidence(scored["severity"], "severity_score")
         exposure = _scoring_evidence(scored["exposure"], "exposure_score")
         controllability = _scoring_evidence(
@@ -320,6 +374,17 @@ def score_structured_scenarios(
             "controllability_input": calculation_inputs.controllability(
                 malfunction_id, scenario_id, scenario,
             ).to_dict(),
+            "hazardous_event_risk_context": (
+                risk_context.to_dict() if risk_context is not None else {}
+            ),
+            "severity_readiness": (
+                risk_context_service.severity_readiness(risk_context)
+                if risk_context is not None and risk_context_service is not None else {}
+            ),
+            "controllability_readiness": (
+                risk_context_service.controllability_readiness(risk_context)
+                if risk_context is not None and risk_context_service is not None else {}
+            ),
             "ftti_input": calculation_inputs.ftti(
                 malfunction_id, scenario_id, asil_value,
             ).to_dict(),
@@ -348,4 +413,22 @@ def score_structured_scenarios(
         risk_fact_binding_audits=binding_audits,
         risk_calculation_inputs=calculation_audits,
     )
+    if review_artifact_writer is not None:
+        binding_gaps = []
+        for event in reversed(state.audit_trail):
+            if event.get("event") == "scenario_candidates_prepared":
+                binding_gaps = list(event.get("scenario_binding_gaps", []))
+                break
+        review_artifact_writer.write_risk_execution_trace(
+            RiskExecutionTraceService(getattr(scoring, "method", None)).project(
+                run_id=state.run_id,
+                assessments=state.item_definition.get("scenario_assessments", []),
+                candidates=state.scenarios,
+                committed=True,
+                scored=scored_by_pair,
+                risks=risks,
+                binding_gaps=binding_gaps,
+            )
+        )
+        review_artifact_writer.write_summary(state)
     return state

@@ -1,0 +1,19 @@
+schema_version: "1.0"
+source: "governed Scenario coverage rules"
+# Only APPROVED rules are compiled into MethodContract runtime metadata.
+# PROPOSED and REJECTED rules remain review data and must never alter
+# Scenario candidate binding or atom resolution.
+knowledge_sources:
+  - source_asset: raw/dimension_structure.yaml
+    classification: NORMATIVE_METHOD_RULE
+    rationale: "Defines the governed Method dimension taxonomy, not Function coverage."
+  - source_asset: raw/vda702_atoms.yaml
+    classification: NORMATIVE_METHOD_RULE
+    rationale: "Defines governed atoms, not Function-to-dimension coverage."
+  - source_asset: raw/fm_scenario_templates.yaml
+    classification: SCENARIO_TEMPLATE_CONSTRAINT
+    rationale: "Confirmed Method template context is compiled separately; it is not a Function coverage rule."
+  - source_asset: raw/domain_rules/avp_low_speed.yaml
+    classification: DOMAIN_RULE
+    rationale: "Confirmed domain mappings/defaults are compiled separately; numeric S/E/C sections remain inactive here."
+rules: []

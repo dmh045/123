@@ -64,11 +64,14 @@ def derive_scenario_physics(
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             continue
         normalized[key] = (float(value), key)
-    distance_m = _distance_m(
-        scenario.facts.get("relative_distance_m", scenario.facts.get("relative_distance"))
+    distance_input_key = (
+        "relative_distance_m"
+        if "relative_distance_m" in scenario.facts
+        else "relative_distance"
     )
+    distance_m = _distance_m(scenario.facts.get(distance_input_key))
     if distance_m is not None:
-        normalized["relative_distance_m"] = (distance_m, "relative_distance")
+        normalized["relative_distance_m"] = (distance_m, distance_input_key)
 
     # Preserve canonical numeric inputs as deterministic, source-linked
     # physics facts.  This is normalization only; it does not derive a new
@@ -96,7 +99,7 @@ def derive_scenario_physics(
         and isinstance(relative_speed, (int, float))
         and relative_speed > 0
     ):
-        input_keys = ("relative_distance", "relative_speed_kph")
+        input_keys = (distance_input_key, "relative_speed_kph")
         input_metadata = [_input_metadata(scenario, key) for key in input_keys]
         derived_sources = tuple(dict.fromkeys(
             source for _, sources in input_metadata for source in sources
@@ -108,7 +111,7 @@ def derive_scenario_physics(
         )
         metadata = {
             "derivation_type": DerivedPhysicsType.TTC.value,
-            "inputs": ["SCN.relative_distance", "SCN.relative_speed_kph"],
+            "inputs": [f"SCN.{distance_input_key}", "SCN.relative_speed_kph"],
         }
         if scenario.semantic_fingerprint:
             metadata["semantic_fingerprint"] = scenario.semantic_fingerprint

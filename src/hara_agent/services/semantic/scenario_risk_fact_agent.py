@@ -14,7 +14,7 @@ from hara_agent.contracts import (
 from hara_agent.infrastructure.llm import LLMClient, LLMRequest
 from hara_agent.models import (
     FactProvenance, MalfunctionCandidate, ReviewStatus, RiskFact,
-    ScenarioCandidate, SourceRef,
+    ScenarioCandidate, SourceRef, evaluate_risk_eligibility_payload,
 )
 from hara_agent.models.project_facts import risk_fact_from_dict
 
@@ -127,12 +127,12 @@ class ScenarioRiskFactAgent:
         on_batch: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> tuple[list[RiskFact], dict[str, Any]]:
         specs = [item for item in required_specs if item.origin is FactOrigin.SCENARIO_FACT]
-        retained = [item for item in assessments if all((
-            item.get("status") == ReviewStatus.FINALIZED.value,
-            item.get("physically_feasible") is True,
-            item.get("functionally_relevant") is True,
-            item.get("causally_relevant") is True,
-        ))]
+        retained = [
+            item for item in assessments
+            if isinstance(item, dict) and evaluate_risk_eligibility_payload(
+                item, allow_legacy_boolean_gate=True,
+            ).eligible
+        ]
         if not specs or not retained:
             return [], {
                 "prompt_version": self.PROMPT_VERSION,

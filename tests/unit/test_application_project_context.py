@@ -97,17 +97,19 @@ def test_application_candidate_path_uses_parking_envelope_and_provenance():
     candidates, audit = app.prepare_scenario_candidates(_state(_facts()), _service())
 
     assert candidates
-    assert audit["ego_speed_kph"] == 5.0
+    assert audit["ego_speed_value_kph"] is None
+    assert audit["ego_speed_constraint"]["speed_max_kph"] == 5.0
     assert audit["speed_resolution"]["resolution_source"] == "SpeedEnvelope"
     assert audit["combination_strategy"] == (
-        "cartesian_project_fact_bindings_then_compiled_constraints"
+        "primary_dimension_anchor_with_pending_unbound_dimensions"
     )
-    assert audit["dimension_compatibility_status"] == "UNRESOLVED_NO_COMPILED_RULES"
-    assert audit["function_phase_binding_status"] == "UNRESOLVED_NO_COMPILED_BINDING"
+    assert audit["dimension_compatibility_status"] == "PENDING_NO_COMPILED_RULES"
+    assert audit["function_phase_binding_status"] == "NO_FUNCTION_CONTEXT"
     assert all(item.operating_mode == "parking" for item in candidates)
-    assert all(item.facts["ego_speed_kph"] == 5.0 for item in candidates)
+    assert all("ego_speed_kph" not in item.facts for item in candidates)
+    assert all(item.facts["ego_speed_constraint"]["speed_max_kph"] == 5.0 for item in candidates)
     assert all(
-        item.fact_provenance["ego_speed_kph"]["provenance"] == "PROJECT_INPUT"
+        item.fact_provenance["ego_speed_constraint"]["provenance"] == "PROJECT_INPUT"
         for item in candidates
     )
     assert all(

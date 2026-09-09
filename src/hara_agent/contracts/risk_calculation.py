@@ -31,6 +31,28 @@ class CalculationStatus(str, Enum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class ControllabilityFactState(str, Enum):
+    """Three-valued source state for a controllability branch predicate."""
+
+    TRUE = "TRUE"
+    FALSE = "FALSE"
+    UNKNOWN = "UNKNOWN"
+    CONFLICT = "CONFLICT"
+
+
+class UnknownOverridePolicy(str, Enum):
+    BLOCK_TTC = "BLOCK_TTC"
+    SKIP_TO_TTC = "SKIP_TO_TTC"
+    UNSPECIFIED = "UNSPECIFIED"
+
+
+class RuleMatchState(str, Enum):
+    MATCH = "MATCH"
+    NO_MATCH = "NO_MATCH"
+    UNKNOWN = "UNKNOWN"
+    CONFLICT = "CONFLICT"
+
+
 class RiskFactResolutionStatus(str, Enum):
     FOUND = "FOUND"
     NOT_APPLICABLE = "NOT_APPLICABLE"
@@ -76,6 +98,66 @@ class ExposureMethodDomain(str, Enum):
     UNRESOLVED = "UNRESOLVED"
 
 
+class ExposureDimensionCoverageStatus(str, Enum):
+    RESOLVED = "RESOLVED"
+    PENDING_METHOD_SEMANTICS = "PENDING_METHOD_SEMANTICS"
+
+
+class ExposureDimensionRequirementStatus(str, Enum):
+    REQUIRED = "REQUIRED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    OPTIONAL = "OPTIONAL"
+    PENDING_METHOD_SEMANTICS = "PENDING_METHOD_SEMANTICS"
+
+
+@dataclass(frozen=True)
+class ExposureDimensionCoverage:
+    """A method-authorized requirement for exactly one Exposure dimension."""
+
+    dimension: str
+    status: ExposureDimensionRequirementStatus
+    rule_id: str = ""
+    source_ref: str = ""
+    rationale_code: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.dimension:
+            raise ValueError("ExposureDimensionCoverage requires a dimension")
+        if self.status is ExposureDimensionRequirementStatus.PENDING_METHOD_SEMANTICS:
+            if self.rule_id or self.source_ref:
+                raise ValueError("Pending coverage must not claim an authoritative rule")
+        elif not self.rule_id or not self.source_ref:
+            raise ValueError("Resolved coverage dimension requires rule and source")
+
+
+@dataclass(frozen=True)
+class ExposureDimensionCoverageDecision:
+    """Separates method coverage authority from Scenario atom binding state."""
+
+    assessment_key: str
+    method_contract_hash: str
+    coverage_status: ExposureDimensionCoverageStatus
+    dimensions: tuple[ExposureDimensionCoverage, ...]
+    coverage_rule_ids: tuple[str, ...] = ()
+    granularity: str = "UNRESOLVED"
+
+    def __post_init__(self) -> None:
+        if not self.assessment_key or not self.method_contract_hash:
+            raise ValueError("ExposureDimensionCoverageDecision requires identity and method hash")
+        names = [item.dimension for item in self.dimensions]
+        if len(names) != len(set(names)):
+            raise ValueError("ExposureDimensionCoverageDecision dimensions must be unique")
+        has_pending = any(
+            item.status is ExposureDimensionRequirementStatus.PENDING_METHOD_SEMANTICS
+            for item in self.dimensions
+        )
+        if self.coverage_status is ExposureDimensionCoverageStatus.RESOLVED and has_pending:
+            raise ValueError("Resolved coverage cannot contain pending dimensions")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+
 @dataclass(frozen=True)
 class SeverityMethodBand:
     rule_id: str
@@ -99,6 +181,7 @@ class SeverityMethodBand:
 class SeverityMethod:
     method_id: str
     speed_semantic: SpeedSemantic
+    semantic: SeverityMethodSemantic
     bands: tuple[SeverityMethodBand, ...]
     source_ref: SourceRef
     road_user_groups: tuple[tuple[str, str], ...] = ()
@@ -108,8 +191,20 @@ class SeverityMethod:
     def __post_init__(self) -> None:
         if not self.method_id or not self.bands:
             raise ValueError("SeverityMethod requires identity and bands")
-        if self.speed_semantic is SpeedSemantic.UNRESOLVED:
-            raise ValueError("SeverityMethod speed semantic must be explicit")
+        if self.speed_semantic is not self.semantic.compiled_semantic:
+            raise ValueError("SeverityMethod semantic must match compiled speed semantic")
+        if (
+            self.speed_semantic is SpeedSemantic.UNRESOLVED
+            and self.semantic.semantic_resolution
+            is not SeveritySemanticResolution.APPROVED_SOURCE_INTERNAL_CONFLICT
+        ):
+            raise ValueError("Only an approved source conflict may leave Severity unresolved")
+        if (
+            self.speed_semantic is not SpeedSemantic.UNRESOLVED
+            and self.semantic.semantic_resolution
+            is SeveritySemanticResolution.APPROVED_SOURCE_INTERNAL_CONFLICT
+        ):
+            raise ValueError("Approved source conflict must not select a Severity semantic")
 
 
 @dataclass(frozen=True)
@@ -202,11 +297,25 @@ class ControllabilityOverride:
 
 
 @dataclass(frozen=True)
+class ControllabilityBranchPolicy:
+    profile_id: str
+    source_status: str
+    unknown_override_policy: UnknownOverridePolicy
+    source_ref: SourceRef
+    method_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.profile_id or self.source_status != "CONFIRMED" or not self.method_hash:
+            raise ValueError("ControllabilityBranchPolicy requires confirmed profile provenance")
+
+
+@dataclass(frozen=True)
 class StructuredRiskMethod:
     severity: SeverityMethod
     exposure: ExposureMethod
     controllability_profile: ControllabilityProfile
     controllability_overrides: tuple[ControllabilityOverride, ...]
+    controllability_branch_policy: ControllabilityBranchPolicy
     asil_zero_short_circuit: str
     method_source_hash: str
 
@@ -290,6 +399,189 @@ class SpeedSemantic(str, Enum):
     RELATIVE_SPEED = "RELATIVE_SPEED"
     IMPACT_SPEED = "IMPACT_SPEED"
     DELTA_V = "DELTA_V"
+
+
+class SeveritySemanticResolution(str, Enum):
+    CONFIRMED_RELATIVE_VELOCITY = "CONFIRMED_RELATIVE_VELOCITY"
+    CONFIRMED_DELTA_V = "CONFIRMED_DELTA_V"
+    APPROVED_SOURCE_INTERNAL_CONFLICT = "APPROVED_SOURCE_INTERNAL_CONFLICT"
+
+
+class SeveritySourceRole(str, Enum):
+    MACHINE_READABLE_NORMATIVE = "MACHINE_READABLE_NORMATIVE"
+    MACHINE_READABLE_CONFIGURATION = "MACHINE_READABLE_CONFIGURATION"
+    STRUCTURED_METADATA = "STRUCTURED_METADATA"
+    DESCRIPTIVE_ANNOTATION = "DESCRIPTIVE_ANNOTATION"
+    COMMENT_ONLY = "COMMENT_ONLY"
+    EXAMPLE_ONLY = "EXAMPLE_ONLY"
+
+
+class SeveritySourceAuthority(str, Enum):
+    PRIMARY = "PRIMARY"
+    SUPPORTING = "SUPPORTING"
+    NON_NORMATIVE = "NON_NORMATIVE"
+
+
+@dataclass(frozen=True)
+class SeveritySemanticSource:
+    source_ref: SourceRef
+    field_name: str
+    field_type: str
+    role: SeveritySourceRole
+    authority: SeveritySourceAuthority
+    semantic: str = ""
+    compiler_consumer: str = ""
+    runtime_consumer: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.field_name or not self.field_type:
+            raise ValueError("SeveritySemanticSource requires field identity and type")
+
+
+@dataclass(frozen=True)
+class SeverityMethodSemantic:
+    """Compiler-resolved severity input meaning and source-role evidence."""
+
+    source_status: str
+    source_named_semantic: str
+    compiled_semantic: SpeedSemantic
+    semantic_resolution: SeveritySemanticResolution
+    source_elements: tuple[SeveritySemanticSource, ...]
+    diagnostic_codes: tuple[str, ...] = ()
+    annotation_semantics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.source_status != "CONFIRMED":
+            raise ValueError("SeverityMethodSemantic requires a confirmed source status")
+        if not self.source_named_semantic or not self.source_elements:
+            raise ValueError("SeverityMethodSemantic requires named semantic and source evidence")
+        if not any(item.authority is SeveritySourceAuthority.PRIMARY for item in self.source_elements):
+            raise ValueError("SeverityMethodSemantic requires a primary source element")
+        expected = {
+            SeveritySemanticResolution.CONFIRMED_RELATIVE_VELOCITY: SpeedSemantic.RELATIVE_SPEED,
+            SeveritySemanticResolution.CONFIRMED_DELTA_V: SpeedSemantic.DELTA_V,
+            SeveritySemanticResolution.APPROVED_SOURCE_INTERNAL_CONFLICT: SpeedSemantic.UNRESOLVED,
+        }[self.semantic_resolution]
+        if self.compiled_semantic is not expected:
+            raise ValueError("Severity semantic resolution and compiled semantic disagree")
+
+    @property
+    def source_refs(self) -> tuple[SourceRef, ...]:
+        return tuple(item.source_ref for item in self.source_elements)
+
+    def to_dict(self) -> dict[str, Any]:
+        result = _to_dict(self)
+        result["source_refs"] = _to_dict(self.source_refs)
+        return result
+
+
+class SeverityInputSource(str, Enum):
+    DIRECT_PROJECT_FACT = "DIRECT_PROJECT_FACT"
+    DIRECT_SCENARIO_FACT = "DIRECT_SCENARIO_FACT"
+    DERIVED_PHYSICS = "DERIVED_PHYSICS"
+    APPROVED_LOOKUP = "APPROVED_LOOKUP"
+    METHOD_RULE = "METHOD_RULE"
+    UNKNOWN = "UNKNOWN"
+
+
+class RiskContextFactAuthority(str, Enum):
+    DIRECT_PROJECT_FACT = "DIRECT_PROJECT_FACT"
+    DIRECT_SCENARIO_FACT = "DIRECT_SCENARIO_FACT"
+    DERIVED_PHYSICS = "DERIVED_PHYSICS"
+    METHOD_RULE = "METHOD_RULE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class RiskContextFactStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_REQUIRED_BY_METHOD = "NOT_REQUIRED_BY_METHOD"
+    TTC_NOT_CLOSING = "TTC_NOT_CLOSING"
+
+
+@dataclass(frozen=True)
+class HazardousEventRiskFact:
+    status: RiskContextFactStatus
+    value: Any = None
+    source_type: RiskContextFactAuthority = RiskContextFactAuthority.UNAVAILABLE
+    source_ref: str = ""
+    derivation_rule_id: str = ""
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.reason.strip():
+            raise ValueError("HazardousEventRiskFact requires a reason")
+        if self.status is RiskContextFactStatus.AVAILABLE:
+            if self.value is None or self.source_type is RiskContextFactAuthority.UNAVAILABLE:
+                raise ValueError("Available HazardousEventRiskFact requires value and authority")
+            if not self.source_ref:
+                raise ValueError("Available HazardousEventRiskFact requires a source ref")
+        elif self.value is not None:
+            raise ValueError("Unavailable HazardousEventRiskFact must not carry a value")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+
+@dataclass(frozen=True)
+class HazardousEventRiskContext:
+    malfunction_id: str
+    scenario_id: str
+    hazardous_event_id: str
+    road_user_type: HazardousEventRiskFact
+    collision_type: HazardousEventRiskFact
+    ego_speed_kph: HazardousEventRiskFact
+    object_speed_kph: HazardousEventRiskFact
+    relative_speed_kph: HazardousEventRiskFact
+    impact_speed_kph: HazardousEventRiskFact
+    relative_distance_m: HazardousEventRiskFact
+    ttc_s: HazardousEventRiskFact
+    driver_in_vehicle: HazardousEventRiskFact
+    remote_intervention_available: HazardousEventRiskFact
+    other_road_user_avoidance_possible: HazardousEventRiskFact
+    direct_control_available: HazardousEventRiskFact
+    vehicle_stability: HazardousEventRiskFact
+    emergency_braking_available: HazardousEventRiskFact
+    function_type: HazardousEventRiskFact
+    has_remote_app: HazardousEventRiskFact
+
+    def __post_init__(self) -> None:
+        if not self.malfunction_id or not self.scenario_id or not self.hazardous_event_id:
+            raise ValueError("HazardousEventRiskContext requires stable assessment identity")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+
+class SeverityInputAuthorityStatus(str, Enum):
+    METHOD_CONFIRMED_INPUT_DIRECT = "METHOD_CONFIRMED_INPUT_DIRECT"
+    METHOD_CONFIRMED_DERIVATION = "METHOD_CONFIRMED_DERIVATION"
+    METHOD_SEMANTIC_AMBIGUITY = "METHOD_SEMANTIC_AMBIGUITY"
+    METHOD_DERIVATION_ABSENT = "METHOD_DERIVATION_ABSENT"
+    INPUT_MISSING = "INPUT_MISSING"
+
+
+@dataclass(frozen=True)
+class SeverityInputAuthority:
+    """Read-only authority record for a Severity speed input."""
+
+    speed_semantic: SpeedSemantic
+    value: float | None
+    source_type: SeverityInputSource
+    source_ref: str
+    derivation_rule_id: str
+    method_contract_hash: str
+    status: SeverityInputAuthorityStatus
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.method_contract_hash or not self.reason.strip():
+            raise ValueError("SeverityInputAuthority requires method hash and reason")
+        if self.value is not None and self.value < 0:
+            raise ValueError("SeverityInputAuthority value cannot be negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
 
 
 @dataclass(frozen=True)
@@ -406,6 +698,10 @@ class ControllabilityJudgement:
     inputs_used: tuple[str, ...]
     status: CalculationStatus
     reason: str
+    decision_status: str = ""
+    unknown_override_policy: UnknownOverridePolicy = UnknownOverridePolicy.UNSPECIFIED
+    unknown_policy_action: str = ""
+    rule_match_states: tuple[tuple[str, RuleMatchState], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.reason.strip():

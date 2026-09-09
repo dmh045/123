@@ -15,6 +15,7 @@ class ScenarioConstraintStatus(str, Enum):
     DROP = "DROP"
     CONFLICT = "CONFLICT"
     UNRESOLVED_NO_RULES = "UNRESOLVED_NO_RULES"
+    PENDING_COMPATIBILITY = "PENDING_COMPATIBILITY"
 
 
 @dataclass(frozen=True)
@@ -94,4 +95,24 @@ class ScenarioConstraintExecutor:
             ScenarioConstraintStatus.KEEP,
             tuple(rule.rule_id for rule in matched),
             "The combination is explicitly allowed by the compiled method.",
+        )
+
+    @staticmethod
+    def pending(
+        unresolved_dimensions: Sequence[str], bindings: dict[str, Any],
+    ) -> ScenarioConstraintEvaluation:
+        reasons = {
+            str(name): str(
+                bindings.get(name, {}).get("unresolved_reason", "PENDING_BINDING")
+            )
+            for name in unresolved_dimensions
+            if isinstance(bindings.get(name), dict)
+        }
+        return ScenarioConstraintEvaluation(
+            ScenarioConstraintStatus.PENDING_COMPATIBILITY,
+            (),
+            "Compatibility remains pending until every required dimension is bound: "
+            + ", ".join(
+                f"{name}={reason}" for name, reason in sorted(reasons.items())
+            ),
         )

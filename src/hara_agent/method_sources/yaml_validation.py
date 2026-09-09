@@ -71,4 +71,13 @@ def validate_manifest(manifest_path: Path) -> tuple[dict[str, Any], dict[str, di
         if relative not in expected:
             hashes[relative] = actual
         assets[role] = load_yaml_mapping(path)
+    controllability = assets.get("controllability_profile", {})
+    policy = controllability.get("unknown_override_policy")
+    if policy is not None and policy not in {
+        "BLOCK_TTC", "SKIP_TO_TTC", "UNSPECIFIED",
+    }:
+        raise YamlBaselineValidationError(
+            "controllability_profile.unknown_override_policy must be "
+            "BLOCK_TTC, SKIP_TO_TTC, or UNSPECIFIED"
+        )
     return manifest, assets, hashes

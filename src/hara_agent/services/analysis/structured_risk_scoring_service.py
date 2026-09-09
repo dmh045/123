@@ -2,13 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from hara_agent.contracts import CalculationStatus, MethodContract
+from hara_agent.contracts import (
+    CalculationStatus, ExposureDimensionCoverageDecision,
+    ExposureDimensionCoverageStatus, MethodContract, SeveritySemanticResolution,
+)
 
 from .deterministic_risk_executor import (
     ExposureMethodExecutor, SeverityMethodExecutor,
     StructuredControllabilityExecutor,
 )
 from .risk_calculation_input_service import RiskCalculationInputService
+from .exposure_dimension_coverage_service import ExposureDimensionCoverageService
+from .severity_delta_v_semantic_audit_service import SeverityDeltaVSemanticAuditService
 
 
 class StructuredRiskScoringService:
@@ -20,6 +25,8 @@ class StructuredRiskScoringService:
         self.method = method
         self.structured = method.structured_risk_method
         self.inputs = RiskCalculationInputService()
+        self.coverage = ExposureDimensionCoverageService(method)
+        self.severity_authority = SeverityDeltaVSemanticAuditService(method)
         self.severity = SeverityMethodExecutor()
         self.exposure = ExposureMethodExecutor()
         self.controllability = StructuredControllabilityExecutor()
@@ -52,19 +59,145 @@ class StructuredRiskScoringService:
             **extra,
         }
 
+    @staticmethod
+    def _controllability_extra(judgement) -> dict[str, Any]:
+        return {
+            "decision_status": judgement.decision_status,
+            "unknown_override_policy": judgement.unknown_override_policy.value,
+            "unknown_policy_action": judgement.unknown_policy_action,
+            "rule_match_states": [
+                {"rule_id": rule_id, "state": state.value}
+                for rule_id, state in judgement.rule_match_states
+            ],
+            "executor_invoked": True,
+        }
+
+    @staticmethod
+    def _coverage_decision(scenario: dict[str, Any]) -> ExposureDimensionCoverageDecision:
+        value = scenario.get("_exposure_dimension_coverage_decision")
+        if not isinstance(value, ExposureDimensionCoverageDecision):
+            raise ValueError(
+                "Structured Risk scoring requires an ExposureDimensionCoverageDecision"
+            )
+        return value
+
+    def _coverage_gated_exposure(
+        self, scenario: dict[str, Any], decision: ExposureDimensionCoverageDecision,
+    ) -> dict[str, Any] | None:
+        source = self.structured.exposure.source_refs[0]
+        common = {
+            "coverage_status": decision.coverage_status.value,
+            "coverage_rule_ids": list(decision.coverage_rule_ids),
+            "coverage_granularity": decision.granularity,
+            "executor_invoked": False,
+        }
+        if decision.coverage_status is not ExposureDimensionCoverageStatus.RESOLVED:
+            return self._result(
+                value_key="exposure_score", value="",
+                status=CalculationStatus.PENDING_METHOD_SEMANTICS,
+                reason=(
+                    "Exposure dimension coverage is not resolved by an approved "
+                    "MethodContract rule; scenario atoms are not scored."
+                ),
+                rule_id="", source_ref=source,
+                inputs_used=("component_category", "scenario_atom_ids"),
+                exposure_method="", pending_reason="PENDING_METHOD_SEMANTICS",
+                missing_method_semantics="EXPOSURE_DIMENSION_COVERAGE",
+                exposure_result=None,
+                **common,
+            )
+        bindings = scenario.get("method_scenario_dimensions", {})
+        if not isinstance(bindings, dict):
+            bindings = {}
+        raw_ids = scenario.get("scenario_atom_ids", ())
+        atom_ids = {
+            str(item) for item in raw_ids
+        } if isinstance(raw_ids, (list, tuple)) else set()
+        category = str(scenario.get("component_category", "")).strip()
+        domain_resolved = sum(
+            category in rule.component_categories
+            for rule in self.structured.exposure.domain_rules
+        ) == 1
+        readiness = self.coverage.readiness(
+            decision, bindings=bindings, scenario_atom_ids=atom_ids,
+            component_domain_resolved=domain_resolved,
+        )
+        if readiness["exposure_input_status"] != "READY":
+            return self._result(
+                value_key="exposure_score", value="",
+                status=CalculationStatus.PENDING_INPUT,
+                reason="Exposure required-dimension atom binding is incomplete.",
+                rule_id="", source_ref=source,
+                inputs_used=("component_category", "scenario_atom_ids"),
+                exposure_method="", pending_reason="PENDING_INPUT",
+                missing_required_dimensions=readiness["missing_required_dimensions"],
+                exposure_result=None,
+                **common,
+            )
+        return None
+
     def score(self, scenario: dict[str, Any], hazard_event: str) -> dict[str, dict[str, Any]]:
         malfunction_id = str(scenario.get("malfunction_id", "UNKNOWN"))
         scenario_id = str(scenario.get("scenario_id", "UNKNOWN"))
-        severity_input = self.inputs.severity(
-            malfunction_id, scenario_id, scenario,
-            self.structured.severity.speed_semantic,
-        )
-        s = self.severity.lookup(severity_input, self.structured.severity)
+        severity_method = self.structured.severity
+        if (
+            severity_method.semantic.semantic_resolution
+            is SeveritySemanticResolution.APPROVED_SOURCE_INTERNAL_CONFLICT
+        ):
+            s = {
+                "value": "", "status": CalculationStatus.PENDING_METHOD_SEMANTICS,
+                "reason": (
+                    "Confirmed Severity sources contain an unresolved internal semantic conflict; "
+                    "the Severity executor was not invoked."
+                ),
+                "rule_id": "", "source_ref": severity_method.source_ref,
+                "inputs_used": (), "executor_invoked": False,
+                "pending_reason": "APPROVED_SOURCE_SEMANTIC_CONFLICT",
+            }
+        else:
+            authority = self.severity_authority.input_authority(scenario)
+            if authority.status.value not in {
+                "METHOD_CONFIRMED_INPUT_DIRECT", "METHOD_CONFIRMED_DERIVATION",
+            }:
+                s = {
+                    "value": "", "status": CalculationStatus.PENDING_INPUT,
+                    "reason": authority.reason,
+                    "rule_id": "", "source_ref": severity_method.source_ref,
+                    "inputs_used": (), "executor_invoked": False,
+                    "pending_reason": authority.status.value,
+                }
+            else:
+                severity_input = self.inputs.severity(
+                    malfunction_id, scenario_id, scenario, severity_method.speed_semantic,
+                )
+                s = {
+                    **self.severity.lookup(severity_input, severity_method),
+                    "executor_invoked": True,
+                }
         severity = self._result(
             value_key="severity_score", value=s["value"], status=s["status"],
             reason=s["reason"], rule_id=s["rule_id"], source_ref=s["source_ref"],
             inputs_used=s["inputs_used"],
+            executor_invoked=s["executor_invoked"],
+            pending_reason=s.get("pending_reason", ""),
         )
+        coverage_decision = self._coverage_decision(scenario)
+        gated_exposure = self._coverage_gated_exposure(scenario, coverage_decision)
+        if gated_exposure is not None:
+            c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
+            c = self.controllability.lookup(c_input, self.structured)
+            controllability = self._result(
+                value_key="controllability_score", value=c.value, status=c.status,
+                reason=c.reason, rule_id=c.rule_id,
+                source_ref=self.structured.controllability_profile.source_ref,
+                inputs_used=c.inputs_used, selected_profile_id=c.profile_id,
+                **self._controllability_extra(c),
+            )
+            return {
+                "severity": severity,
+                "exposure": gated_exposure,
+                "controllability": controllability,
+            }
         if s["status"] is CalculationStatus.FINALIZED and s["value"] == "S0":
             source = s["source_ref"]
             exposure = self._result(
@@ -73,6 +206,10 @@ class StructuredRiskScoringService:
                 reason="S0 activated the approved risk short-circuit.",
                 rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
                 inputs_used=("severity_score",), exposure_method="SHORT_CIRCUIT",
+                coverage_status=coverage_decision.coverage_status.value,
+                coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
+                coverage_granularity=coverage_decision.granularity,
+                executor_invoked=False,
             )
             controllability = self._result(
                 value_key="controllability_score", value="C0",
@@ -80,6 +217,10 @@ class StructuredRiskScoringService:
                 reason="S0 activated the approved risk short-circuit.",
                 rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
                 inputs_used=("severity_score",),
+                decision_status="SHORT_CIRCUIT",
+                unknown_override_policy=self.structured.controllability_branch_policy.unknown_override_policy.value,
+                unknown_policy_action="NOT_INVOKED",
+                rule_match_states=[], executor_invoked=False,
             )
             return {"severity": severity, "exposure": exposure, "controllability": controllability}
 
@@ -88,6 +229,11 @@ class StructuredRiskScoringService:
             value_key="exposure_score", value=e["value"], status=e["status"],
             reason=e["reason"], rule_id=e["rule_id"], source_ref=e["source_ref"],
             inputs_used=e["inputs_used"], exposure_method=e["domain"],
+            coverage_status=coverage_decision.coverage_status.value,
+            coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
+            coverage_granularity=coverage_decision.granularity,
+            executor_invoked=True,
+            exposure_result=e["value"],
         )
         c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
         c = self.controllability.lookup(c_input, self.structured)
@@ -102,5 +248,6 @@ class StructuredRiskScoringService:
             value_key="controllability_score", value=c.value, status=c.status,
             reason=c.reason, rule_id=c.rule_id, source_ref=c_source,
             inputs_used=c.inputs_used, selected_profile_id=c.profile_id,
+            **self._controllability_extra(c),
         )
         return {"severity": severity, "exposure": exposure, "controllability": controllability}

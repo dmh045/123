@@ -29,14 +29,15 @@ _IDENTITY_FIELDS = {
     "scenario_feasibility": ("malfunction_id", "scenario_id"),
 }
 _SCENARIO_FACT_KEYS = (
-    "operating_scenario", "operating_mode", "ego_speed_kph",
+    "operating_scenario", "operating_mode", "ego_speed_kph", "ego_speed_constraint",
     "weather_conditions", "road_surface_conditions", "vehicle_state",
     "object", "object_type", "WHERE", "ROAD", "EGO_ACTION",
     "EGO_X_ROAD", "TRAFFIC_PATTERN", "EGO_DYNAMICS", "OBJECT",
     "method_scenario_dimensions", "scenario_atom_ids",
 )
 _SCENARIO_CONTEXT_KEYS = (
-    "ego_speed_kph", "dimension_bindings", "dimension_compatibility",
+    "ego_speed_kph", "speed_resolution", "speed_constraint",
+    "dimension_bindings", "dimension_compatibility",
     "function_phase_binding", "risk_fact_binding",
 )
 
@@ -292,11 +293,163 @@ class ReviewArtifactWriter:
         )
         return self._append("scenario_candidate", payload)
 
+    def write_scenario_binding_gaps(
+        self, coverage: dict[str, Any], gaps: list[dict[str, Any]],
+    ) -> None:
+        """Write the deterministic Scenario binding gap review projection."""
+        if self._disabled:
+            return
+        payload = {
+            "artifact_version": "scenario-binding-gaps-v1",
+            "run_id": self.run_id,
+            "scenario_binding_coverage": _compact_review_value(coverage),
+            "gaps": _compact_review_value(gaps),
+            "recorded_at": _now(),
+        }
+        with self._lock:
+            self._write_json_payload("scenario_binding_gaps.json", payload)
+
+    def write_scenario_alias_proposals(self, payload: dict[str, Any]) -> None:
+        """Write review-only alias proposals; never canonical Scenario truth."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("scenario alias proposal artifact is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("scenario_alias_proposals.json", value)
+
+    def write_scenario_coverage_proposals(self, payload: dict[str, Any]) -> None:
+        """Write review-only Function coverage proposals; never runtime truth."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("scenario coverage proposal artifact is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("scenario_coverage_proposals.json", value)
+
+    def write_confirmed_yaml_utilization(self, payload: dict[str, Any]) -> None:
+        """Write offline confirmed-YAML utilization; never Scenario truth."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("confirmed YAML utilization artifact is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("confirmed_yaml_utilization.json", value)
+
+    def write_fm_selector_semantic_audit(self, payload: dict[str, Any]) -> None:
+        """Write a deterministic, offline FM selector review projection."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("FM selector semantic audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("fm_selector_semantic_audit.json", value)
+
+    def write_fm_template_ambiguity_audit(self, payload: dict[str, Any]) -> None:
+        """Write the deterministic FM template ambiguity trace."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("FM template ambiguity audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("fm_template_ambiguity_audit.json", value)
+
+    def write_risk_execution_trace(self, payload: dict[str, Any]) -> None:
+        """Write the read-only Scenario-to-risk execution projection."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("risk execution trace is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("risk_execution_trace.json", value)
+
+    def write_exposure_binding_audit(self, payload: dict[str, Any]) -> None:
+        """Write a read-only governed-atom Exposure input audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("exposure binding audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("exposure_binding_audit.json", value)
+
+    def write_exposure_dimension_coverage_audit(self, payload: dict[str, Any]) -> None:
+        """Write a read-only audit of formal Exposure dimension authority."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("exposure dimension coverage audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("exposure_dimension_coverage_audit.json", value)
+
+    def write_severity_delta_v_semantic_audit(self, payload: dict[str, Any]) -> None:
+        """Write a read-only Severity semantic/input-authority audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("severity DELTA_V semantic audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("severity_delta_v_semantic_audit.json", value)
+
+    def write_hazardous_event_risk_context_audit(self, payload: dict[str, Any]) -> None:
+        """Write the read-only Hazardous Event to Risk-input context audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("Hazardous Event risk context audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("hazardous_event_risk_context_audit.json", value)
+
+    def write_controllability_branch_policy_audit(self, payload: dict[str, Any]) -> None:
+        """Write the read-only selected-controllability branch-policy audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("Controllability branch audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("controllability_branch_policy_audit.json", value)
+
     def record_scenario_feasibility(
         self, assessment: Any, *, function_id: str = "", guideword: str = "",
         audit: dict[str, Any] | None = None,
     ) -> bool:
-        payload = _jsonable(assessment)
+        # ScenarioFeasibilityAssessment owns its review projection.  In
+        # particular, final_retain is a derived eligibility result, not a
+        # dataclass field that may be defaulted by this writer.
+        to_dict = getattr(assessment, "to_dict", None)
+        payload = _jsonable(to_dict() if callable(to_dict) else assessment)
         if isinstance(payload, dict):
             if function_id:
                 payload["function_id"] = function_id
@@ -305,8 +458,23 @@ class ReviewArtifactWriter:
             payload["final_retain"] = bool(
                 payload.get("final_retain", payload.get("retained", False))
             )
+            causal_assessment = payload.get("causal_assessment")
+            causal_chain = (
+                causal_assessment.get("causal_chain")
+                if isinstance(causal_assessment, dict) else None
+            )
+            malfunction_id = str(payload.get("malfunction_id", ""))
+            scenario_id = str(payload.get("scenario_id", ""))
+            if (
+                isinstance(causal_chain, list)
+                and causal_chain
+                and malfunction_id
+                and scenario_id
+            ):
+                payload["hazardous_event_id"] = (
+                    f"HE::{malfunction_id}::{scenario_id}::{causal_chain[-1]}"
+                )
             if isinstance(audit, dict):
-                scenario_id = str(payload.get("scenario_id", ""))
                 selection = next(
                     (
                         item for item in audit.get("evidence_selection_audit", [])
@@ -340,6 +508,24 @@ class ReviewArtifactWriter:
                     ):
                         if key in salvage:
                             payload[key] = _jsonable(salvage[key])
+                template_binding = next(
+                    (
+                        item for item in audit.get("template_context_bindings", [])
+                        if isinstance(item, dict)
+                        and str(item.get("scenario_id", "")) == scenario_id
+                    ),
+                    None,
+                )
+                if isinstance(template_binding, dict):
+                    for key in (
+                        "template_id", "qualification", "matched_by",
+                        "matched_terms", "injected", "reason",
+                        "injected_context_fields", "not_injected_reason",
+                    ):
+                        if key in template_binding:
+                            payload[f"template_{key}" if key != "template_id" else key] = _jsonable(
+                                template_binding[key]
+                            )
         return self._append("scenario_feasibility", payload)
 
     def write_summary(self, state: Any, *, status: str | None = None, error: str = "") -> None:
@@ -435,6 +621,13 @@ class ReviewArtifactWriter:
                 "per_malfunction_summary": per_malfunction,
                 "last_updated_at": _now(),
             }
+            risk_trace = self._read_json_payload("risk_execution_trace.json")
+            if isinstance(risk_trace, dict):
+                payload["risk_execution_summary"] = {
+                    "risk_stage_status": risk_trace.get("risk_stage_status", "NOT_REACHED"),
+                    **dict(risk_trace.get("scenario_eligibility_summary", {})),
+                    "rating_counts": self._risk_rating_counts(risk_trace),
+                }
             if error:
                 payload["error"] = error[:2000]
             self._write_summary_payload(payload)
@@ -445,11 +638,38 @@ class ReviewArtifactWriter:
         self.write_summary(state, status="FAILED", error=f"{type(error).__name__}: {error}")
 
     def _write_summary_payload(self, payload: dict[str, Any]) -> None:
+        self._write_json_payload("summary.json", payload)
+
+    def _read_json_payload(self, filename: str) -> dict[str, Any] | None:
+        path = self.directory / filename
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _risk_rating_counts(trace: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for field in ("severity", "exposure", "controllability", "asil"):
+            values = [
+                item.get(field, {}) for item in trace.get("assessments", [])
+                if isinstance(item, dict) and isinstance(item.get(field), dict)
+            ]
+            result[field] = {
+                "finalized": sum(value.get("status") == "FINALIZED" for value in values),
+                "pending": sum(str(value.get("status", "")).startswith("PENDING") for value in values),
+            }
+        return result
+
+    def _write_json_payload(self, filename: str, payload: dict[str, Any]) -> None:
         if self._disabled:
             return
-        target = self.directory / "summary.json"
+        target = self.directory / filename
         handle, temp_name = tempfile.mkstemp(
-            prefix=".summary.", suffix=".tmp", dir=str(self.directory), text=True,
+            prefix=f".{filename}.", suffix=".tmp", dir=str(self.directory), text=True,
         )
         try:
             with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:

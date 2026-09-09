@@ -1,0 +1,184 @@
+schema_version: "1.0"
+source: "governed reconciliation of confirmed FM template selectors and FailureMode taxonomy"
+# This adapter is a vocabulary bridge only.  It does not introduce a new
+# scenario rule or infer a selector from free text.  ACTIVE entries were
+# reviewed against the named source assets; UNRESOLVED entries remain visible
+# for audit and must never contribute structured selector support.
+mappings:
+  - mapping_id: FMSEL-COMP-001
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: brake_actuator
+    canonical_target: actuator_longitudinal
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The template brake actuator is a specific longitudinal-control actuator."
+  - mapping_id: FMSEL-COMP-002
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: brake_controller
+    canonical_target: ""
+    candidate_targets: [computing, actuator_longitudinal]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The selector can denote controller computation or the controlled braking function."
+  - mapping_id: FMSEL-COMP-003
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: esc_unit
+    canonical_target: ""
+    candidate_targets: [computing, actuator_longitudinal, actuator_lateral]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The selector is a control unit with longitudinal and lateral vehicle functions."
+  - mapping_id: FMSEL-COMP-004
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: drive_actuator
+    canonical_target: actuator_propulsion
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The template drive actuator is a specific propulsion actuator."
+  - mapping_id: FMSEL-COMP-005
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: drive_controller
+    canonical_target: ""
+    candidate_targets: [computing, actuator_propulsion]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The selector can denote controller computation or the controlled drive function."
+  - mapping_id: FMSEL-COMP-006
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: steering_actuator
+    canonical_target: actuator_lateral
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The template steering actuator is a specific lateral-control actuator."
+  - mapping_id: FMSEL-COMP-007
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: steering_controller
+    canonical_target: ""
+    candidate_targets: [computing, actuator_lateral]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The selector can denote controller computation or the controlled steering function."
+  - mapping_id: FMSEL-COMP-008
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: eps_motor
+    canonical_target: actuator_lateral
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The template groups EPS motor with steering deviations; it is a steering actuator subtype."
+  - mapping_id: FMSEL-COMP-009
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: epb
+    canonical_target: actuator_longitudinal
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The parking-brake selector is a specific longitudinal-control actuator."
+  - mapping_id: FMSEL-COMP-010
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: parking_brake
+    canonical_target: actuator_longitudinal
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "The parking-brake selector is a specific longitudinal-control actuator."
+  - mapping_id: FMSEL-COMP-011
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: path_planner
+    canonical_target: ""
+    candidate_targets: [computing, localization]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The taxonomy has no unique path-planning category."
+  - mapping_id: FMSEL-COMP-012
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: apa_controller
+    canonical_target: ""
+    candidate_targets: [computing, actuator_longitudinal, actuator_lateral]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The automatic-parking controller spans computation and multiple controlled functions."
+  - mapping_id: FMSEL-COMP-013
+    selector_type: COMPONENT_CATEGORY
+    source_template_value: upa_sensor
+    canonical_target: sensor_ultrasonic
+    mapping_semantics: FUNCTIONAL_PARENT
+    runtime_status: ACTIVE
+    rationale: "UPA is a specific ultrasonic sensor subtype."
+
+  - mapping_id: FMSEL-FAIL-001
+    selector_type: FAILURE_TYPE
+    source_template_value: insufficient_output
+    canonical_target: degraded
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "Insufficient output is the template-specific expression of degraded performance."
+  - mapping_id: FMSEL-FAIL-002
+    selector_type: FAILURE_TYPE
+    source_template_value: degraded_performance
+    canonical_target: degraded
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "The values express the same degraded-performance failure type."
+  - mapping_id: FMSEL-FAIL-003
+    selector_type: FAILURE_TYPE
+    source_template_value: loss_of_function
+    canonical_target: loss
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "Loss of function is the template-specific expression of complete loss."
+  - mapping_id: FMSEL-FAIL-004
+    selector_type: FAILURE_TYPE
+    source_template_value: no_output
+    canonical_target: loss
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "No output is the template-specific expression of complete loss."
+  - mapping_id: FMSEL-FAIL-005
+    selector_type: FAILURE_TYPE
+    source_template_value: excessive_output
+    canonical_target: excessive
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "The values express the same excessive-output failure type."
+  - mapping_id: FMSEL-FAIL-006
+    selector_type: FAILURE_TYPE
+    source_template_value: drift
+    canonical_target: wrong_value
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "Drift is an output value deviation, covered by wrong_value."
+  - mapping_id: FMSEL-FAIL-007
+    selector_type: FAILURE_TYPE
+    source_template_value: incorrect_output
+    canonical_target: wrong_value
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "Incorrect output is the template-specific expression of wrong_value."
+  - mapping_id: FMSEL-FAIL-008
+    selector_type: FAILURE_TYPE
+    source_template_value: unintended_deactivation
+    canonical_target: unintended_activation
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "The taxonomy's unintended activation denotes an unplanned state transition; the template names its deactivation direction."
+  - mapping_id: FMSEL-FAIL-009
+    selector_type: FAILURE_TYPE
+    source_template_value: path_deviation
+    canonical_target: wrong_value
+    mapping_semantics: EXACT_EQUIVALENT
+    runtime_status: ACTIVE
+    rationale: "Path deviation is an erroneous commanded value or direction."
+  - mapping_id: FMSEL-FAIL-010
+    selector_type: FAILURE_TYPE
+    source_template_value: no_detection
+    canonical_target: ""
+    candidate_targets: [loss, wrong_value]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The template selector does not distinguish complete sensing loss from a selective wrong detection."
+  - mapping_id: FMSEL-FAIL-011
+    selector_type: FAILURE_TYPE
+    source_template_value: obstacle_miss
+    canonical_target: ""
+    candidate_targets: [loss, wrong_value]
+    mapping_semantics: AMBIGUOUS
+    runtime_status: UNRESOLVED
+    rationale: "The template selector does not distinguish a missing detection from an incorrect perception result."

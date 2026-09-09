@@ -7,7 +7,7 @@ from typing import Any
 from hara_agent.models.common import ReviewStatus
 from hara_agent.models.evidence import EvidenceKind
 
-from .causal_graph import CausalGraph, CausalNodeType
+from .causal_graph import CausalEdge, CausalGraph, CausalNode, CausalNodeType, CausalRelation
 from .evidence_binding import EvidenceBinding
 
 

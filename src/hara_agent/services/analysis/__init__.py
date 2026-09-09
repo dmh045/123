@@ -5,8 +5,28 @@ from .method_risk_fact_service import (
     RiskFactBindingResult,
 )
 from .method_scenario_service import MethodScenarioCandidateService
+from .method_atom_resolver import MethodAtomResolution, MethodAtomResolver
+from .scenario_alias_proposal_service import ScenarioAliasProposalService
+from .scenario_coverage_service import ScenarioCoverageRuleService
+from .scenario_coverage_proposal_service import ScenarioCoverageProposalService
+from .scenario_method_service import FMTemplateMatchResult, ScenarioMethodService
+from .failure_mode_selector_resolver import (
+    FMTemplateSelectorAdapterResolver, FailureModeSelectorResolution,
+    FailureModeSelectorResolver, TemplateSelectorResolution,
+)
+from .confirmed_yaml_utilization_service import ConfirmedYamlUtilizationService
+from .fm_selector_semantic_audit_service import FMSelectorSemanticAuditService
+from .fm_template_ambiguity_audit_service import FMTemplateAmbiguityAuditService
 from .method_safety_goal_service import MethodSafetyGoalService
 from .risk_calculation_input_service import RiskCalculationInputService
+from .risk_execution_trace_service import RiskExecutionTraceService
+from .hazardous_event_risk_context_service import HazardousEventRiskContextService
+from .controllability_branch_audit_service import ControllabilityBranchAuditService
+from .severity_delta_v_semantic_audit_service import SeverityDeltaVSemanticAuditService
+from .exposure_binding_audit_service import ExposureBindingAuditService
+from .exposure_dimension_coverage_service import (
+    ExposureDimensionCoverageAuditService, ExposureDimensionCoverageService,
+)
 from .deterministic_risk_executor import (
     ControllabilityProfileExecutor, ExposureCombinationExecutor,
     ExposureMethodExecutor, SeverityMethodExecutor,
@@ -33,7 +53,23 @@ __all__ = [
     "METHOD_FACT_KEYS", "MethodRiskFactBindingService", "RiskFactBindingResult",
     "MethodRiskFactBindingCompiler",
     "MethodScenarioCandidateService", "MethodSafetyGoalService",
+    "MethodAtomResolution", "MethodAtomResolver",
+    "ScenarioAliasProposalService",
+    "ScenarioCoverageRuleService",
+    "ScenarioCoverageProposalService",
+    "FMTemplateMatchResult", "ScenarioMethodService",
+    "FailureModeSelectorResolution", "FailureModeSelectorResolver",
+    "TemplateSelectorResolution", "FMTemplateSelectorAdapterResolver",
+    "ConfirmedYamlUtilizationService",
+    "FMSelectorSemanticAuditService",
+    "FMTemplateAmbiguityAuditService",
     "RiskCalculationInputService",
+    "RiskExecutionTraceService",
+    "HazardousEventRiskContextService",
+    "ControllabilityBranchAuditService",
+    "SeverityDeltaVSemanticAuditService",
+    "ExposureBindingAuditService",
+    "ExposureDimensionCoverageAuditService", "ExposureDimensionCoverageService",
     "ControllabilityProfileExecutor", "ExposureCombinationExecutor",
     "ExposureMethodExecutor", "SeverityMethodExecutor",
     "StructuredControllabilityExecutor", "StructuredRiskScoringService",
