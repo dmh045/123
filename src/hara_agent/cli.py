@@ -14,7 +14,7 @@ from hara_agent.contracts import (
     CompileStatus, TemplateRole, TemplateRoleConfirmation,
 )
 from hara_agent.template import TemplateRoleCompiler, TemplateRoleManifestStore
-from hara_agent.method_sources import MethodSourceResolver
+from hara_agent.method_sources import MethodSourceResolver, YamlBaselineCompiler
 from hara_agent.services.analysis import (
     ConfirmedYamlUtilizationService, FMSelectorSemanticAuditService,
     ExposureBindingAuditService,
@@ -22,6 +22,7 @@ from hara_agent.services.analysis import (
     FMTemplateAmbiguityAuditService,
     HazardousEventRiskContextService,
     ControllabilityBranchAuditService,
+    MethodContractParityAuditService,
     RiskExecutionTraceService,
     SeverityDeltaVSemanticAuditService,
     ScenarioAliasProposalService,
@@ -232,6 +233,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-template", type=Path,
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
+    parity_audit = subparsers.add_parser(
+        "risk-evaluator-parity-audit",
+        help="Audit Template/YAML MethodContract and risk evaluator parity offline",
+    )
+    parity_audit.add_argument("--baseline", required=True, type=Path)
+    parity_audit.add_argument("--template", required=True, type=Path)
+    parity_audit.add_argument("--review-run-id", required=True)
     rebuild = subparsers.add_parser(
         "rebuild-report",
         help="Rebuild the canonical Engineering Report offline from a committed run",
@@ -586,6 +594,23 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "runtime_comparison": payload["runtime_comparison"],
             "summary": payload["summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "risk-evaluator-parity-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        template_method = _role_compiler().compile_method(args.template)
+        yaml_method = YamlBaselineCompiler().compile(
+            args.baseline, report_contract=template_method.report_contract,
+        )
+        payload = MethodContractParityAuditService(template_method, yaml_method).generate()
+        ReviewArtifactWriter(args.review_run_id, review_root).write_method_contract_parity_audit(payload)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(
+                review_root / args.review_run_id / "method_contract_parity_audit.json"
+            ),
+            "summary": payload["summary"],
+            "shared_scoring_facade": payload["contract_surface_comparison"]["shared_scoring_facade"],
         }, ensure_ascii=False, indent=2))
         return 0
     if args.command == "doctor":
@@ -1035,6 +1060,43 @@ def main(argv: list[str] | None = None) -> int:
                     risk_pipeline["controllability"]["branch_audit"] = {
                         "status": "ARTIFACT_NOT_FOUND",
                         "artifact_path": str(controllability_audit_artifact),
+                    }
+                parity_audit_artifact = (
+                    Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                    / args.review_run_id / "method_contract_parity_audit.json"
+                )
+                if parity_audit_artifact.is_file():
+                    try:
+                        parity = json.loads(parity_audit_artifact.read_text(encoding="utf-8"))
+                        sources = parity.get("method_sources", {})
+                        summary = parity.get("summary", {})
+                        if not isinstance(sources, dict) or not isinstance(summary, dict):
+                            raise ValueError("MethodContract parity audit sections must be objects")
+                        risk_pipeline["evaluator_parity"] = {
+                            "status": "AVAILABLE",
+                            "artifact_path": str(parity_audit_artifact),
+                            "template_method_hash": sources.get("template", {}).get("method_hash", ""),
+                            "yaml_method_hash": sources.get("yaml", {}).get("method_hash", ""),
+                            "shared_scoring_facade": parity.get("contract_surface_comparison", {}).get("shared_scoring_facade", False),
+                            "parity_classes": {
+                                name: parity.get(name, {}).get("classification", "")
+                                for name in (
+                                    "severity_parity", "exposure_parity", "controllability_parity",
+                                    "asil_parity", "ftti_parity", "potential_harm_parity",
+                                )
+                            },
+                            "executor_drift_blockers": summary.get("executor_drift_blockers", 0),
+                            "source_specific_differences": summary.get("source_specific_differences", 0),
+                            "traceability_gaps": summary.get("traceability_gaps", 0),
+                        }
+                    except (OSError, ValueError, json.JSONDecodeError, AttributeError) as exc:
+                        risk_pipeline["evaluator_parity"] = {
+                            "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                        }
+                else:
+                    risk_pipeline["evaluator_parity"] = {
+                        "status": "ARTIFACT_NOT_FOUND",
+                        "artifact_path": str(parity_audit_artifact),
                     }
                 if not artifact.is_file():
                     scenario_binding["run_coverage_status"] = "ARTIFACT_NOT_FOUND"

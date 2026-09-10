@@ -368,6 +368,8 @@ def test_invalid_false_applicability_item_is_salvaged_without_recalling_siblings
                 ]}, model="fake")
             assert request.metadata["item_repair"] is True
             assert request.metadata["guideword_id"] == "GW-LATE"
+            assert '"guideword":"GW-LATE"' in request.user_prompt
+            assert "Do not emit guideword_id or guideword_name fields" in request.user_prompt
             return LLMResponse(data={"assessments": [{
                 "guideword": "GW-LATE",
                 "applicable": False,

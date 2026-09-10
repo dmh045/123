@@ -27,7 +27,7 @@ from .traceability import resolve_guideword_sources
 class GuidewordApplicabilityAgent:
     """Assess every template guideword without generating a Cartesian product."""
 
-    PROMPT_VERSION = "guideword-applicability-v11-stable-identity"
+    PROMPT_VERSION = "guideword-applicability-v12-repair-identity-shape"
     INITIAL_MAX_TOKENS = 4096
     OUTPUT_LIMIT_RETRY_MAX_TOKENS = 8192
     SYSTEM_PROMPT = """你是汽车功能安全HAZOP分析助手。针对给定Function/Output逐项判断模板Guideword是否具有明确的功能语义和可形成的偏差。必须覆盖输入中的每个Guideword且只出现一次。不适用不是遗漏，必须给出具体理由；不得为了凑数量判为适用。结论必须区分：DOWNSTREAM_CANDIDATE（语义适用且存在可信的车辆级危害潜力）、NOT_APPLICABLE（偏差维度与该Function/Output语义不适用）、NO_CREDIBLE_HAZARD（偏差语义适用，但依据Item Definition无法形成可信的车辆级危害）。disposition只能是DOWNSTREAM_CANDIDATE、NOT_APPLICABLE、NO_CREDIBLE_HAZARD之一；PENDING不是disposition。证据完整性和ReviewStatus由系统确定，模型不得使用PENDING作为disposition。不确定时不得武断标记NO_CREDIBLE_HAZARD；证据不足时仍须在三种disposition中选择最合理的一个。"""
@@ -409,6 +409,13 @@ capability, incomplete execution, or insufficient quantity/duration.
                 + f"\nObservedContractViolation={violation}\n"
                 "guideword must be exactly the supplied stable guideword_id. "
                 "Return one JSON object with assessments containing exactly one item. "
+                "The item must include the required guideword field exactly as "
+                + json.dumps(binding["guideword_id"], ensure_ascii=False)
+                + "; for example {\"guideword\":"
+                + json.dumps(binding["guideword_id"], ensure_ascii=False)
+                + ",\"applicable\":false,\"disposition\":\"NOT_APPLICABLE\","
+                "\"rationale\":\"...\",\"confidence\":0.8}. "
+                "Do not emit guideword_id or guideword_name fields. "
                 "The only legal applicability/disposition combinations are: "
                 "applicable=true with DOWNSTREAM_CANDIDATE or NO_CREDIBLE_HAZARD; "
                 "applicable=false with NOT_APPLICABLE. Do not change the guideword identity."

@@ -441,6 +441,26 @@ class ReviewArtifactWriter:
         with self._lock:
             self._write_json_payload("controllability_branch_policy_audit.json", value)
 
+    def write_method_contract_parity_audit(self, payload: dict[str, Any]) -> None:
+        """Write the read-only Template/YAML evaluator parity audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("MethodContract parity audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("method_contract_parity_audit.json", value)
+            self._write_json_payload(
+                "template_method_contract_audit.json",
+                value.get("template_contract_inventory", {}),
+            )
+            self._write_json_payload(
+                "yaml_method_contract_audit.json",
+                value.get("yaml_contract_inventory", {}),
+            )
+
     def record_scenario_feasibility(
         self, assessment: Any, *, function_id: str = "", guideword: str = "",
         audit: dict[str, Any] | None = None,

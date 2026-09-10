@@ -22,6 +22,7 @@ from .risk_calculation_input_service import RiskCalculationInputService
 from .risk_execution_trace_service import RiskExecutionTraceService
 from .hazardous_event_risk_context_service import HazardousEventRiskContextService
 from .controllability_branch_audit_service import ControllabilityBranchAuditService
+from .method_contract_parity_audit_service import MethodContractParityAuditService
 from .severity_delta_v_semantic_audit_service import SeverityDeltaVSemanticAuditService
 from .exposure_binding_audit_service import ExposureBindingAuditService
 from .exposure_dimension_coverage_service import (
@@ -67,6 +68,7 @@ __all__ = [
     "RiskExecutionTraceService",
     "HazardousEventRiskContextService",
     "ControllabilityBranchAuditService",
+    "MethodContractParityAuditService",
     "SeverityDeltaVSemanticAuditService",
     "ExposureBindingAuditService",
     "ExposureDimensionCoverageAuditService", "ExposureDimensionCoverageService",
