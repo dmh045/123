@@ -1,0 +1,164 @@
+schema_version: hara-report-schema-v1
+report_id: hara_report_v1
+
+# This file defines report vocabulary and presentation only.  Engineering
+# rules remain owned by MethodContract and are deliberately absent here.
+sheets:
+  - name: 00_Summary
+    order: 0
+  - name: 01_Item Definition
+    order: 1
+  - name: 02_Functions
+    order: 2
+  - name: 03_Malfunctions
+    order: 3
+  - name: 04_HARA
+    order: 4
+  - name: 05_Method Basis
+    order: 5
+  - name: 06_Safety Goal
+    order: 6
+  - name: 99_Audit
+    order: 99
+
+ordering:
+  - hara_id
+  - malfunction_id
+  - scenario_id
+  - hazardous_event_id
+  - function_id
+  - function_name
+  - function_output
+  - guideword
+  - malfunction
+  - hazard
+  - operational_scenario
+  - scenario_detail
+  - hazardous_event
+  - potential_harm
+  - severity
+  - severity_rationale
+  - exposure
+  - exposure_rationale
+  - controllability
+  - controllability_rationale
+  - asil
+  - asil_rationale
+  - ftti
+  - ftti_rationale
+  - sg_id
+  - safety_goal
+  - safe_state
+  - assessment_status
+  - clarification_ids
+  - remark
+
+requiredness:
+  hara_id: required
+  malfunction_id: required
+  scenario_id: required
+  hazardous_event_id: optional
+  function_id: required
+  function_name: required
+  function_output: optional
+  guideword: required
+  malfunction: required
+  hazard: required
+  operational_scenario: required
+  scenario_detail: required
+  hazardous_event: required
+  potential_harm: required
+  severity: required
+  severity_rationale: required
+  exposure: required
+  exposure_rationale: required
+  controllability: required
+  controllability_rationale: required
+  asil: required
+  asil_rationale: required
+  ftti: required
+  ftti_rationale: required
+  sg_id: optional
+  safety_goal: optional
+  safe_state: optional
+  assessment_status: required
+  clarification_ids: optional
+  remark: optional
+
+display_policies:
+  pending_value: Pending
+  not_available_value: Pending / Not available
+  not_applicable_value: Not applicable
+  empty_value: blank_only_when_not_applicable
+
+# Presentation is deliberately separate from the canonical field universe.
+# Technical trace fields remain canonical and are rendered on 99_Audit, while
+# this list defines the reviewer-facing HARA table in the template shell.
+presentation:
+  main_hara:
+    sheet: 04_HARA
+    visible_fields:
+      - hara_id
+      - function_name
+      - function_output
+      - guideword
+      - malfunction
+      - hazard
+      - operational_scenario
+      - scenario_detail
+      - hazardous_event
+      - potential_harm
+      - severity
+      - severity_rationale
+      - exposure
+      - exposure_rationale
+      - controllability
+      - controllability_rationale
+      - asil
+      - asil_rationale
+      - ftti
+      - ftti_rationale
+      - sg_id
+      - safety_goal
+      - safe_state
+      - remark
+    groups:
+      - {header: "Hazard / Harm Analysis", fields: [hazardous_event, potential_harm]}
+      - {header: "Severity (S)", fields: [severity, severity_rationale]}
+      - {header: "Exposure (E)", fields: [exposure, exposure_rationale]}
+      - {header: "Controllability (C)", fields: [controllability, controllability_rationale]}
+      - {header: ASIL, fields: [asil, asil_rationale]}
+      - {header: FTTI, fields: [ftti, ftti_rationale]}
+      - {header: "Safety Goal", fields: [sg_id, safety_goal, safe_state]}
+
+fields:
+  - {canonical_field: hara_id, sheet: 04_HARA, header: HARA-ID, order: 1, required: true, value_type: identifier, display_policy: literal, availability_policy: runtime, width: 18}
+  - {canonical_field: malfunction_id, sheet: 04_HARA, header: Malfunction ID, order: 2, required: true, value_type: identifier, display_policy: literal, availability_policy: runtime, width: 20}
+  - {canonical_field: scenario_id, sheet: 04_HARA, header: Scenario ID, order: 3, required: true, value_type: identifier, display_policy: literal, availability_policy: runtime, width: 26}
+  - {canonical_field: hazardous_event_id, sheet: 04_HARA, header: Hazardous Event ID, order: 4, required: false, value_type: identifier, display_policy: literal, availability_policy: runtime, width: 24}
+  - {canonical_field: function_id, sheet: 04_HARA, header: Function ID, order: 5, required: true, value_type: identifier, display_policy: literal, availability_policy: runtime, width: 14}
+  - {canonical_field: function_name, sheet: 04_HARA, header: Function, order: 6, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 24}
+  - {canonical_field: function_output, sheet: 04_HARA, header: Output, order: 7, required: false, value_type: text, display_policy: literal, availability_policy: runtime, width: 34}
+  - {canonical_field: guideword, sheet: 04_HARA, header: Guideword, order: 8, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 16}
+  - {canonical_field: malfunction, sheet: 04_HARA, header: Malfunction, order: 9, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 42}
+  - {canonical_field: hazard, sheet: 04_HARA, header: Hazard, order: 10, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 42}
+  - {canonical_field: operational_scenario, sheet: 04_HARA, header: Situational Description, order: 11, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 34, wrap_text: true}
+  - {canonical_field: scenario_detail, sheet: 04_HARA, header: Situational Detailing, order: 12, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 42, wrap_text: true}
+  - {canonical_field: hazardous_event, sheet: 04_HARA, header: Hazardous Event, order: 13, required: true, value_type: text, display_policy: literal, availability_policy: runtime, width: 48, wrap_text: true}
+  - {canonical_field: potential_harm, sheet: 04_HARA, header: Potential Harm, order: 14, required: true, value_type: text, display_policy: availability, availability_policy: pending_if_unavailable, width: 34, wrap_text: true}
+  - {canonical_field: severity, sheet: 04_HARA, header: S, order: 15, required: true, value_type: rating, display_policy: pending_if_unavailable, availability_policy: pending_if_unavailable, width: 12}
+  - {canonical_field: severity_rationale, sheet: 04_HARA, header: Severity Rationale, order: 16, required: true, value_type: text, display_policy: human_rationale, availability_policy: runtime, width: 48, wrap_text: true}
+  - {canonical_field: exposure, sheet: 04_HARA, header: E, order: 17, required: true, value_type: rating, display_policy: pending_if_unavailable, availability_policy: pending_if_unavailable, width: 12}
+  - {canonical_field: exposure_rationale, sheet: 04_HARA, header: Exposure Rationale, order: 18, required: true, value_type: text, display_policy: human_rationale, availability_policy: runtime, width: 48, wrap_text: true}
+  - {canonical_field: controllability, sheet: 04_HARA, header: C, order: 19, required: true, value_type: rating, display_policy: pending_if_unavailable, availability_policy: pending_if_unavailable, width: 12}
+  - {canonical_field: controllability_rationale, sheet: 04_HARA, header: Controllability Rationale, order: 20, required: true, value_type: text, display_policy: human_rationale, availability_policy: runtime, width: 52, wrap_text: true}
+  - {canonical_field: asil, sheet: 04_HARA, header: ASIL, order: 21, required: true, value_type: rating, display_policy: pending_if_unavailable, availability_policy: pending_if_unavailable, width: 12}
+  - {canonical_field: asil_rationale, sheet: 04_HARA, header: ASIL Rationale, order: 22, required: true, value_type: text, display_policy: human_rationale, availability_policy: runtime, width: 48, wrap_text: true}
+  - {canonical_field: ftti, sheet: 04_HARA, header: FTTI, order: 23, required: true, value_type: duration_or_status, display_policy: pending_if_unavailable, availability_policy: pending_if_unavailable, width: 16}
+  - {canonical_field: ftti_rationale, sheet: 04_HARA, header: FTTI Rationale, order: 24, required: true, value_type: text, display_policy: human_rationale, availability_policy: runtime, width: 48, wrap_text: true}
+  - {canonical_field: sg_id, sheet: 04_HARA, header: SG-ID, order: 25, required: false, value_type: identifier, display_policy: pending_if_unavailable, availability_policy: optional, width: 14}
+  - {canonical_field: safety_goal, sheet: 04_HARA, header: Safety Goal, order: 26, required: false, value_type: text, display_policy: pending_if_unavailable, availability_policy: optional, width: 34, wrap_text: true}
+  - {canonical_field: safe_state, sheet: 04_HARA, header: Safe State, order: 27, required: false, value_type: text, display_policy: pending_if_unavailable, availability_policy: optional, width: 28, wrap_text: true}
+  - {canonical_field: assessment_status, sheet: 04_HARA, header: Status, order: 28, required: true, value_type: status, display_policy: literal, availability_policy: runtime, width: 24}
+  - {canonical_field: clarification_ids, sheet: 04_HARA, header: Clarification ID, order: 29, required: false, value_type: identifier_list, display_policy: literal, availability_policy: optional, width: 20}
+  - {canonical_field: remark, sheet: 04_HARA, header: Remark, order: 30, required: false, value_type: text, display_policy: literal, availability_policy: optional, width: 34, wrap_text: true}

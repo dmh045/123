@@ -66,9 +66,13 @@ class HARAExcelRenderer:
         report_contract: ReportContract | None = None,
         *,
         template_hash: str | None = None,
+        report_schema: object | None = None,
+        method_contract: object | None = None,
     ):
         self.report_contract = report_contract
         self.template_hash = template_hash
+        self.report_schema = report_schema
+        self.method_contract = method_contract
 
     def render(
         self,
@@ -80,6 +84,18 @@ class HARAExcelRenderer:
     ) -> Path:
         if not draft and not smoke and not state.can_publish:
             raise ValueError("HARAState still has pending reviews or errors; formal report is blocked")
+        if self.report_schema is not None:
+            if self.method_contract is None:
+                raise ValueError("Canonical report rendering requires the active MethodContract")
+            from .canonical_renderer import HARAReportWorkbookRenderer, style_template_hash
+            from .projection import HARAReportProjectionService
+
+            view_model = HARAReportProjectionService(self.report_schema).project(
+                state, self.method_contract, style_template_hash=style_template_hash(template_path)
+            )
+            return HARAReportWorkbookRenderer().render(
+                view_model, template_path, output_path, self.report_schema
+            )
         template = Path(template_path).expanduser().resolve()
         if not template.is_file():
             raise FileNotFoundError(f"Template not found: {template}")

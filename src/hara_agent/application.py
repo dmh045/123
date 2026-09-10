@@ -18,7 +18,7 @@ from hara_agent.services.analysis import (
 )
 from hara_agent.models import FunctionDefinition, ItemDefinitionFacts, ReviewStatus, SourceRef
 from hara_agent.services.extraction import ValidatedArtifactCache
-from hara_agent.services.reporting import HARAExcelRenderer
+from hara_agent.services.reporting import HARAExcelRenderer, load_report_schema
 from hara_agent.services.semantic import (
     GuidewordApplicabilityAgent,
     MalfunctionHazardAgent,
@@ -104,6 +104,8 @@ class HARAApplication:
             # Template mode it happens to equal the method-source hash; in
             # YAML mode it intentionally does not.
             template_hash=resolution.report_template_hash,
+            report_schema=load_report_schema(),
+            method_contract=method,
         )
         if self.config.resume:
             state = checkpoints.load(self.config.run_id)

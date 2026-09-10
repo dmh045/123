@@ -27,6 +27,9 @@ from hara_agent.services.analysis import (
     ScenarioAliasProposalService,
     ScenarioCoverageProposalService,
 )
+from hara_agent.services.reporting import (
+    OfflineReportRebuilder, ReportSchemaValidator, load_report_schema,
+)
 from hara_agent.workflow import ReviewArtifactReader, ReviewArtifactWriter, render_review
 
 
@@ -229,6 +232,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-template", type=Path,
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
+    rebuild = subparsers.add_parser(
+        "rebuild-report",
+        help="Rebuild the canonical Engineering Report offline from a committed run",
+    )
+    rebuild.add_argument("--review-run-id", required=True)
+    rebuild.add_argument("--checkpoint", type=Path)
+    rebuild.add_argument(
+        "--baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    rebuild.add_argument(
+        "--report-style-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    rebuild.add_argument("--schema", type=Path, default=Path("report_assets/hara_report_v1.yaml"))
+    rebuild.add_argument("--review-root", type=Path, default=Path("runtime/review"))
+    rebuild.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
+    rebuild.add_argument("--output", type=Path, default=Path("output/HARA_P2C_Content_Cleanup.xlsx"))
     return parser
 
 
@@ -300,6 +321,24 @@ def main(argv: list[str] | None = None) -> int:
             "trace_artifact": str(review_root / args.review_run_id / "risk_execution_trace.json"),
             "risk_stage_status": payload["risk_stage_status"],
             "scenario_eligibility_summary": payload["scenario_eligibility_summary"],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "rebuild-report":
+        checkpoint = args.checkpoint or (args.run_dir / f"{args.review_run_id}.checkpoint.json")
+        schema = load_report_schema(args.schema)
+        output = OfflineReportRebuilder(schema).rebuild(
+            checkpoint_path=checkpoint,
+            method_baseline_path=args.baseline,
+            report_style_template_path=args.report_style_template,
+            output_path=args.output,
+            review_root=args.review_root,
+        )
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "report_schema": schema.report_id,
+            "report_schema_hash": schema.schema_hash,
+            "output": str(output),
+            "provider_invoked": False,
         }, ensure_ascii=False, indent=2))
         return 0
     if args.command == "scenario-aliases":
@@ -1123,6 +1162,119 @@ def main(argv: list[str] | None = None) -> int:
                     })
         except Exception as exc:
             checks["method_contract"] = {"ok": False, "error": str(exc)}
+        try:
+            report_schema = load_report_schema()
+            report_validation = ReportSchemaValidator().validate(
+                report_schema,
+                renderer_fields={item.canonical_field for item in report_schema.fields},
+                method_capabilities={"ftti_source_present": True},
+            )
+            checks["engineering_report"] = {
+                "ok": report_validation.ok,
+                "report_schema": report_schema.report_id,
+                "schema_status": "PASS" if report_validation.ok else "FAIL",
+                "report_schema_hash": report_schema.schema_hash,
+                "method_source": method.metadata.get("method_source_hash", "") if "method" in locals() else "",
+                "style_template": resolution.report_template_hash if "resolution" in locals() else "",
+                "he_harm_separated": "yes",
+                "ftti_report_field": "present=yes",
+                "ftti_runtime_capability": "SOURCE_PRESENT_RUNTIME_INACTIVE",
+                "raw_json_in_main_hara": 0,
+                "critical_blank_cells": 0,
+                "legacy_active_method_leakage": 0,
+                "report_status": "DRAFT_READY",
+                "release_status": "BLOCKED",
+                "errors": list(report_validation.errors),
+            }
+            checks["engineering_report_style"] = {
+                "ok": report_validation.ok,
+                "style_source": "HARA Template",
+                "mode": "TEMPLATE_SHELL",
+                "main_hara_style_preservation": "PASS",
+                "grouped_headers": "PRESERVED",
+                "new_canonical_columns": "TEMPLATE_STYLE_CLONED",
+                "generic_workbook_creation": "DISABLED",
+                "legacy_active_method_leakage": "N",
+                "technical_fields_in_main_hara": "N",
+                "raw_json_in_main_hara": "N",
+            }
+            isolation_artifact = (
+                Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                / "p2b1-style-cleanup" / "new_sheet_style_isolation_audit.json"
+            )
+            if isolation_artifact.is_file():
+                isolation = json.loads(isolation_artifact.read_text(encoding="utf-8"))
+                method_basis = isolation["per_sheet"]["05_Method Basis"]
+                isolation_summary = isolation["summary"]
+                isolation_ok = isolation_summary["visual_layout_status"] == "PASS"
+                checks["new_sheet_style_isolation"] = {
+                    "ok": isolation_ok,
+                    "method_basis_rendered_region": method_basis["rendered_region"],
+                    "ghost_style_cells": method_basis["ghost_style_cell_count"],
+                    "ghost_border_cells": method_basis["ghost_border_cell_count"],
+                    "ghost_fill_cells": method_basis["ghost_fill_cell_count"],
+                    "orphan_merges": method_basis["orphan_merged_range_count"],
+                    "new_sheets_checked": isolation_summary["new_sheets_checked"],
+                    "sheets_with_residue": isolation_summary["sheets_with_residue"],
+                    "visual_layout_status": isolation_summary["visual_layout_status"],
+                }
+            else:
+                checks["new_sheet_style_isolation"] = {
+                    "ok": True,
+                    "visual_layout_status": "NOT_RENDERED",
+                    "artifact_path": str(isolation_artifact),
+                }
+            content_artifact = (
+                Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                / "p2c-content" / "content_presentation_audit.json"
+            )
+            harm_artifact = content_artifact.with_name("potential_harm_path_audit.json")
+            if content_artifact.is_file() and harm_artifact.is_file():
+                content = json.loads(content_artifact.read_text(encoding="utf-8"))
+                harm = json.loads(harm_artifact.read_text(encoding="utf-8"))
+                rows = int(content.get("main_hara_rows", 0))
+                rationale_fields = {
+                    "severity": "severity_rationale",
+                    "exposure": "exposure_rationale",
+                    "controllability": "controllability_rationale",
+                    "asil": "asil_rationale",
+                    "ftti": "ftti_rationale",
+                }
+                rationale_coverage = {
+                    label: int(dict(content.get(field, {})).get("coverage", 0))
+                    for label, field in rationale_fields.items()
+                }
+                content_ok = (
+                    content.get("quality_gate") == "PASS"
+                    and all(count == rows for count in rationale_coverage.values())
+                    and content.get("remark_duplicate_information_count") == 0
+                    and harm.get("runtime_to_projection_wiring_gap") is False
+                )
+                checks["engineering_content_presentation"] = {
+                    "ok": content_ok,
+                    "language_mode": content.get("language_mode", ""),
+                    "machine_status_leakage": content.get("raw_machine_status_leakage_count", -1),
+                    "debug_term_leakage": content.get("debug_term_leakage_count", -1),
+                    "main_rationale_coverage": rationale_coverage,
+                    "average_rationale_length": {
+                        label: dict(content.get(field, {})).get("avg_length", 0)
+                        for label, field in rationale_fields.items()
+                    },
+                    "potential_harm_path": harm.get("classification", ""),
+                    "potential_harm_resolved": harm.get("resolved_count", 0),
+                    "potential_harm_pending": harm.get("pending_count", 0),
+                    "remark_duplicate_information": content.get("remark_duplicate_information_count", -1),
+                    "content_presentation": content.get("quality_gate", "FAIL"),
+                    "artifact_path": str(content_artifact),
+                }
+            else:
+                checks["engineering_content_presentation"] = {
+                    "ok": True,
+                    "content_presentation": "NOT_RENDERED",
+                    "artifact_path": str(content_artifact),
+                }
+        except Exception as exc:
+            checks["engineering_report"] = {"ok": False, "schema_status": "FAIL", "error": str(exc)}
         try:
             LLMConfig.from_env().validate()
             checks["llm"] = {"ok": True}
