@@ -255,15 +255,77 @@ class SeverityMethodExecutor:
 
 
 class ExposureMethodExecutor:
+    _VALID_LEVELS = frozenset({"E0", "E1", "E2", "E3", "E4"})
+
     @staticmethod
     def _level(atom: ExposureAtom, domain: ExposureMethodDomain) -> str:
         return atom.duration_level if domain is ExposureMethodDomain.TIME else atom.frequency_level
 
     @staticmethod
-    def _aggregate(levels: list[str], dependent: bool, policy) -> str:
-        return ExposureCombinationExecutor.combine_policy(
-            levels, dependent=dependent, policy=policy,
+    def _other_domain(domain: ExposureMethodDomain) -> ExposureMethodDomain:
+        return (
+            ExposureMethodDomain.FREQUENCY
+            if domain is ExposureMethodDomain.TIME else ExposureMethodDomain.TIME
         )
+
+    @classmethod
+    def _atom_values(
+        cls,
+        atom_ids: tuple[str, ...],
+        by_id: dict[str, ExposureAtom],
+        domain: ExposureMethodDomain,
+    ) -> tuple[list[dict], list[str]]:
+        """Mirror FUSA v1 collection: one domain for the entire Scenario."""
+        details: list[dict] = []
+        values: list[str] = []
+        for atom_id in atom_ids:
+            atom = by_id.get(atom_id)
+            if atom is None:
+                details.append({
+                    "atom_id": atom_id,
+                    "requested_domain": domain.value,
+                    "actual_domain": "",
+                    "e_rank": "",
+                    "used": False,
+                    "skipped": True,
+                    "skip_reason": "ATOM_NOT_IN_CATALOG",
+                })
+                continue
+            level = cls._level(atom, domain)
+            usable = level in cls._VALID_LEVELS
+            details.append({
+                "atom_id": atom_id,
+                "requested_domain": domain.value,
+                "actual_domain": domain.value if usable else "",
+                "e_rank": level if usable else "",
+                "used": usable,
+                "skipped": not usable,
+                "skip_reason": "" if usable else "NO_VALUE_IN_SELECTED_DOMAIN",
+                "dimensions": list(atom.dimensions),
+            })
+            if usable:
+                values.append(level)
+        return details, values
+
+    @staticmethod
+    def _base_result(
+        *, rule, domain: ExposureMethodDomain, requested: ExposureMethodDomain,
+        atom_details: list[dict], **values,
+    ) -> dict:
+        return {
+            "rule_id": rule.rule_id,
+            "source_ref": rule.source_ref,
+            "inputs_used": ("component_category", "scenario_atom_ids"),
+            "domain": domain.value,
+            "requested_domain": requested.value,
+            "actual_domain": domain.value,
+            "dimension_fallback": domain is not requested,
+            "atom_details": atom_details,
+            "aggregation_rule": "",
+            "coupling_consumed": False,
+            "coupling": "",
+            **values,
+        }
 
     def lookup(self, scenario: dict, method: ExposureMethod) -> dict:
         category = str(scenario.get("component_category", "")).strip()
@@ -272,45 +334,86 @@ class ExposureMethodExecutor:
             return {"value": "", "status": CalculationStatus.PENDING_METHOD_SEMANTICS,
                     "reason": "Component category does not resolve to exactly one approved Z/F rule.",
                     "rule_id": "", "source_ref": method.source_refs[0],
-                    "inputs_used": ("component_category",), "domain": ""}
+                    "inputs_used": ("component_category",), "domain": "",
+                    "requested_domain": "", "actual_domain": "",
+                    "dimension_fallback": False, "atom_details": [],
+                    "aggregation_rule": "", "coupling_consumed": False,
+                    "coupling": "", "pending_reason": "MISSING_E_DIMENSION"}
         domain = matches[0].domain
         raw_ids = scenario.get("scenario_atom_ids", ())
-        atom_ids = tuple(str(value) for value in raw_ids) if isinstance(raw_ids, (list, tuple)) else ()
+        atom_ids = tuple(dict.fromkeys(str(value) for value in raw_ids)) if isinstance(raw_ids, (list, tuple)) else ()
         by_id = {atom.atom_id: atom for atom in method.atoms}
-        atoms = [by_id[value] for value in atom_ids if value in by_id]
-        if not atoms:
-            return {"value": "", "status": CalculationStatus.PENDING_INPUT,
-                    "reason": "Exposure requires scenario atom IDs bound to the baseline catalog.",
-                    "rule_id": matches[0].rule_id, "source_ref": matches[0].source_ref,
-                    "inputs_used": ("component_category", "scenario_atom_ids"),
-                    "domain": domain.value}
-        levels = [self._level(atom, domain) for atom in atoms]
-        selected = domain
-        if not any(levels):
-            selected = (
-                ExposureMethodDomain.FREQUENCY
-                if domain is ExposureMethodDomain.TIME else ExposureMethodDomain.TIME
+        if not atom_ids:
+            return self._base_result(
+                rule=matches[0], domain=domain, requested=domain, atom_details=[],
+                value="", status=CalculationStatus.PENDING_INPUT,
+                reason="MISSING_SCENARIO_ATOMS", pending_reason="MISSING_SCENARIO_ATOMS",
             )
-            levels = [self._level(atom, selected) for atom in atoms]
-        usable = [value for value in levels if value in {"E0", "E1", "E2", "E3", "E4"}]
+
+        requested = domain
+        atom_details, usable = self._atom_values(atom_ids, by_id, requested)
+        selected = requested
         if not usable:
-            return {"value": "", "status": CalculationStatus.PENDING_INPUT,
-                    "reason": "Selected Z/F domain and scenario-level fallback both have no usable atom E values.",
-                    "rule_id": matches[0].rule_id, "source_ref": matches[0].source_ref,
-                    "inputs_used": ("component_category", "scenario_atom_ids"),
-                    "domain": selected.value}
-        dimensions = {dimension for atom in atoms for dimension in atom.dimensions}
-        dependent = any(
-            left in dimensions and right in dimensions
-            for left, right in method.strong_couplings
+            selected = self._other_domain(requested)
+            atom_details, usable = self._atom_values(atom_ids, by_id, selected)
+        if not usable:
+            reason = (
+                "MISSING_CATALOG_ATOMS" if not any(atom_id in by_id for atom_id in atom_ids)
+                else "MISSING_EXPOSURE_VALUE_BOTH_DOMAINS"
+            )
+            return self._base_result(
+                rule=matches[0], domain=requested, requested=requested,
+                atom_details=atom_details, value="", status=CalculationStatus.PENDING_INPUT,
+                reason=reason, pending_reason=reason,
+            )
+
+        common = {
+            "rule": matches[0], "domain": selected, "requested": requested,
+            "atom_details": atom_details,
+        }
+        policy = method.aggregation_policy
+        if all(level == policy.all_highest_operand for level in usable):
+            return self._base_result(
+                **common, value=policy.all_highest_result,
+                status=CalculationStatus.FINALIZED,
+                reason="FUSA_V1_ALL_E4", aggregation_rule="all_e4",
+            )
+        if set(policy.mixed_high_operands).issubset(set(usable)):
+            return self._base_result(
+                **common, value=policy.mixed_high_result,
+                status=CalculationStatus.FINALIZED,
+                reason="FUSA_V1_E3_E4_MIX", aggregation_rule="e3_e4_mix",
+            )
+        ranks = [int(level[1:]) for level in usable]
+        if min(ranks) != max(ranks):
+            return self._base_result(
+                **common, value=f"E{min(ranks)}",
+                status=CalculationStatus.FINALIZED,
+                reason="FUSA_V1_MIN_WHEN_UNEQUAL",
+                aggregation_rule="min_when_unequal",
+            )
+
+        coupling = str(scenario.get("atoms_coupling", "")).strip().lower()
+        if coupling not in {"coupled", "independent"}:
+            return self._base_result(
+                **common, value="", status=CalculationStatus.PENDING_INPUT,
+                reason="MISSING_ATOMS_COUPLING",
+                pending_reason="MISSING_ATOMS_COUPLING",
+            )
+        decrement = (
+            policy.dependent_decrement if coupling == "coupled"
+            else policy.independent_decrement
         )
-        return {"value": self._aggregate(usable, dependent, method.aggregation_policy),
-                "status": CalculationStatus.FINALIZED,
-                "reason": "Executed approved Z/F selection, atom lookup and dependency aggregation.",
-                "rule_id": matches[0].rule_id,
-                "source_ref": matches[0].source_ref,
-                "inputs_used": ("component_category", "scenario_atom_ids"),
-                "domain": selected.value}
+        return self._base_result(
+            **common,
+            value=f"E{max(policy.minimum_level, ranks[0] - decrement)}",
+            status=CalculationStatus.FINALIZED,
+            reason=("FUSA_V1_SAME_COUPLED_NO_CHANGE" if coupling == "coupled"
+                    else "FUSA_V1_SAME_INDEPENDENT_MINUS_ONE"),
+            aggregation_rule=("same_coupled_no_change" if coupling == "coupled"
+                              else "same_independent_minus_one"),
+            coupling_consumed=True, coupling=coupling,
+        )
 
 
 class StructuredControllabilityExecutor:

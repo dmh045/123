@@ -132,19 +132,19 @@ def test_historical_partial_atom_scoring_is_not_a_coverage_rule():
     executor = ExposureMethodExecutor()
     results = {
         "missing_where": executor.lookup(
-            {"component_category": "computing", "scenario_atom_ids": ["PU002"]},
+                {"component_category": "computing", "scenario_atom_ids": ["PU002"], "atoms_coupling": "independent"},
             method.structured_risk_method.exposure,
         ),
         "missing_object": executor.lookup(
-            {"component_category": "computing", "scenario_atom_ids": ["VD001"]},
+            {"component_category": "computing", "scenario_atom_ids": ["VD001"], "atoms_coupling": "independent"},
             method.structured_risk_method.exposure,
         ),
         "ego_dynamics_only": executor.lookup(
-            {"component_category": "computing", "scenario_atom_ids": ["FA001"]},
+            {"component_category": "computing", "scenario_atom_ids": ["FA001"], "atoms_coupling": "independent"},
             method.structured_risk_method.exposure,
         ),
         "multiple_atoms": executor.lookup(
-            {"component_category": "computing", "scenario_atom_ids": ["VD001", "FA001", "PU002"]},
+            {"component_category": "computing", "scenario_atom_ids": ["VD001", "FA001", "PU002"], "atoms_coupling": "independent"},
             method.structured_risk_method.exposure,
         ),
     }

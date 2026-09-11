@@ -135,10 +135,11 @@ def test_structured_exposure_missing_atom_is_pending_input():
     scenario["scenario_atom_ids"] = []
     scored = service.score(scenario, "hazard")
     assert scored["exposure"]["calculation_status"] == CalculationStatus.PENDING_INPUT.value
-    assert scored["exposure"]["executor_invoked"] is False
+    assert scored["exposure"]["executor_invoked"] is True
+    assert scored["exposure"]["pending_reason"] == "MISSING_SCENARIO_ATOMS"
 
 
-def test_pending_coverage_does_not_invoke_exposure_with_available_atom(monkeypatch):
+def test_pending_coverage_is_diagnostic_only_for_fusa_v1(monkeypatch):
     service = _service()
     scenario = _scenario(service, 20.0)
     scenario["scenario_atom_ids"] = ["FA001"]
@@ -158,12 +159,61 @@ def test_pending_coverage_does_not_invoke_exposure_with_available_atom(monkeypat
     monkeypatch.setattr(service.exposure, "lookup", counted)
     scored = service.score(scenario, "hazard")
 
+    assert calls == 1
+    assert scored["exposure"]["calculation_status"] == CalculationStatus.FINALIZED.value
+    assert scored["exposure"]["exposure_score"] == "E4"
+    assert scored["exposure"]["exposure_result"] == "E4"
+    assert scored["exposure"]["executor_invoked"] is True
+    assert scored["exposure"]["pending_reason"] == ""
+
+
+def test_pending_coverage_still_blocks_a_future_method_that_requires_it(monkeypatch):
+    service = _service()
+    service.structured = replace(
+        service.structured,
+        exposure=replace(
+            service.structured.exposure,
+            aggregation_policy=replace(
+                service.structured.exposure.aggregation_policy,
+                policy_id="future_coverage_required",
+            ),
+        ),
+    )
+    scenario = _scenario(service, 20.0)
+    scenario["_exposure_dimension_coverage_decision"] = (
+        ExposureDimensionCoverageService(service.method).decide(
+            assessment_key="MF-1::SC-1", function=None, operating_mode="Active",
+        )
+    )
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("coverage-required method must not invoke Exposure")
+
+    monkeypatch.setattr(service.exposure, "lookup", counted)
+    scored = service.score(scenario, "hazard")
+
     assert calls == 0
     assert scored["exposure"]["calculation_status"] == CalculationStatus.PENDING_METHOD_SEMANTICS.value
-    assert scored["exposure"]["exposure_score"] == ""
-    assert scored["exposure"]["exposure_result"] is None
-    assert scored["exposure"]["executor_invoked"] is False
     assert scored["exposure"]["missing_method_semantics"] == "EXPOSURE_DIMENSION_COVERAGE"
+
+
+def test_s0_short_circuits_before_the_diagnostic_coverage_decision():
+    service = _service()
+    scenario = _scenario(service, 3.9)
+    scenario["_exposure_dimension_coverage_decision"] = (
+        ExposureDimensionCoverageService(service.method).decide(
+            assessment_key="MF-1::SC-1", function=None, operating_mode="Active",
+        )
+    )
+
+    scored = service.score(scenario, "hazard")
+
+    assert scored["severity"]["severity_score"] == "S0"
+    assert scored["exposure"]["exposure_score"] == "E0"
+    assert scored["exposure"]["engineering_rule_id"] == "ASIL-ZERO-SHORT-CIRCUIT"
 
 
 def test_structured_scoring_requires_typed_coverage_decision():

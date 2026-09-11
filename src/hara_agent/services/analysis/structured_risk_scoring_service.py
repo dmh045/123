@@ -85,11 +85,17 @@ class StructuredRiskScoringService:
         self, scenario: dict[str, Any], decision: ExposureDimensionCoverageDecision,
     ) -> dict[str, Any] | None:
         source = self.structured.exposure.source_refs[0]
+        if self.structured.exposure.aggregation_policy.policy_id == "fusa_v1":
+            # The governed fusa_v1 policy compiles the original executor
+            # semantics: coverage is useful review evidence, but is not an E
+            # input and cannot replace the original atom-level decision.
+            return None
         common = {
             "coverage_status": decision.coverage_status.value,
             "coverage_rule_ids": list(decision.coverage_rule_ids),
             "coverage_granularity": decision.granularity,
             "executor_invoked": False,
+            "coverage_gate_applied": True,
         }
         if decision.coverage_status is not ExposureDimensionCoverageStatus.RESOLVED:
             return self._result(
@@ -182,6 +188,33 @@ class StructuredRiskScoringService:
             pending_reason=s.get("pending_reason", ""),
         )
         coverage_decision = self._coverage_decision(scenario)
+        if s["status"] is CalculationStatus.FINALIZED and s["value"] == "S0":
+            source = s["source_ref"]
+            exposure = self._result(
+                value_key="exposure_score", value="E0",
+                status=CalculationStatus.FINALIZED,
+                reason="S0 activated the approved risk short-circuit.",
+                rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
+                inputs_used=("severity_score",), exposure_method="SHORT_CIRCUIT",
+                coverage_status=coverage_decision.coverage_status.value,
+                coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
+                coverage_granularity=coverage_decision.granularity,
+                coverage_gate_applied=False,
+                executor_invoked=False,
+            )
+            controllability = self._result(
+                value_key="controllability_score", value="C0",
+                status=CalculationStatus.FINALIZED,
+                reason="S0 activated the approved risk short-circuit.",
+                rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
+                inputs_used=("severity_score",),
+                decision_status="SHORT_CIRCUIT",
+                unknown_override_policy=self.structured.controllability_branch_policy.unknown_override_policy.value,
+                unknown_policy_action="NOT_INVOKED",
+                rule_match_states=[], executor_invoked=False,
+            )
+            return {"severity": severity, "exposure": exposure, "controllability": controllability}
+
         gated_exposure = self._coverage_gated_exposure(scenario, coverage_decision)
         if gated_exposure is not None:
             c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
@@ -198,31 +231,6 @@ class StructuredRiskScoringService:
                 "exposure": gated_exposure,
                 "controllability": controllability,
             }
-        if s["status"] is CalculationStatus.FINALIZED and s["value"] == "S0":
-            source = s["source_ref"]
-            exposure = self._result(
-                value_key="exposure_score", value="E0",
-                status=CalculationStatus.FINALIZED,
-                reason="S0 activated the approved risk short-circuit.",
-                rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
-                inputs_used=("severity_score",), exposure_method="SHORT_CIRCUIT",
-                coverage_status=coverage_decision.coverage_status.value,
-                coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
-                coverage_granularity=coverage_decision.granularity,
-                executor_invoked=False,
-            )
-            controllability = self._result(
-                value_key="controllability_score", value="C0",
-                status=CalculationStatus.FINALIZED,
-                reason="S0 activated the approved risk short-circuit.",
-                rule_id="ASIL-ZERO-SHORT-CIRCUIT", source_ref=source,
-                inputs_used=("severity_score",),
-                decision_status="SHORT_CIRCUIT",
-                unknown_override_policy=self.structured.controllability_branch_policy.unknown_override_policy.value,
-                unknown_policy_action="NOT_INVOKED",
-                rule_match_states=[], executor_invoked=False,
-            )
-            return {"severity": severity, "exposure": exposure, "controllability": controllability}
 
         e = self.exposure.lookup(scenario, self.structured.exposure)
         exposure = self._result(
@@ -232,8 +240,17 @@ class StructuredRiskScoringService:
             coverage_status=coverage_decision.coverage_status.value,
             coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
             coverage_granularity=coverage_decision.granularity,
+            coverage_gate_applied=False,
             executor_invoked=True,
             exposure_result=e["value"],
+            requested_domain=e.get("requested_domain", ""),
+            actual_domain=e.get("actual_domain", ""),
+            dimension_fallback=bool(e.get("dimension_fallback", False)),
+            atom_details=list(e.get("atom_details", [])),
+            aggregation_rule=e.get("aggregation_rule", ""),
+            coupling_consumed=bool(e.get("coupling_consumed", False)),
+            coupling=e.get("coupling", ""),
+            pending_reason=e.get("pending_reason", ""),
         )
         c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
         c = self.controllability.lookup(c_input, self.structured)

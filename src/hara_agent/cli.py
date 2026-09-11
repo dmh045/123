@@ -26,6 +26,7 @@ from hara_agent.services.analysis import (
     ControllabilityBranchAuditService,
     MethodContractParityAuditService,
     RiskExecutionTraceService,
+    RiskScoreabilityService,
     SeverityDeltaVSemanticAuditService,
     ScenarioAliasProposalService,
     ScenarioCoverageProposalService,
@@ -301,6 +302,14 @@ def build_parser() -> argparse.ArgumentParser:
     rescore.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     rescore.add_argument("--review-root", type=Path, default=Path("runtime/review"))
     rescore.add_argument("--output", type=Path, required=True)
+    scoreability = subparsers.add_parser(
+        "risk-scoreability",
+        help="Classify S/C scoreability of existing analytical options without a Provider",
+    )
+    scoreability.add_argument("--checkpoint", type=Path, required=True)
+    scoreability.add_argument("--risk-input-supplement", type=Path, required=True)
+    scoreability.add_argument("--review-run-id", required=True)
+    scoreability.add_argument("--review-root", type=Path, default=Path("runtime/review"))
     return parser
 
 
@@ -318,6 +327,25 @@ def main(argv: list[str] | None = None) -> int:
             supplement=args.risk_input_supplement,
         )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "risk-scoreability":
+        checkpoint = json.loads(args.checkpoint.read_text(encoding="utf-8"))
+        supplement = json.loads(args.risk_input_supplement.read_text(encoding="utf-8"))
+        payload, queue = RiskScoreabilityService().generate(
+            checkpoint=checkpoint, supplement=supplement,
+        )
+        review_root = args.review_root / args.review_run_id
+        _write_json_atomic(review_root / "risk_scoreability.json", payload)
+        _write_json_atomic(review_root / "differential_validation_queue.json", queue)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "risk_scoreability": str(review_root / "risk_scoreability.json"),
+            "differential_validation_queue": str(
+                review_root / "differential_validation_queue.json"
+            ),
+            "summary": payload["summary"],
+            "provider_calls": 0,
+        }, ensure_ascii=False, indent=2))
         return 0
     if args.command == "confirm-template-role":
         compiler = _role_compiler()

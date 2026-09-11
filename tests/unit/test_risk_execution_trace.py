@@ -164,7 +164,7 @@ def test_missing_relative_speed_and_atoms_remain_pending_inputs():
     assert row["severity"]["status"] == "PENDING_INPUT"
     assert row["severity"]["pending_reason"] == "MISSING_RELATIVE_SPEED"
     assert row["exposure"]["status"] == "PENDING_INPUT"
-    assert row["exposure"]["pending_reason"] == "PENDING_INPUT"
+    assert row["exposure"]["pending_reason"] == "MISSING_SCENARIO_ATOMS"
 
 
 def test_unresolved_unknown_policy_trace_does_not_project_a_block_policy():
@@ -186,7 +186,7 @@ def test_unresolved_unknown_policy_trace_does_not_project_a_block_policy():
     assert controllability["unresolved_inputs"] == ["driver_in_vehicle"]
 
 
-def test_pending_coverage_trace_marks_available_atom_unused():
+def test_pending_coverage_trace_records_native_fusa_execution():
     method = _method()
     facts = _scoring_facts(method)
     facts["scenario_atom_ids"] = ["FA001"]
@@ -204,17 +204,18 @@ def test_pending_coverage_trace_marks_available_atom_unused():
     )
     exposure = trace["assessments"][0]["exposure"]
 
-    assert exposure["status"] == "PENDING_METHOD_SEMANTICS"
+    assert exposure["status"] == "FINALIZED"
     assert exposure["coverage_status"] == "PENDING_METHOD_SEMANTICS"
-    assert exposure["executor_invoked"] is False
-    assert exposure["pending_reason"] == "PENDING_METHOD_SEMANTICS"
-    assert exposure["missing_method_semantics"] == "EXPOSURE_DIMENSION_COVERAGE"
+    assert exposure["coverage_gate_applied"] is False
+    assert exposure["executor_invoked"] is True
+    assert exposure["pending_reason"] == ""
+    assert exposure["missing_method_semantics"] == ""
     assert exposure["atom_available"] is True
-    assert exposure["atom_used_for_scoring"] is False
-    assert exposure["atom_bindings"][0]["available_but_unused"] is True
+    assert exposure["atom_used_for_scoring"] is True
+    assert exposure["atom_bindings"][0]["used"] is True
 
 
-def test_production_scoring_injects_pending_coverage_and_propagates_asil():
+def test_production_scoring_keeps_coverage_diagnostic_without_blocking_fusa():
     method = _method()
     state = HARAState(run_id="coverage-runtime", stage=WorkflowStage.SCORING)
     state.functions = [{
@@ -234,8 +235,8 @@ def test_production_scoring_injects_pending_coverage_and_propagates_asil():
     )
 
     risk = state.risk_results[0]
-    assert risk.exposure.value == ""
-    assert risk.exposure.status is ReviewStatus.PENDING
+    assert risk.exposure.value == "E4"
+    assert risk.exposure.status is ReviewStatus.FINALIZED
     assert risk.asil.value == ""
     assert risk.asil.status is ReviewStatus.PENDING
     calculation = next(

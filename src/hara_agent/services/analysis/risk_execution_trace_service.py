@@ -142,41 +142,49 @@ class RiskExecutionTraceService:
         method = structured.exposure if structured is not None else None
         raw_ids = scenario.get("scenario_atom_ids", ())
         atom_ids = [str(item) for item in raw_ids] if isinstance(raw_ids, (list, tuple)) else []
-        selected_domain = str(result.get("exposure_method", result.get("domain", "")))
+        selected_domain = str(result.get("actual_domain", result.get("exposure_method", "")))
+        requested_domain = str(result.get("requested_domain", selected_domain))
         executor_invoked = bool(
             result.get("executor_invoked", _status(result) == CalculationStatus.FINALIZED.value)
         )
         atoms: list[dict[str, Any]] = []
         classes: list[str] = []
         dimensions: set[str] = set()
+        details = result.get("atom_details", [])
+        details_by_id = {
+            str(item.get("atom_id", "")): item
+            for item in details if isinstance(item, dict)
+        }
         if method is not None:
             by_id = {item.atom_id: item for item in method.atoms}
             for atom_id in atom_ids:
                 atom = by_id.get(atom_id)
-                if atom is None:
-                    continue
-                level = (
-                    atom.duration_level if selected_domain == "TIME" else atom.frequency_level
-                ) if executor_invoked else ""
+                detail = details_by_id.get(atom_id, {})
+                level = str(detail.get("e_rank", ""))
+                atom_dimensions = list(atom.dimensions) if atom is not None else list(detail.get("dimensions", []))
                 atoms.append({
-                    "atom_id": atom_id, "dimension": list(atom.dimensions),
-                    "E_class": level, "available_but_unused": not executor_invoked,
-                    "source": _source(atom.source_ref),
+                    "atom_id": atom_id, "dimension": atom_dimensions,
+                    "E_class": level,
+                    "used": bool(detail.get("used", False)),
+                    "skipped": bool(detail.get("skipped", False)),
+                    "skip_reason": str(detail.get("skip_reason", "")),
+                    "requested_domain": str(detail.get("requested_domain", requested_domain)),
+                    "actual_domain": str(detail.get("actual_domain", "")),
+                    "available_but_unused": not executor_invoked,
+                    "source": _source(atom.source_ref) if atom is not None else {},
                 })
-                dimensions.update(atom.dimensions)
-                if executor_invoked and level in {"E0", "E1", "E2", "E3", "E4"}:
+                dimensions.update(atom_dimensions)
+                if bool(detail.get("used", False)) and level in {"E0", "E1", "E2", "E3", "E4"}:
                     classes.append(level)
-            if executor_invoked:
-                dependent = any(left in dimensions and right in dimensions for left, right in method.strong_couplings)
-                policy = method.aggregation_policy
-                branch = self._policy_branch(classes, dependent, policy)
-                aggregation = {
-                    "policy_id": policy.policy_id, "policy_branch": branch,
-                    "input_classes": classes, "dependent": dependent,
-                    "strong_couplings": [list(pair) for pair in method.strong_couplings if pair[0] in dimensions and pair[1] in dimensions],
-                }
-            else:
-                aggregation = {"policy_branch": "NOT_INVOKED_BY_COVERAGE_GATE"}
+            policy = method.aggregation_policy
+            aggregation = {
+                "policy_id": policy.policy_id,
+                "policy_branch": str(result.get("aggregation_rule", "NOT_INVOKED")),
+                "input_classes": classes,
+                "coupling": str(result.get("coupling", "")),
+                "coupling_consumed": bool(result.get("coupling_consumed", False)),
+                "strong_couplings": [list(pair) for pair in method.strong_couplings],
+            }
         else:
             aggregation = {"policy_branch": "NOT_STRUCTURED"}
         pending = result.get("reasoning", "") if _status(result) != CalculationStatus.FINALIZED.value else ""
@@ -186,10 +194,13 @@ class RiskExecutionTraceService:
             "coverage_status": result.get("coverage_status", ""),
             "coverage_rule_ids": list(result.get("coverage_rule_ids", [])),
             "coverage_granularity": result.get("coverage_granularity", ""),
+            "coverage_gate_applied": bool(result.get("coverage_gate_applied", False)),
             "missing_method_semantics": result.get("missing_method_semantics", ""),
             "component_category": scenario.get("component_category", ""),
             "dimensions": sorted(dimensions), "scenario_terms": scenario.get("method_scenario_dimensions", {}),
-            "atom_bindings": atoms, "atom_ids": atom_ids, "domain": selected_domain,
+            "atom_bindings": atoms, "atom_ids": atom_ids,
+            "requested_domain": requested_domain, "domain": selected_domain,
+            "scenario_level_fallback": bool(result.get("dimension_fallback", False)),
             "intermediate_values": classes, "dependency_coupling": aggregation,
             "aggregation_policy": aggregation.get("policy_id", ""),
             "rule_ids": [result.get("engineering_rule_id", "")] if result.get("engineering_rule_id") else [],
