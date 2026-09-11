@@ -68,13 +68,11 @@ def _scenario_json(
             "causal_evidence_view": selection.compact_view,
             **(
                 {
-                    "method_template_context": scenario.context_resolution[
-                        "malfunction_template_context"
-                    ]
+                    "analysis_scenario_assumptions": scenario.analysis_instance.get(
+                        "assumptions", []
+                    )
                 }
-                if isinstance(scenario.context_resolution.get(
-                    "malfunction_template_context"
-                ), dict) else {}
+                if scenario.analysis_instance else {}
             ),
         },
         ensure_ascii=False,
@@ -97,10 +95,10 @@ def _prompt_parts(
         "The causal_evidence_view is a compact selected subset of the complete EvidenceRegistry. "
         "Use only exact evidence_ref keys shown in that view; full provenance, source excerpts, "
         "and downstream risk-method metadata are intentionally omitted from this prompt. "
-        "When method_template_context is present, it is qualified METHOD_TEMPLATE Scenario context "
-        "only: it is not a direct fact, is not registered in causal_evidence_view, and MUST NOT be "
-        "cited as evidence for any causal hop or risk-dimension change. Do not convert it into a "
-        "new Scenario fact or combine multiple template options into one atomic world. "
+        "When analysis_scenario_assumptions are present, they are SCENARIO_DEFINED analysis "
+        "conditions only. They are not causal evidence and MUST NOT be cited for any causal hop "
+        "or risk-dimension change. Do not convert them into project facts or combine template "
+        "options into one atomic world. "
         "For m_to_b, finalized MF.description and MF.functional_effect are mandatory "
         "DIRECT_FACT anchors for the malfunction's defined behavior/effect when present. "
         "Do not treat missing Scenario trigger or applicability context as an M_TO_B failure; "

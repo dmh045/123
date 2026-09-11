@@ -192,6 +192,7 @@ class HARAState:
             semantic_fingerprint=str(value.get("semantic_fingerprint", "")),
             scenario_contract_version=str(value.get("scenario_contract_version", "")),
             exposure_context=list(value.get("exposure_context", [])),
+            analysis_instance=dict(value.get("analysis_instance", {})),
         )
 
     @classmethod

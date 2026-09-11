@@ -29,6 +29,7 @@ class ScenarioCandidate:
     semantic_fingerprint: str = ""
     scenario_contract_version: str = ""
     exposure_context: list[dict[str, Any]] = field(default_factory=list)
+    analysis_instance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.scenario_id:

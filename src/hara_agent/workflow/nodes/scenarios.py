@@ -25,7 +25,7 @@ from .parallel import ordered_parallel_map
 from ..review_artifacts import ReviewArtifactWriter
 
 
-SCENARIO_BATCH_CHECKPOINT_VERSION = "scenario-malfunction-batch-v4"
+SCENARIO_BATCH_CHECKPOINT_VERSION = "scenario-malfunction-batch-v5"
 
 
 def _scenario_batch_cache_key(
@@ -51,9 +51,7 @@ def _scenario_batch_cache_key(
             "scenario_contract_version": item.scenario_contract_version,
             "facts": item.facts,
             "fact_provenance": item.fact_provenance,
-            "malfunction_template_context": item.context_resolution.get(
-                "malfunction_template_context", {}
-            ),
+            "analysis_instance": item.analysis_instance,
         } for item in candidates],
     }
     serialized = json.dumps(
@@ -90,25 +88,18 @@ def _load_cached_scenario_batch(
     return assessments, audit
 
 
-def _assess_with_template_context(
+def _assess_instantiated_scenarios(
     agent: ScenarioFeasibilityAgent,
     malfunction: MalfunctionCandidate,
     candidates: list[ScenarioCandidate],
-    bindings: list[dict],
+    instantiation: dict,
     project_registry,
 ) -> tuple[list[ScenarioFeasibilityAssessment], dict]:
-    """Keep M-specific template context out of global ScenarioCandidate state."""
+    """Assess only the candidate instances selected for one malfunction."""
     assessments, audit = agent.assess(
         malfunction, candidates, project_registry=project_registry,
     )
-    audit["template_context_bindings"] = bindings
-    audit["template_context_injected_count"] = sum(
-        bool(item.get("injected")) for item in bindings
-    )
-    audit["template_context_qualification_counts"] = {
-        status: sum(item.get("qualification") == status for item in bindings)
-        for status in ("STRONG_MATCH", "WEAK_MATCH", "AMBIGUOUS", "NO_MATCH")
-    }
+    audit["analytical_scenario_instantiation"] = instantiation
     return assessments, audit
 
 
@@ -128,7 +119,6 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         build_project_evidence_registry(ItemDefinitionFacts.from_dict(typed), method)
         if isinstance(typed, dict) and typed else None
     )
-    expected_scenario_ids = [item.scenario_id for item in candidates]
     cache = state.item_definition.setdefault("scenario_assessment_batches", {})
     if not isinstance(cache, dict):
         cache = {}
@@ -137,21 +127,38 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
     pending_malfunctions = []
     template_service = ScenarioMethodService(method) if method is not None else None
     contextual_candidates: dict[str, list[ScenarioCandidate]] = {}
-    template_binding_audit: dict[str, list[dict]] = {}
+    instantiation_audit: dict[str, dict] = {}
     for malfunction in malfunctions:
-        bindings = []
-        contextual = []
-        for candidate in candidates:
-            if template_service is None:
-                contextual.append(candidate)
-                continue
-            bound, binding = template_service.bind_template_context(
-                malfunction, candidate,
+        if template_service is None:
+            contextual_candidates[malfunction.malfunction_id] = list(candidates)
+            instantiation_audit[malfunction.malfunction_id] = {
+                "malfunction_id": malfunction.malfunction_id,
+                "selection_mode": "BASE_CANDIDATES_ONLY",
+                "selection_basis": "NO_SCENARIO_METHOD_CONTRACT",
+                "base_candidate_count": len(candidates),
+                "instance_count": 0,
+                "options": [],
+            }
+        else:
+            instantiated, audit = template_service.instantiate_analytical_candidates(
+                malfunction, candidates,
             )
-            contextual.append(bound)
-            bindings.append(binding)
-        contextual_candidates[malfunction.malfunction_id] = contextual
-        template_binding_audit[malfunction.malfunction_id] = bindings
+            contextual_candidates[malfunction.malfunction_id] = instantiated
+            instantiation_audit[malfunction.malfunction_id] = audit
+            if review_artifact_writer is not None:
+                for candidate in instantiated:
+                    review_artifact_writer.record_scenario_candidate(
+                        candidate,
+                        generated_for_malfunction_ids=[malfunction.malfunction_id],
+                    )
+    runtime_candidates = [
+        candidate
+        for malfunction in malfunctions
+        for candidate in contextual_candidates[malfunction.malfunction_id]
+    ]
+    candidate_by_id = {
+        candidate.scenario_id: candidate for candidate in runtime_candidates
+    }
 
     def persist_review_batch(malfunction, result) -> None:
         """Persist one canonical malfunction result before other workers finish."""
@@ -171,6 +178,10 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         review_artifact_writer.write_summary(state)
 
     for malfunction in malfunctions:
+        expected_scenario_ids = [
+            item.scenario_id
+            for item in contextual_candidates[malfunction.malfunction_id]
+        ]
         cache_key = _scenario_batch_cache_key(
             agent, malfunction, contextual_candidates[malfunction.malfunction_id],
         )
@@ -223,9 +234,9 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
 
     new_batches = ordered_parallel_map(
         pending_malfunctions,
-        lambda malfunction: _assess_with_template_context(
+        lambda malfunction: _assess_instantiated_scenarios(
             agent, malfunction, contextual_candidates[malfunction.malfunction_id],
-            template_binding_audit[malfunction.malfunction_id], project_registry,
+            instantiation_audit[malfunction.malfunction_id], project_registry,
         ),
         max_workers=max_workers,
         on_progress=(
@@ -250,7 +261,11 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
         item.scenario_id for item in assessments
         if evaluate_risk_eligibility(item).eligible
     }
-    state.scenarios = [item for item in candidates if item.scenario_id in retained_ids]
+    state.scenarios = [
+        candidate_by_id[scenario_id]
+        for scenario_id in sorted(retained_ids)
+        if scenario_id in candidate_by_id
+    ]
     serialized_assessments = [item.to_dict() for item in assessments]
     state.item_definition["scenario_assessments"] = serialized_assessments
     if risk_fact_agent is not None:
@@ -357,7 +372,7 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
             RiskExecutionTraceService(method).project(
                 run_id=state.run_id,
                 assessments=serialized_assessments,
-                candidates=candidates,
+                candidates=runtime_candidates,
                 committed=True,
                 binding_gaps=binding_gaps,
             )
@@ -459,8 +474,8 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
     }
     print(
         "[HARA] scenario feasibility summary "
-        f"malfunctions={len(malfunctions)} scenario_candidates={len(candidates)} "
-        f"scenario_pairs={len(malfunctions) * len(candidates)} "
+        f"malfunctions={len(malfunctions)} scenario_candidates={len(runtime_candidates)} "
+        f"scenario_pairs={len(runtime_candidates)} "
         f"initial_batches={initial_batches} adaptive_splits={adaptive_splits} "
         f"leaf_batches={leaf_batches} llm_calls={total_calls} retry_calls={retry_calls} "
         f"timeouts={total_timeouts} output_limits={output_limits} "
@@ -477,8 +492,8 @@ def assess_scenarios(state: HARAState, agent: ScenarioFeasibilityAgent,
     state.record(
         "scenario_feasibility_summary",
         malfunction_count=len(malfunctions),
-        scenario_candidate_count=len(candidates),
-        scenario_pair_count=len(malfunctions) * len(candidates),
+        scenario_candidate_count=len(runtime_candidates),
+        scenario_pair_count=len(runtime_candidates),
         llm_calls=total_calls,
         actual_llm_calls=total_calls,
         retry_calls=retry_calls,

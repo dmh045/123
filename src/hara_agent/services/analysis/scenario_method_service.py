@@ -1,16 +1,22 @@
 """Typed consumers for confirmed Scenario method knowledge.
 
-The service deliberately returns context only.  It neither emits causal evidence
-nor changes candidate, S/E/C, ASIL, or FTTI evaluation.
+The service instantiates source-traceable analytical Scenario candidates. It
+does not emit causal evidence or change S/E/C, ASIL, or FTTI evaluation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
+import json
 from typing import Any
 
 from hara_agent.contracts import FMScenarioTemplate, MethodContract
-from hara_agent.models import MalfunctionCandidate, ScenarioCandidate
+from hara_agent.models import (
+    FactProvenance, MalfunctionCandidate, ReviewStatus, ScenarioCandidate,
+    SourceRef,
+)
+from hara_agent.services.semantic.scenario_contract import SCENARIO_CONTRACT_VERSION
 
 from .failure_mode_selector_resolver import (
     FMTemplateSelectorAdapterResolver, FailureModeSelectorResolution,
@@ -212,97 +218,253 @@ class ScenarioMethodService:
         )
 
     @staticmethod
-    def _context_value(scenario: Any, keys: tuple[str, ...]) -> Any:
-        for key in keys:
-            value = scenario.facts.get(key)
-            if value not in (None, ""):
-                return value
-        return None
+    def _same_value(current: Any, expected: Any) -> bool:
+        if isinstance(current, (int, float)) and not isinstance(current, bool):
+            return (
+                isinstance(expected, (int, float))
+                and not isinstance(expected, bool)
+                and float(current) == float(expected)
+            )
+        return str(current).strip().casefold() == str(expected).strip().casefold()
 
-    def bind_template_context(
-        self, malfunction: MalfunctionCandidate, scenario: ScenarioCandidate,
-    ) -> tuple[ScenarioCandidate, dict[str, Any]]:
-        """Return an ephemeral M×Scenario context view; never mutate the global candidate."""
+    def _method_value(self, *, field: str, source_value: str) -> str:
+        """Resolve only a value explicitly named by the compiled risk method."""
+        structured = self.method.structured_risk_method
+        if structured is None:
+            return ""
+        pairs = (
+            structured.severity.road_user_groups
+            if field == "road_user_type"
+            else structured.severity.collision_types
+        )
+        matches = [
+            canonical for canonical, source in pairs
+            if source_value.casefold() in {canonical.casefold(), source.casefold()}
+        ]
+        return matches[0] if len(matches) == 1 else ""
+
+    def _template_source(self, option: Any) -> SourceRef:
+        source = option.source_ref
+        return SourceRef(
+            "method_contract",
+            str(self.method.metadata.get("method_source_hash", source.source_hash)),
+            f"{source.sheet}!{source.range}",
+            source.raw_text,
+        )
+
+    @staticmethod
+    def _speed_constraint_text(scenario: ScenarioCandidate) -> str:
+        speed = scenario.facts.get("ego_speed_kph")
+        if isinstance(speed, (int, float)) and not isinstance(speed, bool):
+            return f"{float(speed):g} km/h"
+        constraint = scenario.facts.get("ego_speed_constraint")
+        if isinstance(constraint, dict):
+            lower, upper = constraint.get("min_kph"), constraint.get("max_kph")
+            if lower is not None or upper is not None:
+                return f"{lower if lower is not None else '-∞'}..{upper if upper is not None else '+∞'} km/h"
+        return "未提供"
+
+    def instantiate_analytical_candidates(
+        self, malfunction: MalfunctionCandidate, candidates: list[ScenarioCandidate],
+    ) -> tuple[list[ScenarioCandidate], dict[str, Any]]:
+        """Create isolated M×template-option scenarios from strong matches only."""
         result = self.match_fm_template(malfunction)
         audit: dict[str, Any] = {
             "malfunction_id": malfunction.malfunction_id,
-            "scenario_id": scenario.scenario_id,
-            "template_id": result.template.template_id if result.template else "",
             "qualification": result.status,
+            "template_id": result.template.template_id if result.template else "",
             "matched_by": list(result.matched_by),
             "matched_terms": list(result.matched_terms),
-            "template_selector_resolution": [
-                item.to_dict() for item in result.template_selector_resolution
-            ],
-            "injected": False,
-            "reason": result.reason,
+            "selection_basis": result.reason,
+            "base_candidate_count": len(candidates),
+            "instance_count": 0,
+            "options": [],
         }
         if not result.injectable:
-            return scenario, audit
+            audit["selection_mode"] = "BASE_CANDIDATES_ONLY"
+            return list(candidates), audit
+
         assert result.template is not None
-        mapping = {
-            "obj_type": ("object_type", "object", "road_user_type"),
-            "obj_position": ("object_position",),
-            "obj_distance_m": ("object_distance_m", "relative_distance_m", "distance_m"),
-            "obj_v_kph": ("object_speed_kph", "obj_v_kph"),
-            "collision_type": ("collision_type",),
-        }
-        compatible = []
-        conflicts = []
-        for option in result.template.required_scenarios:
-            option_values = {
-                "obj_type": option.obj_type, "obj_position": option.obj_position,
-                "obj_distance_m": option.obj_distance_m, "obj_v_kph": option.obj_v_kph,
-                "collision_type": option.collision_type,
-            }
-            option_conflicts = []
-            for field, keys in mapping.items():
-                current = self._context_value(scenario, keys)
-                if current is not None and current != option_values[field]:
-                    option_conflicts.append({"field": field, "scenario_value": current,
-                                             "template_value": option_values[field]})
-            if option_conflicts:
-                conflicts.extend(option_conflicts)
-            else:
-                compatible.append((option, option_values))
-        if not compatible:
-            audit.update({
-                "reason": "METHOD_SOURCE_CONFLICT", "conflicts": conflicts,
-                "not_injected_reason": "METHOD_SOURCE_CONFLICT",
-            })
-            return scenario, audit
-        if len(compatible) != 1:
-            audit.update({
-                "reason": "MULTIPLE_TEMPLATE_CONTEXT_OPTIONS",
-                "not_injected_reason": "ATOMIC_SCENARIO_ALIGNMENT_PENDING",
-                "candidate_context_count": len(compatible),
-            })
-            return scenario, audit
-        option, values = compatible[0]
-        context = {
-            "source_kind": "METHOD_TEMPLATE",
-            "template_id": result.template.template_id,
-            "qualification": result.status,
-            "match_basis": list(result.matched_by),
-            "matched_terms": list(result.matched_terms),
-            "values": values,
-            "source_ref": {
-                "asset": option.source_ref.workbook,
-                "location": option.source_ref.range,
-                "hash": option.source_ref.source_hash,
-            },
-            "method_dimension_binding": "METHOD_DIMENSION_BINDING_PENDING",
-            "causal_evidence_eligible": False,
-        }
-        contextual = replace(
-            scenario,
-            context_resolution={
-                **scenario.context_resolution,
-                "malfunction_template_context": context,
-            },
+        instances: list[ScenarioCandidate] = []
+        method_hash = str(self.method.metadata.get("method_source_hash", ""))
+        for parent in candidates:
+            for option_index, option in enumerate(result.template.required_scenarios, start=1):
+                option_id = f"{result.template.template_id}:OPTION:{option_index}"
+                source = self._template_source(option)
+                source_ref = {
+                    "asset": option.source_ref.workbook,
+                    "location": f"{option.source_ref.sheet}!{option.source_ref.range}",
+                    "source_hash": option.source_ref.source_hash,
+                }
+                values: dict[str, Any] = {
+                    "object_type": option.obj_type,
+                    "object_position": option.obj_position,
+                    "relative_distance_m": option.obj_distance_m,
+                    "object_speed_kph": option.obj_v_kph,
+                }
+                diagnostics: list[dict[str, Any]] = []
+                if not option.obj_type.strip() or not option.obj_position.strip():
+                    diagnostics.append({"code": "INVALID_TEMPLATE_OPTION", "field": "object"})
+                for field in ("relative_distance_m", "object_speed_kph"):
+                    value = values[field]
+                    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                        diagnostics.append({"code": "INVALID_TEMPLATE_OPTION", "field": field})
+                for field, source_value in (
+                    ("road_user_type", option.obj_type),
+                    ("collision_type", option.collision_type),
+                ):
+                    mapped = self._method_value(field=field, source_value=source_value)
+                    if mapped:
+                        values[field] = mapped
+                    else:
+                        diagnostics.append({
+                            "code": "UNMAPPED_METHOD_VALUE",
+                            "field": field,
+                            "source_value": source_value,
+                        })
+                conflicts = [
+                    {
+                        "field": field,
+                        "scenario_value": parent.facts[field],
+                        "template_value": value,
+                    }
+                    for field, value in values.items()
+                    if field in parent.facts
+                    and parent.facts[field] not in (None, "")
+                    and not self._same_value(parent.facts[field], value)
+                ]
+                option_audit = {
+                    "parent_scenario_id": parent.scenario_id,
+                    "source_option_id": option_id,
+                    "source_ref": source_ref,
+                    "diagnostics": diagnostics,
+                    "conflicts": conflicts,
+                }
+                if any(item["code"] == "INVALID_TEMPLATE_OPTION" for item in diagnostics):
+                    option_audit["validation_status"] = "INVALID"
+                    audit["options"].append(option_audit)
+                    continue
+                if conflicts:
+                    option_audit["validation_status"] = "CONFLICT"
+                    audit["options"].append(option_audit)
+                    continue
+
+                material = {
+                    "contract": SCENARIO_CONTRACT_VERSION,
+                    "method_contract_hash": method_hash,
+                    "malfunction_id": malfunction.malfunction_id,
+                    "parent_scenario_id": parent.scenario_id,
+                    "parent_fingerprint": parent.semantic_fingerprint,
+                    "template_id": result.template.template_id,
+                    "source_option_id": option_id,
+                    "source_hash": option.source_ref.source_hash,
+                    "facts": values,
+                }
+                fingerprint = hashlib.sha256(
+                    json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                instance_id = f"SCN-ANALYTICAL-{fingerprint[:16].upper()}"
+                scope = {
+                    "malfunction_id": malfunction.malfunction_id,
+                    "scenario_id": instance_id,
+                    "parent_scenario_id": parent.scenario_id,
+                }
+                assumptions = []
+                provenance = dict(parent.fact_provenance)
+                for field, value in values.items():
+                    assumption = {
+                        "field": field,
+                        "value": value,
+                        "unit": "m" if field == "relative_distance_m" else "km/h" if field == "object_speed_kph" else "",
+                        "value_kind": "point" if isinstance(value, (int, float)) else "category",
+                        "origin": FactProvenance.SCENARIO_DEFINED.value,
+                        "source_template_id": result.template.template_id,
+                        "source_option_id": option_id,
+                        "source_ref": source_ref,
+                        "source_hash": option.source_ref.source_hash,
+                        "method_contract_hash": method_hash,
+                        "selection_basis": result.qualification_tier,
+                        "validation_status": "VALIDATED",
+                        "applicable_scope": scope,
+                    }
+                    assumptions.append(assumption)
+                    provenance[field] = {
+                        "provenance": FactProvenance.SCENARIO_DEFINED.value,
+                        "approval": ReviewStatus.PENDING.value,
+                        "source_refs": [{
+                            "source_type": source.source_type,
+                            "source_id": source.source_id,
+                            "location": source.location,
+                            "excerpt": source.excerpt,
+                        }],
+                        **{key: item for key, item in assumption.items() if key not in {"field", "value"}},
+                    }
+                setting = (
+                    f"对象={option.obj_type}，位置={option.obj_position}，"
+                    f"间距={float(option.obj_distance_m):g} m，对象速度={float(option.obj_v_kph):g} km/h"
+                )
+                detail = (
+                    f"项目速度约束：{self._speed_constraint_text(parent)}；"
+                    f"本分析场景设定：{setting}"
+                )
+                instance = {
+                    "instance_id": instance_id,
+                    "parent_scenario_id": parent.scenario_id,
+                    "malfunction_id": malfunction.malfunction_id,
+                    "origin": FactProvenance.SCENARIO_DEFINED.value,
+                    "source_template_id": result.template.template_id,
+                    "source_option_id": option_id,
+                    "source_ref": source_ref,
+                    "source_hash": option.source_ref.source_hash,
+                    "source_option_values": {
+                        "obj_type": option.obj_type,
+                        "obj_position": option.obj_position,
+                        "obj_distance_m": option.obj_distance_m,
+                        "obj_v_kph": option.obj_v_kph,
+                        "collision_type": option.collision_type,
+                    },
+                    "method_contract_hash": method_hash,
+                    "selection_basis": result.qualification_tier,
+                    "validation_status": "VALIDATED",
+                    "applicable_scope": scope,
+                    "assumptions": assumptions,
+                    "diagnostics": diagnostics,
+                }
+                instances.append(replace(
+                    parent,
+                    scenario_id=instance_id,
+                    situational_description=detail,
+                    situational_detailing=detail,
+                    facts={**parent.facts, **values},
+                    context_resolution={
+                        **parent.context_resolution,
+                        "analytical_scenario_instantiation": {
+                            "template_id": result.template.template_id,
+                            "source_option_id": option_id,
+                            "validation_status": "VALIDATED",
+                        },
+                    },
+                    fact_provenance=provenance,
+                    status=ReviewStatus.PENDING,
+                    sources=list(dict.fromkeys([*parent.sources, source])),
+                    review_reason="本分析场景设定为受控模板选项，尚未构成项目事实或工程发布确认。",
+                    source_scenario_id=parent.scenario_id,
+                    atomic_variant="analytical_template_option",
+                    semantic_fingerprint=fingerprint,
+                    scenario_contract_version=SCENARIO_CONTRACT_VERSION,
+                    analysis_instance=instance,
+                ))
+                option_audit["validation_status"] = "VALIDATED"
+                option_audit["scenario_id"] = instance_id
+                audit["options"].append(option_audit)
+        audit["selection_mode"] = "STRONG_TEMPLATE_ANALYTICAL_INSTANCES"
+        audit["instance_count"] = len(instances)
+        audit["unmapped_value_count"] = sum(
+            sum(item.get("code") == "UNMAPPED_METHOD_VALUE" for item in option["diagnostics"])
+            for option in audit["options"]
         )
-        audit.update({"injected": True, "reason": "STRONG_MATCH", "injected_context_fields": list(values)})
-        return contextual, audit
+        audit["conflict_count"] = sum(bool(option["conflicts"]) for option in audit["options"])
+        return instances, audit
 
     def fallback_terms(self) -> tuple[dict[str, object], ...]:
         """Expose unmapped fallback terms for audit; never guess a target dimension."""

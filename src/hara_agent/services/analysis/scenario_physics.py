@@ -29,10 +29,10 @@ def _distance_m(value: Any) -> float | None:
 
 def _input_metadata(
     scenario: ScenarioCandidate, key: str,
-) -> tuple[ReviewStatus, tuple[SourceRef, ...]]:
+) -> tuple[ReviewStatus, tuple[SourceRef, ...], dict[str, Any]]:
     metadata = scenario.fact_provenance.get(key, {})
     if not isinstance(metadata, dict):
-        return ReviewStatus.PENDING, ()
+        return ReviewStatus.PENDING, (), {}
     try:
         approval = ReviewStatus(metadata.get("approval", scenario.status.value))
     except ValueError:
@@ -42,7 +42,23 @@ def _input_metadata(
         for item in metadata.get("source_refs", [])
         if isinstance(item, (SourceRef, dict))
     )
-    return approval, sources
+    return approval, sources, metadata
+
+
+def _analysis_lineage(metadata: dict[str, Any]) -> dict[str, Any]:
+    if str(metadata.get("provenance", "")).upper() != FactProvenance.SCENARIO_DEFINED.value:
+        return {}
+    scope = metadata.get("applicable_scope", {})
+    if not isinstance(scope, dict):
+        return {}
+    return {
+        "analysis_assumption_origin": FactProvenance.SCENARIO_DEFINED.value,
+        "analysis_assumption_scope": dict(scope),
+        "validation_status": metadata.get("validation_status", ""),
+        "source_template_id": metadata.get("source_template_id", ""),
+        "source_option_id": metadata.get("source_option_id", ""),
+        "method_contract_hash": metadata.get("method_contract_hash", ""),
+    }
 
 
 def derive_scenario_physics(
@@ -77,10 +93,11 @@ def derive_scenario_physics(
     # physics facts.  This is normalization only; it does not derive a new
     # collision or select an S/E/C value.
     for output_key, (value, input_key) in normalized.items():
-        status, sources = _input_metadata(scenario, input_key)
+        status, sources, input_metadata = _input_metadata(scenario, input_key)
         metadata = {
             "derivation_type": DerivedPhysicsType.CANONICAL_INPUT_NORMALIZATION.value,
             "inputs": [f"SCN.{input_key}"],
+            **_analysis_lineage(input_metadata),
         }
         if scenario.semantic_fingerprint:
             metadata["semantic_fingerprint"] = scenario.semantic_fingerprint
@@ -102,17 +119,26 @@ def derive_scenario_physics(
         input_keys = (distance_input_key, "relative_speed_kph")
         input_metadata = [_input_metadata(scenario, key) for key in input_keys]
         derived_sources = tuple(dict.fromkeys(
-            source for _, sources in input_metadata for source in sources
+            source for _, sources, _ in input_metadata for source in sources
         ))
         derived_status = (
             ReviewStatus.FINALIZED
-            if all(status is ReviewStatus.FINALIZED for status, _ in input_metadata)
+            if all(status is ReviewStatus.FINALIZED for status, _, _ in input_metadata)
             else ReviewStatus.PENDING
         )
         metadata = {
             "derivation_type": DerivedPhysicsType.TTC.value,
             "inputs": [f"SCN.{distance_input_key}", "SCN.relative_speed_kph"],
         }
+        analytical = [
+            _analysis_lineage(item)
+            for _, _, item in input_metadata
+            if _analysis_lineage(item)
+        ]
+        if analytical:
+            scopes = {str(item["analysis_assumption_scope"]) for item in analytical}
+            if len(scopes) == 1:
+                metadata.update(analytical[0])
         if scenario.semantic_fingerprint:
             metadata["semantic_fingerprint"] = scenario.semantic_fingerprint
         records.append(EvidenceRecord(

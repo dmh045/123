@@ -247,47 +247,49 @@ def _scenario(**facts):
     )
 
 
-def test_keyword_only_is_weak_and_never_injects_context():
+def test_keyword_only_retains_base_candidates_without_instantiating_template_options():
     service = ScenarioMethodService(_method())
     malfunction = _malfunction(description="parking_brake_release")
     result = service.match_fm_template(malfunction)
     assert result.status == "WEAK_MATCH"
     assert result.matched_by == ("KEYWORD",)
     scenario = _scenario()
-    contextual, audit = service.bind_template_context(malfunction, scenario)
-    assert contextual is scenario
-    assert audit["injected"] is False
-    assert audit["reason"] == "WEAK_KEYWORD_ONLY"
+    contextual, audit = service.instantiate_analytical_candidates(malfunction, [scenario])
+    assert contextual == [scenario]
+    assert audit["selection_mode"] == "BASE_CANDIDATES_ONLY"
+    assert audit["selection_basis"] == "WEAK_KEYWORD_ONLY"
 
 
-def test_strong_template_context_is_pair_scoped_and_not_causal_evidence():
+def test_strong_template_options_become_pair_scoped_analytical_instances_not_causal_evidence():
     service = ScenarioMethodService(_method_allowing_template_selector_values())
     malfunction = _malfunction(
         description="parking_brake_release", component="parking_brake",
         failure_type="unintended_deactivation",
     )
-    scenario = _scenario(object_type="pedestrian", collision_type="front")
-    contextual, audit = service.bind_template_context(malfunction, scenario)
-    assert audit["injected"] is True
-    assert contextual is not scenario
-    assert "malfunction_template_context" not in scenario.context_resolution
-    assert contextual.context_resolution["malfunction_template_context"]["template_id"] == "FM_TEMPLATE_006"
-    assert build_fact_registry(malfunction, contextual).resolve("SCN.method_template_context") is None
-    prompt = build_scenario_user_prompt(malfunction, [contextual])
-    assert "method_template_context" in prompt
-    assert "METHOD_TEMPLATE" in prompt
+    scenario = _scenario()
+    contextual, audit = service.instantiate_analytical_candidates(malfunction, [scenario])
+    assert audit["selection_mode"] == "STRONG_TEMPLATE_ANALYTICAL_INSTANCES"
+    assert len(contextual) == 2
+    assert all(item is not scenario for item in contextual)
+    assert all(item.analysis_instance["source_template_id"] == "FM_TEMPLATE_006" for item in contextual)
+    assert all(item.analysis_instance["origin"] == "SCENARIO_DEFINED" for item in contextual)
+    assert all(item.fact_provenance["relative_distance_m"]["approval"] == "PENDING" for item in contextual)
+    assert build_fact_registry(malfunction, contextual[0]).resolve("SCN.relative_distance_m") is not None
+    prompt = build_scenario_user_prompt(malfunction, contextual)
+    assert "analysis_scenario_assumptions" in prompt
+    assert "SCENARIO_DEFINED analysis conditions only" in prompt
+    assert "method_template_context" not in prompt
 
 
-def test_strong_context_conflict_fails_closed_without_overwriting_item_fact():
+def test_strong_template_conflict_fails_closed_without_overwriting_item_fact():
     service = ScenarioMethodService(_method_allowing_template_selector_values())
     malfunction = _malfunction(
         description="parking_brake_release", component="parking_brake",
     )
     scenario = _scenario(object_type="truck", collision_type="front")
-    contextual, audit = service.bind_template_context(malfunction, scenario)
-    assert contextual is scenario
-    assert audit["injected"] is False
-    assert audit["reason"] == "METHOD_SOURCE_CONFLICT"
+    contextual, audit = service.instantiate_analytical_candidates(malfunction, [scenario])
+    assert contextual == []
+    assert audit["conflict_count"] == 2
     assert scenario.facts["object_type"] == "truck"
 
 

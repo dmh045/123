@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-SCENARIO_CONTRACT_VERSION = "atomic-scenario-v1"
+SCENARIO_CONTRACT_VERSION = "atomic-scenario-v2"
 
 
 # Authoritative machine values for ScenarioFeasibilityAssessment.risk_dimensions_changed.

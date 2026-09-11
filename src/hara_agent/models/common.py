@@ -21,6 +21,7 @@ class FactProvenance(str, Enum):
     DERIVED = "DERIVED"
     LLM_INFERENCE = "LLM_INFERENCE"
     HUMAN_CONFIRMATION = "HUMAN_CONFIRMATION"
+    SCENARIO_DEFINED = "SCENARIO_DEFINED"
 
 
 @dataclass(frozen=True)

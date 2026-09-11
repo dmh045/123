@@ -157,12 +157,15 @@ class ConfirmedYamlUtilizationService:
                 "template_selector_resolution": [
                     item.to_dict() for item in result.template_selector_resolution
                 ],
-                "injected_context_fields": [],
-                "not_injected_reason": (
+                "analytical_instance_mode": (
+                    "STRONG_TEMPLATE_ANALYTICAL_INSTANCES"
+                    if result.status == "STRONG_MATCH" else "BASE_CANDIDATES_ONLY"
+                ),
+                "not_instantiated_reason": (
                     "WEAK_KEYWORD_ONLY" if result.status == "WEAK_MATCH" else
                     "AMBIGUOUS" if result.status == "AMBIGUOUS" else
                     "NO_MATCH" if result.status == "NO_MATCH" else
-                    "ATOMIC_SCENARIO_ALIGNMENT_PENDING"
+                    "STRONG_MATCH_OPTIONS_ARE_INSTANTIATED_BY_WORKFLOW"
                 ),
             }
             if result.template is not None:
@@ -185,7 +188,7 @@ class ConfirmedYamlUtilizationService:
                     scenario_fact_counts["object_context"] += 1
                     scenario_fact_counts["geometry_context"] += 1
                     scenario_fact_counts["distance_or_object_speed_context"] += 1
-                row["template_context"] = contexts
+                row["template_options"] = contexts
             match_rows.append(row)
 
         assets = dict(self.method.metadata.get("asset_hashes", {}))
@@ -233,7 +236,7 @@ class ConfirmedYamlUtilizationService:
                 compiled_to_contract=True, runtime_consumer="MethodScenarioCandidateService", used_count=len(self.method.scenario_model.dimensions), unused_reason="")
         set_row("raw/fm_scenario_templates.yaml", section="templates", confirmed_role="SCENARIO_TEMPLATE_CONSTRAINT",
                 original_fusa_consumer="match_fm_template / Step 3b template injection", originally_executed=True,
-                compiled_to_contract=True, runtime_consumer="ScenarioMethodService (review audit)",
+                compiled_to_contract=True, runtime_consumer="ScenarioMethodService.instantiate_analytical_candidates",
                 used_count=status_counts["STRONG_MATCH"], unused_reason="")
         set_row("raw/domain_rules/avp_low_speed.yaml", section="triggering_state_mapping", confirmed_role="DOMAIN_RULE",
                 original_fusa_consumer="DomainPlugin.infer_collision_type", originally_executed=True,

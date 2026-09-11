@@ -75,6 +75,8 @@ class HazardousEventRiskContextService:
             return RiskContextFactAuthority.DIRECT_PROJECT_FACT
         if value in {"SCENARIO_INPUT", "DIRECT_SCENARIO_FACT"}:
             return RiskContextFactAuthority.DIRECT_SCENARIO_FACT
+        if value == "SCENARIO_DEFINED":
+            return RiskContextFactAuthority.DIRECT_SCENARIO_FACT
         if value == "DERIVED" and metadata.get("method_contract_hash"):
             # A MethodRiskFactBinding selects a project fact; its binding is
             # deterministic, but the value itself is not a physics derivation.
@@ -89,7 +91,29 @@ class HazardousEventRiskContextService:
     def _finalized(metadata: dict[str, Any]) -> bool:
         return str(metadata.get("approval", "")).upper() in {"FINALIZED", "APPROVED"}
 
-    def _fact(self, field: str, scenario: dict[str, Any]) -> HazardousEventRiskFact:
+    @staticmethod
+    def _validated_analysis_assumption(
+        metadata: dict[str, Any], *, malfunction_id: str, scenario_id: str,
+    ) -> bool:
+        if str(metadata.get("provenance", "")).upper() == "DERIVED":
+            origin = str(metadata.get("analysis_assumption_origin", "")).upper()
+        else:
+            origin = str(metadata.get("origin", metadata.get("provenance", ""))).upper()
+        scope = metadata.get(
+            "analysis_assumption_scope", metadata.get("applicable_scope", {}),
+        )
+        return (
+            origin == "SCENARIO_DEFINED"
+            and str(metadata.get("validation_status", "")).upper() == "VALIDATED"
+            and isinstance(scope, dict)
+            and str(scope.get("malfunction_id", "")) == malfunction_id
+            and str(scope.get("scenario_id", "")) == scenario_id
+        )
+
+    def _fact(
+        self, field: str, scenario: dict[str, Any], *, malfunction_id: str,
+        scenario_id: str,
+    ) -> HazardousEventRiskFact:
         value = scenario.get(field)
         metadata = scenario.get("_fact_provenance", scenario.get("fact_provenance", {}))
         metadata = metadata.get(field, {}) if isinstance(metadata, dict) else {}
@@ -107,7 +131,12 @@ class HazardousEventRiskContextService:
                 status=RiskContextFactStatus.UNAVAILABLE,
                 reason="MISSING_STRUCTURED_FACT",
             )
-        if not self._finalized(metadata):
+        if not (
+            self._finalized(metadata)
+            or self._validated_analysis_assumption(
+                metadata, malfunction_id=malfunction_id, scenario_id=scenario_id,
+            )
+        ):
             return HazardousEventRiskFact(
                 status=RiskContextFactStatus.UNAVAILABLE,
                 reason="SOURCE_NOT_FINALIZED",
@@ -132,7 +161,13 @@ class HazardousEventRiskContextService:
     ) -> HazardousEventRiskContext:
         if not hazard_node_id:
             raise ValueError("HazardousEventRiskContext requires a canonical hazard node identity")
-        values = {field: self._fact(field, scenario) for field in self._FIELDS}
+        values = {
+            field: self._fact(
+                field, scenario, malfunction_id=malfunction_id,
+                scenario_id=scenario_id,
+            )
+            for field in self._FIELDS
+        }
         relative_speed = values["relative_speed_kph"]
         if (
             relative_speed.status is RiskContextFactStatus.AVAILABLE

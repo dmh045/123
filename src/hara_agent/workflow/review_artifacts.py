@@ -31,14 +31,15 @@ _IDENTITY_FIELDS = {
 _SCENARIO_FACT_KEYS = (
     "operating_scenario", "operating_mode", "ego_speed_kph", "ego_speed_constraint",
     "weather_conditions", "road_surface_conditions", "vehicle_state",
-    "object", "object_type", "WHERE", "ROAD", "EGO_ACTION",
+    "object", "object_type", "object_position", "object_speed_kph",
+    "road_user_type", "collision_type", "relative_distance_m", "WHERE", "ROAD", "EGO_ACTION",
     "EGO_X_ROAD", "TRAFFIC_PATTERN", "EGO_DYNAMICS", "OBJECT",
     "method_scenario_dimensions", "scenario_atom_ids",
 )
 _SCENARIO_CONTEXT_KEYS = (
     "ego_speed_kph", "speed_resolution", "speed_constraint",
     "dimension_bindings", "dimension_compatibility",
-    "function_phase_binding", "risk_fact_binding",
+    "function_phase_binding", "risk_fact_binding", "analytical_scenario_instantiation",
 )
 
 
@@ -153,7 +154,7 @@ def _scenario_candidate_projection(
         if item.get("source_type") == "method_contract" and item.get("source_id")
     })
     return {
-        "projection_version": "scenario-review-v2",
+        "projection_version": "scenario-review-v3",
         "scenario_id": raw.get("scenario_id", ""),
         "semantic_fingerprint": raw.get("semantic_fingerprint", ""),
         "operating_scenario": raw.get("operating_scenario", ""),
@@ -177,9 +178,26 @@ def _scenario_candidate_projection(
         "review_reason": raw.get("review_reason", ""),
         "source_scenario_id": raw.get("source_scenario_id", ""),
         "atomic_variant": raw.get("atomic_variant", ""),
+        "analysis_instance": _compact_review_value(raw.get("analysis_instance", {})),
         "status": raw.get("status", ""),
         "generated_for_malfunction_ids": list(generated_for_malfunction_ids),
     }
+
+
+def _expected_candidate_count(
+    candidates: list[dict[str, Any]], malfunction_id: str,
+) -> int:
+    """Use isolated analytical instances when a malfunction has them."""
+    scoped = [
+        item for item in candidates
+        if malfunction_id in item.get("generated_for_malfunction_ids", [])
+    ]
+    analytical = [
+        item for item in scoped
+        if isinstance(item.get("analysis_instance"), dict)
+        and item["analysis_instance"].get("origin") == "SCENARIO_DEFINED"
+    ]
+    return len(analytical or scoped or candidates)
 
 
 class ReviewArtifactWriter:
@@ -528,24 +546,6 @@ class ReviewArtifactWriter:
                     ):
                         if key in salvage:
                             payload[key] = _jsonable(salvage[key])
-                template_binding = next(
-                    (
-                        item for item in audit.get("template_context_bindings", [])
-                        if isinstance(item, dict)
-                        and str(item.get("scenario_id", "")) == scenario_id
-                    ),
-                    None,
-                )
-                if isinstance(template_binding, dict):
-                    for key in (
-                        "template_id", "qualification", "matched_by",
-                        "matched_terms", "injected", "reason",
-                        "injected_context_fields", "not_injected_reason",
-                    ):
-                        if key in template_binding:
-                            payload[f"template_{key}" if key != "template_id" else key] = _jsonable(
-                                template_binding[key]
-                            )
         return self._append("scenario_feasibility", payload)
 
     def write_summary(self, state: Any, *, status: str | None = None, error: str = "") -> None:
@@ -571,7 +571,7 @@ class ReviewArtifactWriter:
                     per_malfunction.setdefault(
                         malfunction_id,
                         {
-                            "expected_scenario_count": len(candidates),
+                            "expected_scenario_count": _expected_candidate_count(candidates, malfunction_id),
                             "total": 0, "feasible": 0, "infeasible": 0,
                             "breakpoints": {},
                         },
@@ -583,7 +583,7 @@ class ReviewArtifactWriter:
                 summary = per_malfunction.setdefault(
                     malfunction_id,
                     {
-                        "expected_scenario_count": len(candidates),
+                        "expected_scenario_count": _expected_candidate_count(candidates, malfunction_id),
                         "total": 0, "feasible": 0, "infeasible": 0,
                         "breakpoints": {},
                     },
@@ -799,7 +799,7 @@ def _summary_from_records(
         malfunction_id = str(malfunction.get("malfunction_id", ""))
         if malfunction_id:
             per_malfunction[malfunction_id] = {
-                "expected_scenario_count": len(candidates),
+                "expected_scenario_count": _expected_candidate_count(candidates, malfunction_id),
                 "total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {},
             }
     for assessment in feasibility:
@@ -809,7 +809,7 @@ def _summary_from_records(
         item = per_malfunction.setdefault(
             malfunction_id,
             {
-                "expected_scenario_count": len(candidates),
+                "expected_scenario_count": _expected_candidate_count(candidates, malfunction_id),
                 "total": 0, "feasible": 0, "infeasible": 0, "breakpoints": {},
             },
         )
@@ -984,7 +984,7 @@ def _render_malfunction(
         item for item in records["scenario_feasibility"]
         if item.get("malfunction_id") == malfunction_id
     ]
-    expected_count = len(records["scenario_candidate"])
+    expected_count = _expected_candidate_count(records["scenario_candidate"], malfunction_id)
     assessment_status = _assessment_status(
         expected=expected_count, observed=len(all_assessments),
     )

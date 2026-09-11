@@ -246,6 +246,8 @@ class CausalEvidenceSelector:
         # context and would invite self-referential proof.
         if record.namespace == "MF":
             return None
+        if record.provenance is FactProvenance.SCENARIO_DEFINED:
+            return None
         if record.namespace == "METHOD" and metadata.get("causal_relevance") is not True:
             return None
         if record.namespace == "APPROVED_RULE" and metadata.get("causal_relevance") is not True:
@@ -544,6 +546,19 @@ def validate_evidence_contract(
                          hop=hop_name, claim=claim, basis_type=basis.value, invalid_refs=[],
                          reason="supported hop requires evidence refs")
         resolved = [registry.resolve(ref) for ref in refs]
+        if causal and any(
+            fact is not None
+            and fact.get("provenance") == FactProvenance.SCENARIO_DEFINED.value
+            for fact in resolved
+        ):
+            raise _error(
+                malfunction, scenario, prompt_version, batch, split_path,
+                split_depth,
+                code=ScenarioEvidenceErrorCode.ASSUMPTION_IN_POSITIVE_CHAIN,
+                hop=hop_name, claim=claim, basis_type=basis.value,
+                invalid_refs=refs,
+                reason="SCENARIO_DEFINED analysis assumptions cannot prove a positive causal hop",
+            )
         if causal and hop_name in ({"i_to_h", "h_to_harm"} if legacy_harm else {"i_to_h"}) and refs and all(
             fact.get("evidence_role") == "UPSTREAM_CAUSAL_CLAIM"
             for fact in resolved
