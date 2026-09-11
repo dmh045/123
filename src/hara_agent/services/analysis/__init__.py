@@ -21,6 +21,9 @@ from .method_safety_goal_service import MethodSafetyGoalService
 from .risk_calculation_input_service import RiskCalculationInputService
 from .risk_execution_trace_service import RiskExecutionTraceService
 from .hazardous_event_risk_context_service import HazardousEventRiskContextService
+from .risk_context_source_coverage_audit_service import (
+    RiskContextSourceCoverageAuditService,
+)
 from .controllability_branch_audit_service import ControllabilityBranchAuditService
 from .method_contract_parity_audit_service import MethodContractParityAuditService
 from .severity_delta_v_semantic_audit_service import SeverityDeltaVSemanticAuditService
@@ -67,6 +70,7 @@ __all__ = [
     "RiskCalculationInputService",
     "RiskExecutionTraceService",
     "HazardousEventRiskContextService",
+    "RiskContextSourceCoverageAuditService",
     "ControllabilityBranchAuditService",
     "MethodContractParityAuditService",
     "SeverityDeltaVSemanticAuditService",

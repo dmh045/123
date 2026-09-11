@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 from hara_agent.application import HARAApplication
@@ -21,6 +22,7 @@ from hara_agent.services.analysis import (
     ExposureDimensionCoverageAuditService,
     FMTemplateAmbiguityAuditService,
     HazardousEventRiskContextService,
+    RiskContextSourceCoverageAuditService,
     ControllabilityBranchAuditService,
     MethodContractParityAuditService,
     RiskExecutionTraceService,
@@ -31,6 +33,7 @@ from hara_agent.services.analysis import (
 from hara_agent.services.reporting import (
     OfflineReportRebuilder, ReportSchemaValidator, load_report_schema,
 )
+from hara_agent.services.extraction import DocumentReader
 from hara_agent.workflow import ReviewArtifactReader, ReviewArtifactWriter, render_review
 
 
@@ -42,6 +45,22 @@ def _role_compiler() -> TemplateRoleCompiler:
     return TemplateRoleCompiler(
         manifest_store=TemplateRoleManifestStore(manifest_root)
     )
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+        prefix=f".{path.stem}-", suffix=".tmp", delete=False,
+    ) as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        temporary = Path(stream.name)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def _parse_role_selections(values: list[str]) -> dict[str, dict[str, str]]:
@@ -220,6 +239,18 @@ def build_parser() -> argparse.ArgumentParser:
     risk_context_audit.add_argument("--baseline", required=True, type=Path)
     risk_context_audit.add_argument("--review-run-id", required=True)
     risk_context_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    risk_context_coverage = subparsers.add_parser(
+        "risk-context-source-coverage-audit",
+        help="Audit P3-A RiskContext source coverage without changing HARA inputs",
+    )
+    risk_context_coverage.add_argument("--baseline", required=True, type=Path)
+    risk_context_coverage.add_argument("--review-run-id", required=True)
+    risk_context_coverage.add_argument("--checkpoint", type=Path)
+    risk_context_coverage.add_argument("--item", type=Path, default=Path("input/ItemDef.docx"))
+    risk_context_coverage.add_argument(
         "--report-template", type=Path,
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
@@ -574,6 +605,42 @@ def main(argv: list[str] | None = None) -> int:
             "summary": payload["summary"],
         }, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "risk-context-source-coverage-audit":
+        review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        checkpoint = args.checkpoint or (
+            Path("runtime/agent") / f"{args.review_run_id}.checkpoint.json"
+        )
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"P3-A checkpoint not found: {checkpoint}")
+        trace_path = review_root / args.review_run_id / "risk_execution_trace.json"
+        if not trace_path.is_file():
+            raise FileNotFoundError(f"P3-A risk execution trace not found: {trace_path}")
+        state = json.loads(checkpoint.read_text(encoding="utf-8"))
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        payload, clarification = RiskContextSourceCoverageAuditService(
+            resolution.method,
+        ).audit(
+            state=state,
+            trace=trace,
+            document=DocumentReader().read(args.item),
+        )
+        audit_dir = review_root / "p3a-risk-context-source"
+        audit_path = audit_dir / "risk_context_source_coverage_audit.json"
+        clarification_path = audit_dir / "engineering_clarification_package_p3a.json"
+        _write_json_atomic(audit_path, payload)
+        _write_json_atomic(clarification_path, clarification)
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "audit_artifact": str(audit_path),
+            "engineering_clarification_package": str(clarification_path),
+            "aggregate": payload["aggregate"],
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "controllability-branch-audit":
         review_root = Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
         resolution = MethodSourceResolver().resolve(
@@ -820,6 +887,59 @@ def main(argv: list[str] | None = None) -> int:
                 "rating_causal_back_edge": 0,
                 "template_yaml_parity": "SHARED_API_DIFFERENT_EXECUTION_MODEL",
             }
+            risk_context_coverage_artifact = (
+                Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
+                / "p3a-risk-context-source" / "risk_context_source_coverage_audit.json"
+            )
+            if risk_context_coverage_artifact.is_file():
+                try:
+                    coverage = json.loads(
+                        risk_context_coverage_artifact.read_text(encoding="utf-8")
+                    )
+                    aggregate = coverage.get("aggregate", {})
+                    per_field = coverage.get("per_field", [])
+                    if not isinstance(aggregate, dict) or not isinstance(per_field, list):
+                        raise ValueError("P3-A coverage aggregate/per_field must be structured")
+                    checks["risk_context_source_coverage"] = {
+                        "ok": True,
+                        "status": "AVAILABLE",
+                        "artifact_path": str(risk_context_coverage_artifact),
+                        "run_id": coverage.get("run_id", ""),
+                        "method_contract_hash_matches_active": (
+                            coverage.get("method_contract_hash", "")
+                            == method.metadata.get("method_source_hash", "")
+                        ),
+                        "eligible_hazardous_event_count": aggregate.get(
+                            "eligible_hazardous_event_count", 0,
+                        ),
+                        "classification_counts": dict(
+                            aggregate.get("classification_counts", {})
+                        ),
+                        "recoverability_counts": dict(
+                            aggregate.get("recoverability_counts", {})
+                        ),
+                        "existing_but_not_bound_count": aggregate.get(
+                            "existing_but_not_bound_count", 0,
+                        ),
+                        "typed_but_source_ambiguous_count": aggregate.get(
+                            "typed_but_source_ambiguous_count", 0,
+                        ),
+                        "true_method_semantics_gap_count": aggregate.get(
+                            "true_method_semantics_gap_count", 0,
+                        ),
+                        "field_count": len(per_field),
+                    }
+                except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+                    checks["risk_context_source_coverage"] = {
+                        "ok": True,
+                        "status": "ARTIFACT_INVALID", "artifact_error": str(exc),
+                    }
+            else:
+                checks["risk_context_source_coverage"] = {
+                    "ok": True,
+                    "status": "ARTIFACT_NOT_FOUND",
+                    "artifact_path": str(risk_context_coverage_artifact),
+                }
             if args.review_run_id:
                 artifact = (
                     Path(os.getenv("HARA_REVIEW_ARTIFACT_DIR", "runtime/review"))
