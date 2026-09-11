@@ -13,7 +13,7 @@ from hara_agent.contracts import (
 from hara_agent.models import ReviewStatus, ScenarioCandidate
 from hara_agent.services.analysis.scenario_physics import (
     derive_scenario_physics, has_analysis_assumption_lineage,
-    source_is_accepted_for, source_origin,
+    source_has_provenance, source_is_accepted_for, source_origin, source_reference,
 )
 
 
@@ -58,20 +58,6 @@ class HazardousEventRiskContextService:
         return float(value)
 
     @staticmethod
-    def _source_ref(metadata: dict[str, Any]) -> str:
-        sources = metadata.get("source_refs", metadata.get("sources", ()))
-        if not isinstance(sources, (list, tuple)) or not sources:
-            return ""
-        first = sources[0]
-        if isinstance(first, dict):
-            source_id = str(first.get("source_id", first.get("asset", ""))).strip()
-            location = str(first.get("location", "")).strip()
-            return f"{source_id}:{location}".strip(":")
-        source_id = str(getattr(first, "source_id", "")).strip()
-        location = str(getattr(first, "location", "")).strip()
-        return f"{source_id}:{location}".strip(":")
-
-    @staticmethod
     def _authority(metadata: dict[str, Any]) -> RiskContextFactAuthority:
         value = str(metadata.get("provenance", "")).upper()
         if has_analysis_assumption_lineage(metadata):
@@ -102,7 +88,7 @@ class HazardousEventRiskContextService:
         metadata = scenario.get("_fact_provenance", scenario.get("fact_provenance", {}))
         metadata = metadata.get(field, {}) if isinstance(metadata, dict) else {}
         metadata = metadata if isinstance(metadata, dict) else {}
-        source_ref = self._source_ref(metadata)
+        source_ref = source_reference(metadata)
         authority = self._authority(metadata)
         if field in self._NUMERIC:
             value = self._number(value)
@@ -120,7 +106,11 @@ class HazardousEventRiskContextService:
         ):
             return HazardousEventRiskFact(
                 status=RiskContextFactStatus.UNAVAILABLE,
-                reason="SOURCE_NOT_FINALIZED",
+                reason=(
+                    "MISSING_SOURCE_PROVENANCE"
+                    if not source_has_provenance(metadata)
+                    else "SOURCE_NOT_FINALIZED"
+                ),
             )
         if authority is RiskContextFactAuthority.UNAVAILABLE or not source_ref:
             return HazardousEventRiskFact(

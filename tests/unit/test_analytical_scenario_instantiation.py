@@ -371,6 +371,113 @@ def test_ttc_accepts_finalized_project_speed_with_current_analysis_distance(meth
     assert context.ttc_s.source_provenance == "SCENARIO_DEFINED"
 
 
+@pytest.mark.parametrize("approval", ["FINALIZED", "APPROVED"])
+@pytest.mark.parametrize("source_ref_form", ["empty", "missing"])
+def test_ttc_rejects_finalized_project_speed_without_its_own_source_reference(
+    method, approval, source_ref_form,
+):
+    instance = ScenarioMethodService(method).instantiate_analytical_candidates(
+        _malfunction(), [_parent()],
+    )[0][0]
+    speed_metadata = {
+        "provenance": "PROJECT_INPUT", "approval": approval,
+    }
+    if source_ref_form == "empty":
+        speed_metadata["source_refs"] = []
+    synthetic = replace(
+        instance,
+        facts={**instance.facts, "relative_speed_kph": 5.0},
+        fact_provenance={
+            **instance.fact_provenance,
+            "relative_speed_kph": speed_metadata,
+        },
+    )
+
+    context = HazardousEventRiskContextService(method).build(
+        malfunction_id="MF-P3-B", scenario_id=instance.scenario_id,
+        hazard_node_id="H", scenario=_materialize(synthetic),
+    )
+
+    assert context.relative_speed_kph.status is RiskContextFactStatus.UNAVAILABLE
+    assert context.relative_speed_kph.reason == "MISSING_SOURCE_PROVENANCE"
+    assert context.ttc_s.status is RiskContextFactStatus.UNAVAILABLE
+    assert context.ttc_s.reason == "MISSING_SOURCE_PROVENANCE"
+
+
+@pytest.mark.parametrize("source_ref_form", ["empty", "missing"])
+def test_ttc_rejects_analysis_speed_without_its_own_source_reference(
+    method, source_ref_form,
+):
+    instance = ScenarioMethodService(method).instantiate_analytical_candidates(
+        _malfunction(), [_parent()],
+    )[0][0]
+    speed_metadata = deepcopy(instance.fact_provenance["object_speed_kph"])
+    if source_ref_form == "empty":
+        speed_metadata["source_refs"] = []
+    else:
+        speed_metadata.pop("source_refs")
+    synthetic = replace(
+        instance,
+        facts={**instance.facts, "relative_speed_kph": 5.0},
+        fact_provenance={
+            **instance.fact_provenance,
+            "relative_distance_m": {
+                "provenance": "PROJECT_INPUT", "approval": "FINALIZED",
+                "source_refs": [{
+                    "source_type": "item_definition", "source_id": "ItemDef.docx",
+                    "location": "relative_distance", "excerpt": "confirmed distance",
+                }],
+            },
+            "relative_speed_kph": speed_metadata,
+        },
+    )
+
+    context = HazardousEventRiskContextService(method).build(
+        malfunction_id="MF-P3-B", scenario_id=instance.scenario_id,
+        hazard_node_id="H", scenario=_materialize(synthetic),
+    )
+
+    assert context.relative_speed_kph.status is RiskContextFactStatus.UNAVAILABLE
+    assert context.relative_speed_kph.reason == "MISSING_SOURCE_PROVENANCE"
+    assert context.ttc_s.status is RiskContextFactStatus.UNAVAILABLE
+    assert context.ttc_s.reason == "MISSING_SOURCE_PROVENANCE"
+
+
+def test_nested_derived_fact_rejects_a_missing_source_leaf(method):
+    source = {
+        "source_type": "item_definition", "source_id": "ItemDef.docx",
+        "location": "valid", "excerpt": "confirmed input",
+    }
+    finalized = {
+        "provenance": "PROJECT_INPUT", "approval": "FINALIZED", "source_refs": [source],
+    }
+    missing_source = {
+        "provenance": "PROJECT_INPUT", "approval": "FINALIZED", "source_refs": [],
+    }
+    nested = {
+        "provenance": "DERIVED", "approval": "FINALIZED", "source_refs": [source],
+        "inputs": ["SCN.distance", "SCN.speed"],
+        "input_fact_metadata": [finalized, missing_source],
+    }
+    scenario = {
+        "ttc_s": 0.216,
+        "_fact_provenance": {
+            "ttc_s": {
+                "provenance": "DERIVED", "approval": "FINALIZED",
+                "source_refs": [source], "inputs": ["DERIVED.inner"],
+                "input_fact_metadata": [nested],
+            },
+        },
+    }
+
+    context = HazardousEventRiskContextService(method).build(
+        malfunction_id="MF-P3-B", scenario_id="SCN-P3-B", hazard_node_id="H",
+        scenario=scenario,
+    )
+
+    assert context.ttc_s.status is RiskContextFactStatus.UNAVAILABLE
+
+
 def test_analysis_assumption_cannot_prove_a_positive_causal_hop(method):
     malfunction = _malfunction()
     instance = ScenarioMethodService(method).instantiate_analytical_candidates(

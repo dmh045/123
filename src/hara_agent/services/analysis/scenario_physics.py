@@ -43,7 +43,7 @@ def _input_metadata(
         approval = ReviewStatus.PENDING
     sources = tuple(
         item if isinstance(item, SourceRef) else SourceRef(**item)
-        for item in metadata.get("source_refs", [])
+        for item in metadata.get("source_refs", metadata.get("sources", []))
         if isinstance(item, (SourceRef, dict))
     )
     return approval, sources, metadata
@@ -88,6 +88,32 @@ def has_analysis_assumption_lineage(metadata: dict[str, Any]) -> bool:
     return bool(analysis_assumption_lineages(metadata))
 
 
+def source_reference(metadata: dict[str, Any]) -> str:
+    """Return the existing RiskContext source-reference representation."""
+    sources = metadata.get("source_refs", metadata.get("sources", ()))
+    if not isinstance(sources, (list, tuple)) or not sources:
+        return ""
+    first = sources[0]
+    if isinstance(first, dict):
+        source_id = str(first.get("source_id", first.get("asset", ""))).strip()
+        location = str(first.get("location", "")).strip()
+        return f"{source_id}:{location}".strip(":")
+    source_id = str(getattr(first, "source_id", "")).strip()
+    location = str(getattr(first, "location", "")).strip()
+    return f"{source_id}:{location}".strip(":")
+
+
+def source_has_provenance(metadata: dict[str, Any]) -> bool:
+    """Require every retained leaf to carry its own usable source reference."""
+    inputs = metadata.get("input_fact_metadata", ())
+    if isinstance(inputs, list):
+        return bool(inputs) and all(
+            source_has_provenance(item) for item in inputs
+            if isinstance(item, dict)
+        ) and all(isinstance(item, dict) for item in inputs)
+    return bool(source_reference(metadata))
+
+
 def analysis_assumption_is_valid_for(
     metadata: dict[str, Any], *, malfunction_id: str, scenario_id: str,
 ) -> bool:
@@ -117,6 +143,8 @@ def source_is_accepted_for(
             )
             for item in inputs if isinstance(item, dict)
         ) and all(isinstance(item, dict) for item in inputs)
+    if not source_has_provenance(metadata):
+        return False
     if (
         str(metadata.get("provenance", "")).upper() == FactProvenance.DERIVED.value
         and metadata.get("inputs")
