@@ -100,6 +100,9 @@ def test_hash_bound_risk_facts_feed_compiled_rules_with_exact_provenance():
     assert bound.audit["missing_fact_types"] == ["DURATION_PERCENT"]
     assert bound.values["exposure_method"] == "F"
     assert bound.provenance["collision_type"]["provenance"] == "HUMAN_CONFIRMATION"
+    assert bound.provenance["collision_type"]["source_binding_kind"] == (
+        "METHOD_RISK_FACT_BINDING"
+    )
     assert scored["severity"]["severity_score"] == "S2"
     assert scored["severity"]["engineering_status"] == "PENDING"
     assert scored["exposure"]["engineering_status"] == "FINALIZED"

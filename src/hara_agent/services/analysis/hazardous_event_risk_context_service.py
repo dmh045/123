@@ -11,7 +11,10 @@ from hara_agent.contracts import (
     RuleMatchState, UnknownOverridePolicy,
 )
 from hara_agent.models import ReviewStatus, ScenarioCandidate
-from hara_agent.services.analysis.scenario_physics import derive_scenario_physics
+from hara_agent.services.analysis.scenario_physics import (
+    derive_scenario_physics, has_analysis_assumption_lineage,
+    source_is_accepted_for, source_origin,
+)
 
 
 class HazardousEventRiskContextService:
@@ -71,44 +74,25 @@ class HazardousEventRiskContextService:
     @staticmethod
     def _authority(metadata: dict[str, Any]) -> RiskContextFactAuthority:
         value = str(metadata.get("provenance", "")).upper()
+        if has_analysis_assumption_lineage(metadata):
+            return (
+                RiskContextFactAuthority.DERIVED_PHYSICS
+                if value == "DERIVED"
+                else RiskContextFactAuthority.DIRECT_SCENARIO_FACT
+            )
+        if metadata.get("source_binding_kind") == "METHOD_RISK_FACT_BINDING":
+            # The binding has a typed identity; a method hash alone is not
+            # evidence that an arbitrary physics derivation is a project fact.
+            return RiskContextFactAuthority.DIRECT_PROJECT_FACT
         if value in {"PROJECT_INPUT", "HUMAN_CONFIRMATION"}:
             return RiskContextFactAuthority.DIRECT_PROJECT_FACT
         if value in {"SCENARIO_INPUT", "DIRECT_SCENARIO_FACT"}:
             return RiskContextFactAuthority.DIRECT_SCENARIO_FACT
-        if value == "SCENARIO_DEFINED":
-            return RiskContextFactAuthority.DIRECT_SCENARIO_FACT
-        if value == "DERIVED" and metadata.get("method_contract_hash"):
-            # A MethodRiskFactBinding selects a project fact; its binding is
-            # deterministic, but the value itself is not a physics derivation.
-            return RiskContextFactAuthority.DIRECT_PROJECT_FACT
         if value == "DERIVED":
             return RiskContextFactAuthority.DERIVED_PHYSICS
         if value == "METHOD_RULE":
             return RiskContextFactAuthority.METHOD_RULE
         return RiskContextFactAuthority.UNAVAILABLE
-
-    @staticmethod
-    def _finalized(metadata: dict[str, Any]) -> bool:
-        return str(metadata.get("approval", "")).upper() in {"FINALIZED", "APPROVED"}
-
-    @staticmethod
-    def _validated_analysis_assumption(
-        metadata: dict[str, Any], *, malfunction_id: str, scenario_id: str,
-    ) -> bool:
-        if str(metadata.get("provenance", "")).upper() == "DERIVED":
-            origin = str(metadata.get("analysis_assumption_origin", "")).upper()
-        else:
-            origin = str(metadata.get("origin", metadata.get("provenance", ""))).upper()
-        scope = metadata.get(
-            "analysis_assumption_scope", metadata.get("applicable_scope", {}),
-        )
-        return (
-            origin == "SCENARIO_DEFINED"
-            and str(metadata.get("validation_status", "")).upper() == "VALIDATED"
-            and isinstance(scope, dict)
-            and str(scope.get("malfunction_id", "")) == malfunction_id
-            and str(scope.get("scenario_id", "")) == scenario_id
-        )
 
     def _fact(
         self, field: str, scenario: dict[str, Any], *, malfunction_id: str,
@@ -131,11 +115,8 @@ class HazardousEventRiskContextService:
                 status=RiskContextFactStatus.UNAVAILABLE,
                 reason="MISSING_STRUCTURED_FACT",
             )
-        if not (
-            self._finalized(metadata)
-            or self._validated_analysis_assumption(
-                metadata, malfunction_id=malfunction_id, scenario_id=scenario_id,
-            )
+        if not source_is_accepted_for(
+            metadata, malfunction_id=malfunction_id, scenario_id=scenario_id,
         ):
             return HazardousEventRiskFact(
                 status=RiskContextFactStatus.UNAVAILABLE,
@@ -151,6 +132,7 @@ class HazardousEventRiskContextService:
             value=value,
             source_type=authority,
             source_ref=source_ref,
+            source_provenance=source_origin(metadata),
             derivation_rule_id=str(metadata.get("derivation_rule_id", "")),
             reason="SOURCE_GROUNDED_STRUCTURED_FACT",
         )
@@ -348,6 +330,8 @@ class HazardousEventRiskContextService:
             operating_mode=str(candidate.get("operating_mode", "")),
             fact_provenance=provenance,
             status=status,
+            semantic_fingerprint=str(candidate.get("semantic_fingerprint", "")),
+            analysis_instance=dict(candidate.get("analysis_instance", {})),
         )
         scenario = {**facts, "_fact_provenance": provenance}
         for record in derive_scenario_physics(typed_candidate):

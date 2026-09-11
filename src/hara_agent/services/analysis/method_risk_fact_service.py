@@ -261,6 +261,7 @@ class MethodRiskFactBindingService:
                     else "DERIVED"
                 ),
                 "source_refs": [self._source_dict(item) for item in selected_sources],
+                "source_binding_kind": "METHOD_RISK_FACT_BINDING",
                 "method_contract_hash": self.template_hash,
             }
 

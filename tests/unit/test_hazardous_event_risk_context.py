@@ -55,6 +55,7 @@ def test_context_uses_canonical_node_identity_and_source_grounded_facts_only():
     assert context.hazardous_event_id == "HE::MF-1::SCN-1::SCN-1:MF-1:hazard"
     assert context.relative_speed_kph.status is RiskContextFactStatus.AVAILABLE
     assert context.relative_speed_kph.value == 8.0
+    assert context.relative_speed_kph.source_provenance == "PROJECT_INPUT"
     assert service.severity_readiness(context) == {
         "status": "READY", "missing_reasons": [],
         "selected_speed_semantic": "RELATIVE_SPEED",
@@ -224,6 +225,7 @@ def test_method_bound_project_fact_is_not_misclassified_as_physics():
     scenario = _scenario()
     scenario["_fact_provenance"]["relative_speed_kph"] = {
         "provenance": "DERIVED", "approval": "FINALIZED",
+        "source_binding_kind": "METHOD_RISK_FACT_BINDING",
         "method_contract_hash": "method-hash",
         "source_refs": [{"source_id": "ItemDef.docx", "location": "risk_fact"}],
     }

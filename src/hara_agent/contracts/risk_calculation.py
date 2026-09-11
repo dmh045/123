@@ -505,6 +505,7 @@ class HazardousEventRiskFact:
     value: Any = None
     source_type: RiskContextFactAuthority = RiskContextFactAuthority.UNAVAILABLE
     source_ref: str = ""
+    source_provenance: str = ""
     derivation_rule_id: str = ""
     reason: str = ""
 

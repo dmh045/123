@@ -19,7 +19,7 @@ from hara_agent.models import (
     ReviewStatus, ScenarioCandidate, SourceRef,
 )
 from hara_agent.services.analysis.scenario_physics import (
-    DerivedPhysicsType, derive_scenario_physics,
+    DerivedPhysicsType, derive_scenario_physics, has_analysis_assumption_lineage,
 )
 
 from .scenario_contract import RISK_DIMENSION_VALUES, SCENARIO_CONTRACT_VERSION
@@ -246,7 +246,10 @@ class CausalEvidenceSelector:
         # context and would invite self-referential proof.
         if record.namespace == "MF":
             return None
-        if record.provenance is FactProvenance.SCENARIO_DEFINED:
+        if (
+            record.provenance is FactProvenance.SCENARIO_DEFINED
+            or has_analysis_assumption_lineage(metadata)
+        ):
             return None
         if record.namespace == "METHOD" and metadata.get("causal_relevance") is not True:
             return None
@@ -548,7 +551,10 @@ def validate_evidence_contract(
         resolved = [registry.resolve(ref) for ref in refs]
         if causal and any(
             fact is not None
-            and fact.get("provenance") == FactProvenance.SCENARIO_DEFINED.value
+            and (
+                fact.get("provenance") == FactProvenance.SCENARIO_DEFINED.value
+                or has_analysis_assumption_lineage(fact)
+            )
             for fact in resolved
         ):
             raise _error(
