@@ -1,0 +1,45 @@
+schema_version: "1.0"
+source: "confirmed FUSA scenario-template vocabulary reconciled with active severity semantics"
+mapping_source: "FUSA_TEMPLATE_SEMANTICS"
+physics:
+  derivation_rule_id: LONGITUDINAL_RELATIVE_SPEED_FROM_SIGNED_VELOCITIES_V1
+  longitudinal_collision_types: [FRONTAL, REAR_END]
+  ego_longitudinal_directions: [FORWARD, REVERSE]
+  object_longitudinal_directions: [FORWARD, REVERSE, STATIONARY]
+mappings:
+  - mapping_rule_id: FUSA_RISK_VOCAB_ROAD_USER_PASSENGER_CAR
+    field: road_user_type
+    raw_value: passenger_car
+    canonical_value: VEHICLE
+  - mapping_rule_id: FUSA_RISK_VOCAB_ROAD_USER_TRUCK
+    field: road_user_type
+    raw_value: truck
+    canonical_value: VEHICLE
+  - mapping_rule_id: FUSA_RISK_VOCAB_ROAD_USER_PEDESTRIAN
+    field: road_user_type
+    raw_value: pedestrian
+    canonical_value: PEDESTRIAN
+  - mapping_rule_id: FUSA_RISK_VOCAB_ROAD_USER_CYCLIST
+    field: road_user_type
+    raw_value: cyclist
+    canonical_value: CYCLIST
+  - mapping_rule_id: FUSA_RISK_VOCAB_ROAD_USER_MOTORCYCLE
+    field: road_user_type
+    raw_value: motorcycle
+    canonical_value: MOTORCYCLIST
+  - mapping_rule_id: FUSA_RISK_VOCAB_COLLISION_FRONT
+    field: collision_type
+    raw_value: front
+    canonical_value: FRONTAL
+  - mapping_rule_id: FUSA_RISK_VOCAB_COLLISION_FRONTAL
+    field: collision_type
+    raw_value: frontal
+    canonical_value: FRONTAL
+  - mapping_rule_id: FUSA_RISK_VOCAB_COLLISION_REAR
+    field: collision_type
+    raw_value: rear
+    canonical_value: REAR_END
+  - mapping_rule_id: FUSA_RISK_VOCAB_COLLISION_SIDE
+    field: collision_type
+    raw_value: side
+    canonical_value: SIDE

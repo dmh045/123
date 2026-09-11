@@ -15,6 +15,7 @@ from hara_agent.services.analysis.scenario_physics import (
     derive_scenario_physics, has_analysis_assumption_lineage,
     source_has_provenance, source_is_accepted_for, source_origin, source_reference,
 )
+from hara_agent.services.analysis.risk_vocabulary_adapter import RiskVocabularyAdapter
 
 
 class HazardousEventRiskContextService:
@@ -50,6 +51,7 @@ class HazardousEventRiskContextService:
             raise ValueError("HazardousEventRiskContextService requires structured risk method")
         self.method = method
         self.structured = method.structured_risk_method
+        self.risk_vocabulary = RiskVocabularyAdapter(method)
 
     @staticmethod
     def _number(value: Any) -> float | None:
@@ -96,6 +98,9 @@ class HazardousEventRiskContextService:
             value = value if isinstance(value, bool) else None
         elif not isinstance(value, str) or not value.strip():
             value = None
+        elif field in {"road_user_type", "collision_type"}:
+            resolution = self.risk_vocabulary.resolve(field=field, raw_value=value)
+            value = resolution.canonical_value if resolution.mapped else None
         if value is None:
             return HazardousEventRiskFact(
                 status=RiskContextFactStatus.UNAVAILABLE,

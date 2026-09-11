@@ -31,6 +31,7 @@ normalized_sources:
   exposure_policy: normalized/exposure_policy.yaml
   controllability_aliases: normalized/controllability_aliases.yaml
   severity_semantics: normalized/severity_semantics.yaml
+  risk_vocabulary_mappings: normalized/risk_vocabulary_mappings.yaml
 
 excluded_numeric_authorities:
   - raw/controllability_rules.yaml
@@ -74,3 +75,4 @@ asset_hashes:
   normalized/scenario_aliases.yaml: e3cfbac84282bd83e164348807d4bd276b67b6408fcf0aac1958bf63f63c3ef1
   normalized/scenario_coverage_rules.yaml: 9c755819cb08c09d57a21b5ad5576c296d14f7490af31152fe456002804bd86a
   normalized/fm_template_selector_map.yaml: e7beb284c2f9e67fcd22383ba87f7b70e41dfa3049fc5f754877909f953afabe
+  normalized/risk_vocabulary_mappings.yaml: 382397c58b19c908b4709b32d89778f15dfa8e78d77ce647b5fc5e4805fbbb6c

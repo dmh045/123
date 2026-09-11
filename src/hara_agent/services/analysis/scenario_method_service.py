@@ -22,6 +22,7 @@ from .failure_mode_selector_resolver import (
     FMTemplateSelectorAdapterResolver, FailureModeSelectorResolution,
     FailureModeSelectorResolver, TemplateSelectorResolution,
 )
+from .risk_vocabulary_adapter import RiskVocabularyAdapter
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class ScenarioMethodService:
         self.method = method
         self.selector_resolver = FailureModeSelectorResolver(method)
         self.template_selector_resolver = FMTemplateSelectorAdapterResolver(method)
+        self.risk_vocabulary = RiskVocabularyAdapter(method)
 
     def _selector_template_ids(
         self, selector_type: str, canonical_selector: str,
@@ -227,22 +229,6 @@ class ScenarioMethodService:
             )
         return str(current).strip().casefold() == str(expected).strip().casefold()
 
-    def _method_value(self, *, field: str, source_value: str) -> str:
-        """Resolve only a value explicitly named by the compiled risk method."""
-        structured = self.method.structured_risk_method
-        if structured is None:
-            return ""
-        pairs = (
-            structured.severity.road_user_groups
-            if field == "road_user_type"
-            else structured.severity.collision_types
-        )
-        matches = [
-            canonical for canonical, source in pairs
-            if source_value.casefold() in {canonical.casefold(), source.casefold()}
-        ]
-        return matches[0] if len(matches) == 1 else ""
-
     def _template_source(self, option: Any) -> SourceRef:
         source = option.source_ref
         return SourceRef(
@@ -309,13 +295,20 @@ class ScenarioMethodService:
                     value = values[field]
                     if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
                         diagnostics.append({"code": "INVALID_TEMPLATE_OPTION", "field": field})
+                vocabulary_mappings = []
                 for field, source_value in (
                     ("road_user_type", option.obj_type),
                     ("collision_type", option.collision_type),
                 ):
-                    mapped = self._method_value(field=field, source_value=source_value)
-                    if mapped:
-                        values[field] = mapped
+                    resolution = self.risk_vocabulary.resolve(
+                        field=field, raw_value=source_value,
+                    )
+                    if resolution.mapped:
+                        values[field] = resolution.canonical_value
+                        vocabulary_mappings.append({
+                            "field": field,
+                            **resolution.to_dict(),
+                        })
                     else:
                         diagnostics.append({
                             "code": "UNMAPPED_METHOD_VALUE",
@@ -387,6 +380,15 @@ class ScenarioMethodService:
                         "validation_status": "VALIDATED",
                         "applicable_scope": scope,
                     }
+                    mapping = next(
+                        (
+                            item for item in vocabulary_mappings
+                            if item["field"] == field
+                        ),
+                        None,
+                    )
+                    if mapping is not None:
+                        assumption["risk_vocabulary_mapping"] = mapping
                     assumptions.append(assumption)
                     provenance[field] = {
                         "provenance": FactProvenance.SCENARIO_DEFINED.value,
@@ -428,6 +430,7 @@ class ScenarioMethodService:
                     "validation_status": "VALIDATED",
                     "applicable_scope": scope,
                     "assumptions": assumptions,
+                    "risk_vocabulary_mappings": vocabulary_mappings,
                     "diagnostics": diagnostics,
                 }
                 instances.append(replace(

@@ -174,7 +174,11 @@ def test_strong_template_creates_two_isolated_analysis_instances_with_source_con
             assert assumption["method_contract_hash"]
             assert assumption["applicable_scope"]["scenario_id"] == instance.scenario_id
             assert instance.fact_provenance[assumption["field"]]["approval"] == "PENDING"
-    assert audit["unmapped_value_count"] == 3  # front twice and passenger_car lack exact compiled mappings
+    assert audit["unmapped_value_count"] == 0
+    assert all(
+        item.analysis_instance["risk_vocabulary_mappings"]
+        for item in instances
+    )
 
 
 def test_untouched_baseline_matcher_instantiates_official_vocabulary(baseline_method):
@@ -191,7 +195,7 @@ def test_untouched_baseline_matcher_instantiates_official_vocabulary(baseline_me
     assert match.template.template_id == "FM_TEMPLATE_001"
     assert audit["selection_mode"] == "STRONG_TEMPLATE_ANALYTICAL_INSTANCES"
     assert len(instances) == 4
-    assert audit["unmapped_value_count"] == 4
+    assert audit["unmapped_value_count"] == 0
     assert all(item.facts["relative_distance_m"] == 0.3 for item in instances)
     assert all(item.facts["object_speed_kph"] == 0.0 for item in instances)
     assert all("relative_speed_kph" not in item.facts for item in instances)

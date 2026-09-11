@@ -1114,6 +1114,106 @@ class YamlBaselineCompiler:
             asil_zero_short_circuit=str(manifest["policies"]["asil_zero_short_circuit"]),
             method_source_hash=source_hash,
         )
+        raw_risk_vocabulary_mappings = assets["risk_vocabulary_mappings"].get(
+            "mappings", [],
+        )
+        if not isinstance(raw_risk_vocabulary_mappings, list):
+            raise YamlBaselineCompileError(
+                "risk_vocabulary_mappings.mappings must be a list"
+            )
+        risk_vocabulary_physics = assets["risk_vocabulary_mappings"].get("physics", {})
+        if not isinstance(risk_vocabulary_physics, dict):
+            raise YamlBaselineCompileError("risk_vocabulary_mappings.physics must be a mapping")
+        severity_targets = {
+            "road_user_type": {
+                canonical for canonical, _ in structured.severity.road_user_groups
+            },
+            "collision_type": {
+                canonical for canonical, _ in structured.severity.collision_types
+            },
+        }
+        longitudinal_collision_types = risk_vocabulary_physics.get(
+            "longitudinal_collision_types", [],
+        )
+        if (
+            not isinstance(longitudinal_collision_types, list)
+            or not longitudinal_collision_types
+            or any(str(value) not in severity_targets["collision_type"] for value in longitudinal_collision_types)
+        ):
+            raise YamlBaselineCompileError(
+                "risk_vocabulary_mappings.physics.longitudinal_collision_types "
+                "must contain active collision vocabulary"
+            )
+        physics_rule_id = str(risk_vocabulary_physics.get("derivation_rule_id", "")).strip()
+        ego_directions = risk_vocabulary_physics.get("ego_longitudinal_directions", [])
+        object_directions = risk_vocabulary_physics.get("object_longitudinal_directions", [])
+        if (
+            not physics_rule_id
+            or not isinstance(ego_directions, list) or not ego_directions
+            or not isinstance(object_directions, list) or not object_directions
+            or any(not str(value).strip() for value in ego_directions + object_directions)
+        ):
+            raise YamlBaselineCompileError(
+                "risk_vocabulary_mappings.physics direction semantics are incomplete"
+            )
+        risk_vocabulary_mappings: list[dict[str, Any]] = []
+        seen_risk_vocabulary_values: set[tuple[str, str]] = set()
+        for index, raw_mapping in enumerate(raw_risk_vocabulary_mappings):
+            if not isinstance(raw_mapping, dict):
+                raise YamlBaselineCompileError(
+                    f"risk_vocabulary_mappings.mappings[{index}] must be a mapping"
+                )
+            field = str(raw_mapping.get("field", "")).strip()
+            raw_value = str(raw_mapping.get("raw_value", "")).strip()
+            canonical_value = str(raw_mapping.get("canonical_value", "")).strip()
+            mapping_rule_id = str(raw_mapping.get("mapping_rule_id", "")).strip()
+            if (
+                field not in severity_targets
+                or not raw_value
+                or not canonical_value
+                or not mapping_rule_id
+            ):
+                raise YamlBaselineCompileError(
+                    f"risk_vocabulary_mappings.mappings[{index}] is incomplete"
+                )
+            if canonical_value not in severity_targets[field]:
+                raise YamlBaselineCompileError(
+                    "risk_vocabulary_mappings target is not active Severity vocabulary: "
+                    f"field={field!r} target={canonical_value!r}"
+                )
+            key = (field, raw_value.casefold())
+            if key in seen_risk_vocabulary_values:
+                raise YamlBaselineCompileError(
+                    "risk_vocabulary_mappings has duplicate exact mapping: "
+                    f"field={field!r} raw_value={raw_value!r}"
+                )
+            seen_risk_vocabulary_values.add(key)
+            source_ref = self._source(
+                source_hash,
+                source_paths["risk_vocabulary_mappings"],
+                f"mappings[{index}]",
+                raw_mapping,
+            )
+            risk_vocabulary_mappings.append({
+                "field": field,
+                "raw_value": raw_value,
+                "canonical_value": canonical_value,
+                "mapping_rule_id": mapping_rule_id,
+                "mapping_source": str(
+                    raw_mapping.get(
+                        "mapping_source",
+                        assets["risk_vocabulary_mappings"].get("mapping_source", ""),
+                    )
+                ).strip(),
+                "source_ref": {
+                    "workbook": source_ref.workbook,
+                    "template_hash": source_ref.template_hash,
+                    "sheet": source_ref.sheet,
+                    "range": source_ref.range,
+                    "raw_text": source_ref.raw_text,
+                    "source_hash": source_ref.source_hash,
+                },
+            })
 
         workflow_binding = self._binding(TemplateRole.WORKFLOW, source_hash, "runtime_workflow")
         empty_derivation = lambda role, pattern: DerivationMethod(
@@ -1161,6 +1261,14 @@ class YamlBaselineCompiler:
         )
         source_refs = tuple(dict.fromkeys([
             *refs,
+            self._source(
+                source_hash, source_paths["risk_vocabulary_mappings"], "mappings",
+                raw_risk_vocabulary_mappings,
+            ),
+            self._source(
+                source_hash, source_paths["risk_vocabulary_mappings"], "physics",
+                risk_vocabulary_physics,
+            ),
             scenario_method.fm_template_catalog.source_ref
             if scenario_method.fm_template_catalog is not None else guide_ref,
             scenario_method.failure_mode_selector_taxonomy.component_source_ref
@@ -1196,6 +1304,19 @@ class YamlBaselineCompiler:
                     "source_asset": source_paths["scenario_coverage_rules"],
                 },
                 "scenario_coverage_knowledge_sources": coverage_knowledge_sources,
+                "risk_vocabulary_mappings": risk_vocabulary_mappings,
+                "risk_vocabulary_physics": {
+                    "derivation_rule_id": physics_rule_id,
+                    "longitudinal_collision_types": [
+                        str(value) for value in longitudinal_collision_types
+                    ],
+                    "ego_longitudinal_directions": [
+                        str(value) for value in ego_directions
+                    ],
+                    "object_longitudinal_directions": [
+                        str(value) for value in object_directions
+                    ],
+                },
                 "severity_source_inventory": [
                     {
                         "source": source_paths["severity"],
@@ -1255,6 +1376,16 @@ class YamlBaselineCompiler:
                         "contains_delta_v_derivation": False,
                         "contains_collision_lookup": True,
                         "runtime_consumer": "SeverityMethodExecutor",
+                        "method_authority": "ACTIVE_CATEGORY_MAPPING",
+                    },
+                    {
+                        "source": source_paths["risk_vocabulary_mappings"],
+                        "role": "TEMPLATE_TO_SEVERITY_VOCABULARY_MAPPING",
+                        "confirmed": True,
+                        "contains_thresholds": False,
+                        "contains_delta_v_derivation": False,
+                        "contains_collision_lookup": True,
+                        "runtime_consumer": "RiskVocabularyAdapter",
                         "method_authority": "ACTIVE_CATEGORY_MAPPING",
                     },
                 ],

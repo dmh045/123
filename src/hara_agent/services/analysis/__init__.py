@@ -21,6 +21,7 @@ from .method_safety_goal_service import MethodSafetyGoalService
 from .risk_calculation_input_service import RiskCalculationInputService
 from .risk_execution_trace_service import RiskExecutionTraceService
 from .risk_scoreability_service import RiskScoreabilityService
+from .risk_vocabulary_adapter import RiskVocabularyAdapter, RiskVocabularyResolution
 from .hazardous_event_risk_context_service import HazardousEventRiskContextService
 from .risk_context_source_coverage_audit_service import (
     RiskContextSourceCoverageAuditService,
@@ -71,6 +72,7 @@ __all__ = [
     "RiskCalculationInputService",
     "RiskExecutionTraceService",
     "RiskScoreabilityService",
+    "RiskVocabularyAdapter", "RiskVocabularyResolution",
     "HazardousEventRiskContextService",
     "RiskContextSourceCoverageAuditService",
     "ControllabilityBranchAuditService",
