@@ -30,7 +30,7 @@ class OfflineReportRebuilder:
         review_root: str | Path = "runtime/review",
     ) -> Path:
         checkpoint = Path(checkpoint_path).expanduser().resolve()
-        state = HARAState.from_dict(json.loads(checkpoint.read_text(encoding="utf-8")))
+        state = HARAState.read_committed(json.loads(checkpoint.read_text(encoding="utf-8")))
         resolution = MethodSourceResolver().resolve(
             template_path=None,
             baseline_manifest_path=Path(method_baseline_path),

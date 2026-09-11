@@ -64,7 +64,12 @@ class HARAState:
         return result
 
     @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> "HARAState":
+    def read_committed(cls, value: dict[str, Any]) -> "HARAState":
+        """Decode stored state without scheduling or invalidating any stage.
+
+        Consumers of a committed snapshot validate their stage dependencies;
+        workflow resume additionally applies generation-version invalidation.
+        """
         state = cls(
             run_id=str(value["run_id"]),
             stage=WorkflowStage(value.get("stage", WorkflowStage.INITIALIZE.value)),
@@ -86,6 +91,11 @@ class HARAState:
         state.scenarios = [cls._scenario_from_dict(item) for item in value.get("scenarios", [])]
         state.risk_results = [cls._risk_from_dict(item) for item in value.get("risk_results", [])]
         state.safety_goals = [cls._goal_from_dict(item) for item in value.get("safety_goals", [])]
+        return state
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "HARAState":
+        state = cls.read_committed(value)
         loaded_contract = str(value.get("scenario_contract_version", ""))
         loaded_assessment_contract = str(value.get("scenario_assessment_contract_version", ""))
         scenario_outputs_exist = bool(

@@ -541,17 +541,19 @@ class HARAReportWorkbookRenderer:
         sheet.print_area = f"A1:F{last_row}"
 
     def _render_audit(self, sheet: Any, view_model: HARAReportViewModel, registry: TemplateStyleRegistry) -> None:
+        trace_references = {item.hara_id: item.risk_trace_reference for item in view_model.audit_references}
         records = [
             (
                 row.hara_id, row.malfunction_id, row.scenario_id, row.hazardous_event_id,
                 row.function_id, row.assessment_status, row.clarification_ids,
                 view_model.method_contract_hash, view_model.schema_hash, view_model.style_template_hash,
+                trace_references.get(row.hara_id, ""),
             )
             for row in view_model.rows
         ]
         self._render_records(
             sheet, "Audit and Traceability", registry,
-            ("HARA-ID", "Malfunction ID", "Scenario ID", "Hazardous Event ID", "Function ID", "Status", "Clarification IDs", "Method hash", "Report schema hash", "Style template hash"),
+            ("HARA-ID", "Malfunction ID", "Scenario ID", "Hazardous Event ID", "Function ID", "Status", "Clarification IDs", "Method hash", "Report schema hash", "Style template hash", "Risk execution trace"),
             records,
         )
 

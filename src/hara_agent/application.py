@@ -7,9 +7,6 @@ from hara_agent.config import LLMConfig, RunConfig
 from hara_agent.contracts import CompileStatus
 from hara_agent.infrastructure.llm import LLMClient, create_llm_client
 from hara_agent.services.analysis import (
-    MethodContractASILService,
-    MethodRuleScoringService,
-    MethodRiskFactBindingService,
     MethodScenarioCandidateService,
     MethodSafetyGoalService,
     ProjectFactResolver,
@@ -37,6 +34,7 @@ from hara_agent.workflow import (
     build_hara_agent_graph,
 )
 from hara_agent.method_sources import MethodSourceKind, MethodSourceResolver
+from hara_agent.services.analysis.risk_services import RiskScoringServices
 
 
 class HARAApplication:
@@ -148,6 +146,7 @@ class HARAApplication:
                 ],
                 warning_codes=sorted({item.code.value for item in method.warnings}),
             )
+        risk_services = RiskScoringServices.from_method(method)
         graph = build_hara_agent_graph(
             SemanticWorkflowInputs(
                 item_path=self.config.item_path,
@@ -195,10 +194,10 @@ class HARAApplication:
                 risk_facts=ScenarioRiskFactAgent(self.llm_client),
             ),
             RiskWorkflowServices(
-                scoring=MethodRuleScoringService(method),
-                asil_table=MethodContractASILService(method),
+                scoring=risk_services.scoring,
+                asil_table=risk_services.asil,
                 safety_goals=MethodSafetyGoalService(method),
-                risk_fact_binding=MethodRiskFactBindingService(method),
+                risk_fact_binding=risk_services.binding,
             ),
             checkpoint_repository=checkpoints,
             reporting=ReportingWorkflowConfig(

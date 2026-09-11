@@ -289,12 +289,36 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--review-root", type=Path, default=Path("runtime/review"))
     rebuild.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     rebuild.add_argument("--output", type=Path, default=Path("output/HARA_P2C_Content_Cleanup.xlsx"))
+    rescore = subparsers.add_parser(
+        "rescore-risk", help="Recompute only risk from a committed checkpoint without a Provider",
+    )
+    rescore.add_argument("--source-run-id", required=True)
+    rescore.add_argument("--target-run-id", required=True)
+    rescore.add_argument("--checkpoint", type=Path)
+    rescore.add_argument("--baseline", type=Path, default=Path("method_assets/fusa_baseline_v1/manifest.yaml"))
+    rescore.add_argument("--report-style-template", type=Path, default=Path("references/HARA_Template_AI_20260327.xlsx"))
+    rescore.add_argument("--risk-input-supplement", type=Path)
+    rescore.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
+    rescore.add_argument("--review-root", type=Path, default=Path("runtime/review"))
+    rescore.add_argument("--output", type=Path, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     load_local_env()
     args = build_parser().parse_args(argv)
+    if args.command == "rescore-risk":
+        from hara_agent.workflow.risk_rescoring import OfflineRiskRescorer
+
+        summary = OfflineRiskRescorer().run(
+            source_run_id=args.source_run_id, target_run_id=args.target_run_id,
+            checkpoint=args.checkpoint, baseline=args.baseline,
+            report_template=args.report_style_template, output=args.output,
+            run_dir=args.run_dir, review_root=args.review_root,
+            supplement=args.risk_input_supplement,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "confirm-template-role":
         compiler = _role_compiler()
         snapshot = compiler.scanner.scan(args.template)
