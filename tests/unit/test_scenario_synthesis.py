@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+import itertools
 import json
 from pathlib import Path
 
@@ -148,27 +149,78 @@ def _input(method):
 
 
 def _valid_payload(synthesis_input) -> dict:
-    selected = {}
+    service = ConstrainedScenarioSynthesisService.__new__(
+        ConstrainedScenarioSynthesisService
+    )
+    # The caller's real service owns validation; this helper only enumerates
+    # candidate-set products and preserves compound memberships.
+    service.dimensions = tuple(
+        item.dimension for item in synthesis_input.dimension_candidate_sets
+    )
+    choices = []
     for candidate_set in synthesis_input.dimension_candidate_sets:
         if candidate_set.locked_atom_ids:
-            selected[candidate_set.dimension] = list(candidate_set.locked_atom_ids)
+            choices.append([candidate_set.locked_atom_ids])
+        elif candidate_set.applicability.status.value == "NOT_APPLICABLE":
+            choices.append([()])
         elif candidate_set.candidates:
-            selected[candidate_set.dimension] = [candidate_set.candidates[0].atom_id]
+            values = [(item.atom_id,) for item in candidate_set.candidates[:3]]
+            if candidate_set.applicability.status.value == "OPTIONAL":
+                values.append(())
+            choices.append(values)
         else:
-            selected[candidate_set.dimension] = []
+            choices.append([()])
+    candidate_by_id = {
+        candidate.atom_id: candidate
+        for candidate_set in synthesis_input.dimension_candidate_sets
+        for candidate in candidate_set.candidates
+    }
+    valid = []
+    for product in itertools.product(*choices):
+        selected = dict(zip(service.dimensions, product, strict=True))
+        consistent = True
+        for atom_ids in selected.values():
+            for atom_id in atom_ids:
+                candidate = candidate_by_id[atom_id]
+                if any(
+                    selected.get(dimension) != (atom_id,)
+                    for dimension in candidate.dimensions
+                    if dimension in selected
+                ):
+                    consistent = False
+        if consistent:
+            valid.append(selected)
+    primary = synthesis_input.coverage_plan.primary_variation_dimensions
+    selected_variants = []
+    primary_signatures = set()
+    for selected in valid:
+        signature = tuple(selected.get(dimension, ()) for dimension in primary)
+        if selected_variants and signature in primary_signatures:
+            continue
+        selected_variants.append(selected)
+        primary_signatures.add(signature)
+        if len(selected_variants) == synthesis_input.coverage_plan.desired_variant_count:
+            break
+    assert len(selected_variants) == synthesis_input.coverage_plan.desired_variant_count
     return {
         "variants": [{
-            "coverage_label": "typical", "selected_atoms": selected,
+            "coverage_label": intent["coverage_label"],
+            "selected_atoms": {
+                dimension: list(atom_ids) for dimension, atom_ids in selected.items()
+            },
             "semantic_rationale": "Uses the supplied parking, pedestrian and ODD context.",
             "context_refs": [
                 "PROJECT.ODD", "HE.hazardous_event", "PARENT.scenario",
                 "METHOD.scenario_atom_catalog",
             ],
-        }],
+        } for intent, selected in zip(
+            synthesis_input.coverage_plan.variant_intents,
+            selected_variants, strict=True,
+        )],
     }
 
 
-def test_candidate_generation_reads_method_dimensions_and_locks_resolved_atom(method):
+def test_candidate_generation_reads_method_dimensions_and_locks_exact_atom(method):
     synthesis_input = _input(method)
     assert tuple(item.dimension for item in synthesis_input.dimension_candidate_sets) == (
         "WHERE", "ROAD", "EGO_ACTION", "EGO_X_ROAD", "TRAFFIC_PATTERN",
@@ -202,7 +254,7 @@ def test_zero_where_match_never_falls_back_to_full_catalog(method):
         project_context={"odd_locations": ["不可映射语义"]},
     )
     where = next(item for item in empty.dimension_candidate_sets if item.dimension == "WHERE")
-    assert where.generation_status == "PENDING_NO_COMPATIBLE_ATOM"
+    assert where.generation_status == "METHOD_GAP"
     assert where.candidates == ()
     assert where.catalog_size > 0
 
@@ -286,7 +338,7 @@ def test_bounded_provider_selection_allows_one_repair(method):
         _Client([invalid, _valid_payload(synthesis_input)]), service,
     )
     assessments, trace = agent.select(synthesis_input)
-    assert len(assessments) == 1
+    assert len(assessments) == synthesis_input.coverage_plan.desired_variant_count
     assert trace["status"] == "PASS"
     assert trace["repairs"] == 1
     assert len(trace["calls"]) == 2
@@ -409,15 +461,10 @@ def test_child_a_nested_facts_do_not_leak_to_parent_or_child_b(method):
     service = ConstrainedScenarioSynthesisService(method)
     parent = _parent()
     synthesis_input = _input(method)
-    first = _valid_payload(synthesis_input)
-    optional = next(
-        item for item in synthesis_input.dimension_candidate_sets
-        if item.dimension in {"EGO_X_ROAD", "TRAFFIC_PATTERN"} and item.candidates
+    assessments = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
     )
-    second = deepcopy(first)
-    second["variants"][0]["selected_atoms"][optional.dimension] = []
-    assessment_a = service.validate_provider_payload(synthesis_input, first)[0]
-    assessment_b = service.validate_provider_payload(synthesis_input, second)[0]
+    assessment_a, assessment_b = assessments[:2]
     child_a, _ = service.materialize(
         synthesis_input=synthesis_input, assessment=assessment_a,
         parent=parent, provider_evidence={"request_id": "REQ-A"},
@@ -585,7 +632,8 @@ def test_validated_analytical_atom_facts_are_visible_to_causal_revalidation(meth
         projected,
     )
     assert "SCN.road_surface_conditions" in selection.selected_refs
-    assert "SCN.ego_road_relation" in selection.selected_refs
+    assert "SCN.vehicle_state" in selection.selected_refs
+    assert "SCN.ego_road_relation" not in selection.selected_refs
     assert "SCN.operating_scenario" in selection.selected_refs
     assert "SCN.vehicle_state" in selection.selected_refs
     assert "SCN.ego_dynamics" in selection.selected_refs

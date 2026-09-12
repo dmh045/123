@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 
 
-SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v1"
+SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v2"
 
 
 class CandidateOrigin(str, Enum):
@@ -16,6 +16,7 @@ class CandidateOrigin(str, Enum):
     HAZARD_CAUSAL_SEMANTIC_CANDIDATE = "HAZARD_CAUSAL_SEMANTIC_CANDIDATE"
     DETERMINISTIC_DERIVATION = "DETERMINISTIC_DERIVATION"
     LLM_SELECTED_FROM_APPROVED_CANDIDATES = "LLM_SELECTED_FROM_APPROVED_CANDIDATES"
+    BINDING_REFINEMENT = "BINDING_REFINEMENT"
 
 
 class SynthesisValidationStatus(str, Enum):
@@ -35,6 +36,22 @@ class CoverageLabel(str, Enum):
     TYPICAL = "typical"
     BOUNDARY = "boundary"
     EXTREME = "extreme"
+
+
+class ScenarioBindingAuthority(str, Enum):
+    EXACT_PROJECT_FACT = "EXACT_PROJECT_FACT"
+    EXACT_METHOD_MAPPING = "EXACT_METHOD_MAPPING"
+    APPROVED_ALIAS = "APPROVED_ALIAS"
+    RANGE_CONTAINMENT = "RANGE_CONTAINMENT"
+    METHOD_TEMPLATE_INFERENCE = "METHOD_TEMPLATE_INFERENCE"
+    ANALYTICAL_SELECTION = "ANALYTICAL_SELECTION"
+    DERIVED_COMPOUND = "DERIVED_COMPOUND"
+
+
+class ScenarioDimensionApplicability(str, Enum):
+    REQUIRED = "REQUIRED"
+    OPTIONAL = "OPTIONAL"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class PhysicalValueAuthority(str, Enum):
@@ -58,6 +75,63 @@ def _serialize(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class ScenarioBindingDecision:
+    dimension: str
+    authority: ScenarioBindingAuthority
+    refinable: bool
+    source_refs: tuple[str, ...]
+    basis: str
+    parent_atom_id: str = ""
+    project_speed_envelope_kph: tuple[float | None, float | None] | None = None
+    parent_speed_range_kph: tuple[float | None, float | None] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.dimension or not self.basis.strip() or not self.source_refs:
+            raise ValueError("Scenario binding decision requires dimension and evidence")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(asdict(self))
+
+
+@dataclass(frozen=True)
+class ScenarioDimensionApplicabilityDecision:
+    dimension: str
+    status: ScenarioDimensionApplicability
+    reason: str
+    trigger_evidence: tuple[str, ...]
+    source_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.dimension or not self.reason.strip() or not self.source_refs:
+            raise ValueError("Scenario dimension applicability requires evidence")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(asdict(self))
+
+
+@dataclass(frozen=True)
+class ScenarioCoveragePlan:
+    active_mechanism: str
+    fixed_dimensions: tuple[str, ...]
+    primary_variation_dimensions: tuple[str, ...]
+    secondary_variation_dimensions: tuple[str, ...]
+    prohibited_trivial_only_dimensions: tuple[str, ...]
+    desired_variant_count: int
+    variant_intents: tuple[dict[str, Any], ...]
+    source_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.active_mechanism.strip() or not 1 <= self.desired_variant_count <= 3:
+            raise ValueError("Scenario coverage plan requires a mechanism and 1-3 variants")
+        labels = [str(item.get("coverage_label", "")) for item in self.variant_intents]
+        if len(labels) != self.desired_variant_count or len(labels) != len(set(labels)):
+            raise ValueError("Scenario coverage plan intents must match desired variant count")
+
+    def to_dict(self) -> dict[str, Any]:
+        return _serialize(asdict(self))
+
+
+@dataclass(frozen=True)
 class ScenarioDimensionCandidate:
     atom_id: str
     canonical_atom_id: str
@@ -72,6 +146,9 @@ class ScenarioDimensionCandidate:
     method_semantics: dict[str, Any] = field(default_factory=dict)
     validation_status: SynthesisValidationStatus = SynthesisValidationStatus.PENDING
     speed_range_kph: tuple[float | None, float | None] | None = None
+    binding_authority: str = "ANALYTICAL_SELECTION"
+    template_relationship: str = "NONE"
+    ranking_scores: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.atom_id or not self.canonical_atom_id or not self.dimensions:
@@ -90,11 +167,14 @@ class ScenarioAtomCandidateSet:
     dimension: str
     catalog_size: int
     candidates: tuple[ScenarioDimensionCandidate, ...]
+    hard_filtered_pool_size: int
+    applicability: ScenarioDimensionApplicabilityDecision
+    binding_decision: ScenarioBindingDecision
     locked_atom_ids: tuple[str, ...] = ()
     resolution_status_before: str = "PENDING"
     generation_status: str = "CANDIDATES_AVAILABLE"
     reason: str = ""
-    search_truncated: bool = False
+    shortlist_truncated: bool = False
 
     def __post_init__(self) -> None:
         ids = [item.atom_id for item in self.candidates]
@@ -122,6 +202,9 @@ class ScenarioSynthesisInput:
     method_contract_hash: str
     dimension_candidate_sets: tuple[ScenarioAtomCandidateSet, ...]
     semantic_group_id: str
+    structured_semantic_query: dict[str, Any]
+    coverage_plan: ScenarioCoveragePlan
+    fm_scenario_template: dict[str, Any] = field(default_factory=dict)
     contract_version: str = SCENARIO_SYNTHESIS_CONTRACT_VERSION
 
     def __post_init__(self) -> None:
@@ -131,18 +214,6 @@ class ScenarioSynthesisInput:
         dimensions = [item.dimension for item in self.dimension_candidate_sets]
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("ScenarioSynthesisInput dimensions must be unique")
-
-    def to_dict(self) -> dict[str, Any]:
-        return _serialize(asdict(self))
-
-
-@dataclass(frozen=True)
-class ScenarioCombinationCandidate:
-    combination_id: str
-    selected_atoms: dict[str, tuple[str, ...]]
-    semantic_score: float
-    validation_status: SynthesisValidationStatus
-    validation_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(asdict(self))
@@ -184,7 +255,6 @@ class AnalyticalScenarioInstantiation:
 @dataclass(frozen=True)
 class ScenarioSynthesisResult:
     synthesis_input: ScenarioSynthesisInput
-    combinations: tuple[ScenarioCombinationCandidate, ...]
     assessments: tuple[ScenarioSynthesisAssessment, ...]
     instantiations: tuple[AnalyticalScenarioInstantiation, ...]
     status: ScenarioSynthesisStatus
@@ -220,9 +290,12 @@ class AnalyticalPhysicalInput:
 __all__ = [
     "SCENARIO_SYNTHESIS_CONTRACT_VERSION", "CandidateOrigin",
     "SynthesisValidationStatus", "ScenarioSynthesisStatus", "CoverageLabel",
-    "PhysicalValueAuthority", "ScenarioDimensionCandidate",
+    "ScenarioBindingAuthority", "ScenarioDimensionApplicability",
+    "PhysicalValueAuthority", "ScenarioBindingDecision",
+    "ScenarioDimensionApplicabilityDecision", "ScenarioCoveragePlan",
+    "ScenarioDimensionCandidate",
     "ScenarioAtomCandidateSet", "ScenarioSynthesisInput",
-    "ScenarioCombinationCandidate", "ScenarioSynthesisAssessment",
+    "ScenarioSynthesisAssessment",
     "AnalyticalScenarioInstantiation", "ScenarioSynthesisResult",
     "AnalyticalPhysicalInput",
 ]

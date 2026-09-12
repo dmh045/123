@@ -243,6 +243,21 @@ class ExposureInputReadinessService:
         for dimension, binding in bindings.items():
             if self._is_resolved(binding):
                 continue
+            if str(binding.get("applicability_status", "")).upper() == "NOT_APPLICABLE":
+                unresolved_irrelevant.append(dimension)
+                dimensions.append({
+                    "dimension": dimension,
+                    "project_value": str(binding.get("project_value", "")),
+                    "resolution_status": str(binding.get("resolution_status", "NOT_APPLICABLE")),
+                    "binding_status": str(binding.get("binding_status", "NOT_APPLICABLE")),
+                    "unresolved_reason": str(binding.get("applicability_reason", "")),
+                    "candidate_atom_ids": [],
+                    "candidate_atom_count": 0,
+                    "could_change_exposure": False,
+                    "change_witnesses": [],
+                    "applicability_status": "NOT_APPLICABLE",
+                })
+                continue
             candidate_ids = self._candidate_ids(dimension, binding)
             explicit_ambiguous = (
                 self._contains(binding, "AMBIGUOUS")

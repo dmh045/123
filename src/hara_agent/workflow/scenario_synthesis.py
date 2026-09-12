@@ -20,7 +20,9 @@ from hara_agent.services.analysis import (
     AnalyticalPhysicsInstantiationService, ConstrainedScenarioSynthesisService,
     ExposureInputReadinessService, RiskExecutionTraceService,
 )
-from hara_agent.services.reporting import OfflineReportRebuilder
+from hara_agent.services.reporting import (
+    OfflineReportRebuilder, ScenarioSelectorQualityAudit,
+)
 from hara_agent.services.semantic.scenario_synthesis_agent import (
     BoundedScenarioSynthesisAgent,
 )
@@ -147,10 +149,12 @@ class ScenarioSynthesisRunner:
             for item in synthesis_input.dimension_candidate_sets:
                 if item.resolution_status_before.upper() == "RESOLVED":
                     before[item.dimension] += 1
-        combinations = {
-            item.semantic_group_id: self.synthesis.bounded_combinations(item)
-            for item in inputs
-        }
+        shortlist_truncation_by_dimension = Counter(
+            candidate_set.dimension
+            for synthesis_input in inputs
+            for candidate_set in synthesis_input.dimension_candidate_sets
+            if candidate_set.shortlist_truncated
+        )
         stats = {
             "eligible_parent_he": len(assessments),
             "unique_parent_scenarios": len({item.parent_scenario_id for item in inputs}),
@@ -167,14 +171,19 @@ class ScenarioSynthesisRunner:
                 len(item.candidates) for synthesis_input in inputs
                 for item in synthesis_input.dimension_candidate_sets
             ),
-            "candidate_search_truncated": sum(
-                any(item.search_truncated for item in synthesis_input.dimension_candidate_sets)
-                or any(
-                    "CANDIDATE_SEARCH_TRUNCATED" in combination.validation_reasons
-                    for combination in combinations[synthesis_input.semantic_group_id]
-                )
+            "hard_filtered_candidates_total": sum(
+                item.hard_filtered_pool_size for synthesis_input in inputs
+                for item in synthesis_input.dimension_candidate_sets
+            ),
+            "dimension_shortlist_truncated_groups": sum(
+                any(item.shortlist_truncated for item in synthesis_input.dimension_candidate_sets)
                 for synthesis_input in inputs
             ),
+            "dimension_shortlist_truncated_by_dimension": {
+                dimension: shortlist_truncation_by_dimension[dimension]
+                for dimension in self.synthesis.dimensions
+            },
+            "combination_beam_truncated_groups": 0,
         }
         denominator = max(1, len(inputs) * len(self.synthesis.dimensions))
         stats["average_catalog_candidates_per_dimension"] = round(
@@ -183,19 +192,25 @@ class ScenarioSynthesisRunner:
         stats["average_shortlist_candidates_per_dimension"] = round(
             stats["shortlisted_candidates_total"] / denominator, 3
         )
+        stats["average_hard_filtered_candidates_per_dimension"] = round(
+            stats["hard_filtered_candidates_total"] / denominator, 3
+        )
         stats["max_shortlist_candidates_per_dimension"] = max((
             len(item.candidates) for synthesis_input in inputs
             for item in synthesis_input.dimension_candidate_sets
         ), default=0)
-        stats["bounded_combination_count"] = sum(map(len, combinations.values()))
-        return inputs, scenarios, malfunctions, assessments, {
-            "stats": stats, "combinations": combinations,
-        }
+        return inputs, scenarios, malfunctions, assessments, {"stats": stats}
 
     @staticmethod
     def _provider_ready(synthesis_input: Any) -> bool:
         return all(
-            item.candidates or item.dimension in ConstrainedScenarioSynthesisService.optional_dimensions
+            (
+                bool(item.candidates)
+                if item.applicability.status.value == "REQUIRED"
+                else not item.candidates
+                if item.applicability.status.value == "NOT_APPLICABLE"
+                else True
+            )
             for item in synthesis_input.dimension_candidate_sets
         )
 
@@ -456,7 +471,6 @@ class ScenarioSynthesisRunner:
             "artifact_version": "scenario-synthesis-candidates-v1",
             "bounds": {
                 "candidate_cap_per_dimension": ConstrainedScenarioSynthesisService.candidate_cap_per_dimension,
-                "combination_cap": ConstrainedScenarioSynthesisService.combination_cap,
             },
             "semantic_ranking_inputs_exclude": ["e_z", "e_f", "E_total", "S", "C", "ASIL"],
             "groups": [{
@@ -464,10 +478,14 @@ class ScenarioSynthesisRunner:
                 "malfunction_id": item.malfunction_id,
                 "parent_scenario_id": item.parent_scenario_id,
                 "hazardous_event_id": item.hazardous_event_id,
+                "structured_semantic_query": item.structured_semantic_query,
+                "dimension_applicability": {
+                    value.dimension: value.applicability.to_dict()
+                    for value in item.dimension_candidate_sets
+                },
+                "coverage_plan": item.coverage_plan.to_dict(),
+                "fm_scenario_template": item.fm_scenario_template,
                 "candidate_sets": [value.to_dict() for value in item.dimension_candidate_sets],
-                "bounded_combinations": [
-                    value.to_dict() for value in preparation["combinations"][item.semantic_group_id]
-                ],
             } for item in inputs],
             "summary": preparation["stats"],
         }
@@ -486,7 +504,8 @@ class ScenarioSynthesisRunner:
             f"- Analytical children generated: {summary.get('analytical_children_generated', 0)}",
             f"- Method-valid: {summary.get('method_valid', 0)}",
             f"- Pending synthesis: {summary.get('pending_synthesis', 0)}",
-            f"- Candidate search truncated groups: {summary['candidate_search_truncated']}",
+            f"- Dimension shortlist truncated groups: {summary['dimension_shortlist_truncated_groups']}",
+            f"- Combination beam truncated groups: {summary['combination_beam_truncated_groups']}",
             "", "## Dimension resolution", "",
             "| Dimension | Before | After |", "|---|---:|---:|",
         ]
@@ -517,12 +536,22 @@ class ScenarioSynthesisRunner:
         provider_trace_path = review_dir / "scenario_synthesis_provider_trace.json"
         candidate_payload = self._candidate_artifact(inputs, preparation)
         _write_json(review_dir / "scenario_synthesis_candidates.json", candidate_payload)
+        selector_auditor = ScenarioSelectorQualityAudit()
+        selector_quality = selector_auditor.build(inputs)
+        _write_json(review_dir / "scenario_selector_quality_audit.json", selector_quality)
+        _write_text(
+            review_dir / "scenario_selector_quality_audit.md",
+            selector_auditor.markdown(selector_quality),
+        )
 
         provider_ready = [item for item in inputs if self._provider_ready(item)]
         deterministic_resolved = [
             item for item in inputs
-            if all(value.locked_atom_ids or value.dimension in self.synthesis.optional_dimensions
-                   for value in item.dimension_candidate_sets)
+            if all(
+                value.locked_atom_ids
+                or value.applicability.status.value == "NOT_APPLICABLE"
+                for value in item.dimension_candidate_sets
+            )
         ]
         preparation["stats"].update({
             "raw_eligible_records": len(inputs),
@@ -600,7 +629,7 @@ class ScenarioSynthesisRunner:
                                 call.get("resolved_model", "") for call in reversed(trace.get("calls", []))
                                 if call.get("resolved_model")
                             ), ""),
-                            "prompt_version": "p5-d-scenario-synthesis-v1",
+                            "prompt_version": "p5-d2-scenario-synthesis-v2",
                             "rationale": assessment.semantic_rationale,
                             "context_refs": list(assessment.context_refs),
                         },
@@ -833,6 +862,19 @@ class ScenarioSynthesisRunner:
         audit_payload["parent_artifacts_mutated"] = parent_inventory_before != parent_inventory_after
         _write_json(review_dir / "scenario_synthesis_audit.json", audit_payload)
         _write_text(review_dir / "scenario_synthesis_audit.md", self._audit_markdown(audit_payload))
+        selector_quality = selector_auditor.build(
+            inputs,
+            assessments_by_group={
+                group_id: value[0] for group_id, value in selections.items()
+            },
+            children=children,
+            mode=("REALIZED_SELECTION" if full_started else "OFFLINE_CANDIDATE_PLAN"),
+        )
+        _write_json(review_dir / "scenario_selector_quality_audit.json", selector_quality)
+        _write_text(
+            review_dir / "scenario_selector_quality_audit.md",
+            selector_auditor.markdown(selector_quality),
+        )
 
         result = {
             "source_run_id": source_run_id, "target_run_id": target_run_id,

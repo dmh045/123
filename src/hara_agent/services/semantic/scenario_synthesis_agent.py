@@ -11,7 +11,7 @@ from hara_agent.services.analysis.scenario_synthesis_service import (
 )
 
 
-SCENARIO_SYNTHESIS_PROMPT_VERSION = "p5-d-scenario-synthesis-v1"
+SCENARIO_SYNTHESIS_PROMPT_VERSION = "p5-d2-scenario-synthesis-v2"
 
 
 class BoundedScenarioSynthesisAgent:
@@ -20,11 +20,11 @@ class BoundedScenarioSynthesisAgent:
     system_prompt = """You perform bounded semantic selection for a HARA analytical Scenario.
 You are not an engineering-rule authority. Select only atom IDs supplied in each dimension's candidate set.
 Never invent IDs, context references, project facts, numeric physics values, source status, S/E/C, ASIL, or Exposure ratings.
-Existing locked atoms must be returned unchanged. A compound atom must be returned in every dimension it explicitly fills and must not conflict with another atom in those dimensions.
-Choose one source-compatible atom for WHERE, ROAD, EGO_ACTION, EGO_DYNAMICS, and OBJECT. EGO_X_ROAD or TRAFFIC_PATTERN may be [] only when the supplied context does not support one of the supplied candidates.
+Preserve only bindings marked non-refinable; refinable parent bindings may be replaced only by supplied compatible candidates. A compound atom must be returned in every dimension it explicitly fills and must not conflict with another atom in those dimensions.
+Obey each supplied dimension applicability decision: REQUIRED means exactly one supplied atom, NOT_APPLICABLE means [], and OPTIONAL means zero or one supplied atom.
 Every selected_atoms value must be a JSON array: use ["ATOM_ID"] for one atom and [] for an allowed empty dimension. Never return a bare atom-ID string.
-Coverage labels typical/boundary/extreme describe semantic diversity only; never optimize risk or Exposure.
-Return one to three genuinely different variants. Prefer one when the supplied evidence supports only one.
+Implement the supplied Scenario Coverage Plan exactly. Typical is the representative mechanism case; boundary is near a relevant project/Method/interaction boundary; extreme is more demanding but still project-valid. Never optimize risk, Exposure, S, E, C, or ASIL.
+Sibling variants must differ on a primary variation dimension when more than one is requested; environment-only variation is invalid unless the Coverage Plan marks that environment dimension primary.
 Return raw JSON matching the schema exactly, without Markdown."""
 
     def __init__(
@@ -42,9 +42,12 @@ Return raw JSON matching the schema exactly, without Markdown."""
             item_schema: dict[str, Any] = {"type": "string"}
             if ids:
                 item_schema["enum"] = ids
+            applicability = candidate_set.applicability.status.value
+            minimum = 1 if applicability == "REQUIRED" else 0
+            maximum = 0 if applicability == "NOT_APPLICABLE" else 1
             properties[candidate_set.dimension] = {
                 "type": "array", "items": item_schema,
-                "minItems": 0, "maxItems": 1, "uniqueItems": True,
+                "minItems": minimum, "maxItems": maximum, "uniqueItems": True,
             }
             required.append(candidate_set.dimension)
         return {
@@ -53,7 +56,9 @@ Return raw JSON matching the schema exactly, without Markdown."""
             "required": ["variants"],
             "properties": {
                 "variants": {
-                    "type": "array", "minItems": 1, "maxItems": 3,
+                    "type": "array",
+                    "minItems": synthesis_input.coverage_plan.desired_variant_count,
+                    "maxItems": synthesis_input.coverage_plan.desired_variant_count,
                     "items": {
                         "type": "object", "additionalProperties": False,
                         "required": [
@@ -63,7 +68,10 @@ Return raw JSON matching the schema exactly, without Markdown."""
                         "properties": {
                             "coverage_label": {
                                 "type": "string",
-                                "enum": ["typical", "boundary", "extreme"],
+                                "enum": [
+                                    str(item["coverage_label"])
+                                    for item in synthesis_input.coverage_plan.variant_intents
+                                ],
                             },
                             "selected_atoms": {
                                 "type": "object", "additionalProperties": False,
@@ -99,6 +107,11 @@ Return raw JSON matching the schema exactly, without Markdown."""
             candidate_sets[item.dimension] = {
                 "locked_atom_ids": list(item.locked_atom_ids),
                 "generation_status": item.generation_status,
+                "applicability": item.applicability.to_dict(),
+                "binding_decision": item.binding_decision.to_dict(),
+                "catalog_size": item.catalog_size,
+                "hard_filtered_pool_size": item.hard_filtered_pool_size,
+                "shortlist_truncated": item.shortlist_truncated,
                 "candidates": [{
                     "atom_id": candidate.atom_id,
                     "canonical_atom_id": candidate.canonical_atom_id,
@@ -109,6 +122,12 @@ Return raw JSON matching the schema exactly, without Markdown."""
                     "source_asset": candidate.source_asset,
                     "source_rule": candidate.source_rule,
                     "supporting_context_refs": list(candidate.supporting_context_refs),
+                    "candidate_origin": candidate.candidate_origin.value,
+                    "selection_reason": candidate.selection_reason,
+                    "binding_authority": candidate.binding_authority,
+                    "compact_physical_semantics": candidate.method_semantics,
+                    "ranking_scores": candidate.ranking_scores,
+                    "template_relationship": candidate.template_relationship,
                 } for candidate in item.candidates],
             }
         return {
@@ -143,6 +162,13 @@ Return raw JSON matching the schema exactly, without Markdown."""
                 },
             },
             "project_odd": synthesis_input.project_context,
+            "structured_semantic_query": synthesis_input.structured_semantic_query,
+            "dimension_applicability": {
+                item.dimension: item.applicability.to_dict()
+                for item in synthesis_input.dimension_candidate_sets
+            },
+            "scenario_coverage_plan": synthesis_input.coverage_plan.to_dict(),
+            "fm_scenario_template": synthesis_input.fm_scenario_template,
             "candidate_sets": candidate_sets,
             "required_output_contract": {
                 "top_level_keys_exactly": ["variants"],
@@ -150,7 +176,11 @@ Return raw JSON matching the schema exactly, without Markdown."""
                     "coverage_label", "selected_atoms",
                     "semantic_rationale", "context_refs",
                 ],
-                "coverage_label_enum": ["typical", "boundary", "extreme"],
+                "coverage_label_enum": [
+                    str(item["coverage_label"])
+                    for item in synthesis_input.coverage_plan.variant_intents
+                ],
+                "variant_count": synthesis_input.coverage_plan.desired_variant_count,
                 "selected_atoms_keys_exactly": [
                     item.dimension for item in synthesis_input.dimension_candidate_sets
                 ],
@@ -168,9 +198,11 @@ Return raw JSON matching the schema exactly, without Markdown."""
             },
             "explicit_constraints": [
                 "IDs must be present in the corresponding candidate set",
-                "locked atoms must remain unchanged",
+                "non-refinable locked atoms must remain unchanged",
+                "dimension applicability is deterministic and cannot be changed",
+                "variants must satisfy the supplied primary variation dimensions",
                 "compound atoms must be repeated across every filled dimension",
-                "do not choose by S/E/C or Exposure rating",
+                "do not choose by S/E/C/ASIL or Exposure rating",
                 "do not output numeric physics assumptions",
             ],
         }
