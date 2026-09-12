@@ -135,14 +135,17 @@ def test_structured_exposure_missing_atom_is_pending_input():
     scenario["scenario_atom_ids"] = []
     scored = service.score(scenario, "hazard")
     assert scored["exposure"]["calculation_status"] == CalculationStatus.PENDING_INPUT.value
-    assert scored["exposure"]["executor_invoked"] is True
-    assert scored["exposure"]["pending_reason"] == "MISSING_SCENARIO_ATOMS"
+    assert scored["exposure"]["executor_invoked"] is False
+    assert scored["exposure"]["pending_reason"] == "EXPOSURE_ATOM_BINDING_INCOMPLETE"
 
 
 def test_pending_coverage_is_diagnostic_only_for_fusa_v1(monkeypatch):
     service = _service()
     scenario = _scenario(service, 20.0)
     scenario["scenario_atom_ids"] = ["FA001"]
+    # Coverage stays diagnostic for fusa_v1.  This fixture deliberately has
+    # no asserted Scenario-dimension binding; it is not a partial binding.
+    scenario["method_scenario_dimensions"] = {}
     scenario["_exposure_dimension_coverage_decision"] = (
         ExposureDimensionCoverageService(service.method).decide(
             assessment_key="MF-1::SC-1", function=None, operating_mode="Active",

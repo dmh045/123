@@ -327,7 +327,19 @@ class ExposureMethodExecutor:
             **values,
         }
 
+    def preview(self, scenario: dict, method: ExposureMethod) -> dict:
+        """Evaluate with the production FUSA implementation for input analysis.
+
+        Callers that need to establish whether a prospective, source-defined
+        atom could change a result must use this entry point rather than copy
+        any aggregation branch.  ``lookup`` remains the scoring entry point.
+        """
+        return self._evaluate(scenario, method)
+
     def lookup(self, scenario: dict, method: ExposureMethod) -> dict:
+        return self._evaluate(scenario, method)
+
+    def _evaluate(self, scenario: dict, method: ExposureMethod) -> dict:
         category = str(scenario.get("component_category", "")).strip()
         matches = [rule for rule in method.domain_rules if category in rule.component_categories]
         if len(matches) != 1:

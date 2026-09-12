@@ -91,3 +91,23 @@ def test_projection_preserves_a_resolved_potential_harm_without_recomputing_it()
     state = _state(potential_harm="人员受伤")
     view = HARAReportProjectionService(load_report_schema()).project(state, _method())
     assert view.rows[0].potential_harm == "人员受伤"
+
+
+def test_exposure_rationale_is_trace_derived_for_finalized_evidence():
+    rationale = EngineeringReportTextMapper().exposure_rationale(
+        EvidenceValue("E3", ReviewStatus.FINALIZED, rule_version="test"),
+        {
+            "requested_domain": "Z", "domain": "Z", "result": "E3",
+            "atom_bindings": [
+                {"atom_id": "FA001", "E_class": "E4", "used": True},
+                {"atom_id": "PH005", "E_class": "E3", "used": True},
+            ],
+            "dependency_coupling": {"policy_branch": "e3_e4_mix"},
+        },
+    )
+    assert "请求 Z 域" in rationale
+    assert "FA001=E4" in rationale
+    assert "PH005=E3" in rationale
+    assert "FUSA v1" in rationale
+    assert "最终 E3" in rationale
+    assert rationale != "已按当前方法完成 E 评定。"

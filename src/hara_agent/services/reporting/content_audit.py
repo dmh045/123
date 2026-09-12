@@ -13,7 +13,7 @@ _MACHINE_REASON_TOKENS = (
     "NO_ITEM_FACT", "NO_EXPLICIT_METHOD_ALIAS", "AMBIGUOUS_BINDING", "RANGE_CONTAINMENT",
     "NOT_EVALUATED",
 )
-_DEBUG_TOKENS = ("candidate_atom_ids", "FA001", "rule_id", "binding_status")
+_DEBUG_TOKENS = ("candidate_atom_ids", "rule_id", "binding_status")
 _RATIONAL_FIELDS = (
     "severity_rationale", "exposure_rationale", "controllability_rationale",
     "asil_rationale", "ftti_rationale",

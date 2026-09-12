@@ -21,6 +21,7 @@ from hara_agent.services.analysis import (
     ConfirmedYamlUtilizationService, FMSelectorSemanticAuditService,
     ExposureBindingAuditService,
     ExposureDimensionCoverageAuditService,
+    ExposureInputAuditService,
     FMTemplateAmbiguityAuditService,
     HazardousEventRiskContextService,
     RiskContextSourceCoverageAuditService,
@@ -57,6 +58,21 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     ) as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
+        temporary = Path(stream.name)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _write_text_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+        prefix=f".{path.stem}-", suffix=".tmp", delete=False,
+    ) as stream:
+        stream.write(value)
         temporary = Path(stream.name)
     try:
         os.replace(temporary, path)
@@ -224,6 +240,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--report-template", type=Path,
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
+    exposure_input_audit = subparsers.add_parser(
+        "exposure-input-audit",
+        help="Audit committed FUSA Exposure inputs and input readiness without a Provider",
+    )
+    exposure_input_audit.add_argument("--baseline", required=True, type=Path)
+    exposure_input_audit.add_argument("--review-run-id", required=True)
+    exposure_input_audit.add_argument("--checkpoint", type=Path)
+    exposure_input_audit.add_argument("--review-root", type=Path, default=Path("runtime/review"))
+    exposure_input_audit.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
+    exposure_input_audit.add_argument(
+        "--report-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    exposure_root_cause = subparsers.add_parser(
+        "exposure-root-cause-report",
+        help="Render the Exposure E4 root-cause report from audit and offline-rescore artifacts",
+    )
+    exposure_root_cause.add_argument("--audit", required=True, type=Path)
+    exposure_root_cause.add_argument("--rescore-trace", required=True, type=Path)
+    exposure_root_cause.add_argument("--output", required=True, type=Path)
     severity_delta_v_audit = subparsers.add_parser(
         "severity-delta-v-semantic-audit",
         help="Audit Severity DELTA_V semantic authority and input readiness without scoring S",
@@ -333,6 +369,52 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     load_local_env()
     args = build_parser().parse_args(argv)
+    if args.command == "exposure-input-audit":
+        checkpoint_path = args.checkpoint or (
+            args.run_dir / f"{args.review_run_id}.checkpoint.json"
+        )
+        trace_path = args.review_root / args.review_run_id / "risk_execution_trace.json"
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        if not trace_path.is_file():
+            raise FileNotFoundError(f"Risk execution trace not found: {trace_path}")
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_template,
+        )
+        payload = ExposureInputAuditService(resolution.method).generate(
+            checkpoint=json.loads(checkpoint_path.read_text(encoding="utf-8")),
+            trace=json.loads(trace_path.read_text(encoding="utf-8")),
+        )
+        writer = ReviewArtifactWriter(args.review_run_id, args.review_root)
+        writer.write_exposure_input_audit(payload)
+        markdown_path = args.review_root / args.review_run_id / "exposure_input_audit.md"
+        _write_text_atomic(markdown_path, ExposureInputAuditService.render_markdown(payload))
+        print(json.dumps({
+            "run_id": args.review_run_id,
+            "eligible_records": payload["eligible_records"],
+            "audit_artifact": str(args.review_root / args.review_run_id / "exposure_input_audit.json"),
+            "markdown_artifact": str(markdown_path),
+            "diagnosis": payload["diagnosis"],
+            "readiness": payload["summary"]["readiness"],
+            "provider_calls": 0,
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "exposure-root-cause-report":
+        payload = json.loads(args.audit.read_text(encoding="utf-8"))
+        trace = json.loads(args.rescore_trace.read_text(encoding="utf-8"))
+        _write_text_atomic(
+            args.output,
+            ExposureInputAuditService.render_root_cause_report(
+                payload, post_rescore_trace=trace,
+            ),
+        )
+        print(json.dumps({
+            "output": str(args.output),
+            "post_rescore_exposure_distribution": ExposureInputAuditService._post_distribution(trace),
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "rescore-risk":
         from hara_agent.workflow.risk_rescoring import OfflineRiskRescorer
 

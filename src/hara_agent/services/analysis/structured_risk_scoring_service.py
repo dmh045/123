@@ -13,6 +13,9 @@ from .deterministic_risk_executor import (
 )
 from .risk_calculation_input_service import RiskCalculationInputService
 from .exposure_dimension_coverage_service import ExposureDimensionCoverageService
+from .exposure_input_readiness_service import (
+    ExposureInputReadinessService, READY_STATUSES,
+)
 from .severity_delta_v_semantic_audit_service import SeverityDeltaVSemanticAuditService
 
 
@@ -29,6 +32,7 @@ class StructuredRiskScoringService:
         self.severity_authority = SeverityDeltaVSemanticAuditService(method)
         self.severity = SeverityMethodExecutor()
         self.exposure = ExposureMethodExecutor()
+        self.exposure_readiness = ExposureInputReadinessService(method, self.exposure)
         self.controllability = StructuredControllabilityExecutor()
 
     def _result(
@@ -232,6 +236,45 @@ class StructuredRiskScoringService:
                 "controllability": controllability,
             }
 
+        readiness = self.exposure_readiness.assess(scenario)
+        if readiness["status"] not in READY_STATUSES:
+            source = self.structured.exposure.source_refs[0]
+            preview = readiness["baseline_exposure"]
+            exposure = self._result(
+                value_key="exposure_score", value="",
+                status=CalculationStatus.PENDING_INPUT,
+                reason=readiness["reason_code"], rule_id="", source_ref=source,
+                inputs_used=("component_category", "scenario_atom_ids"),
+                exposure_method=preview["actual_domain"],
+                coverage_status=coverage_decision.coverage_status.value,
+                coverage_rule_ids=list(coverage_decision.coverage_rule_ids),
+                coverage_granularity=coverage_decision.granularity,
+                coverage_gate_applied=False,
+                executor_invoked=False,
+                exposure_result="",
+                requested_domain=preview["requested_domain"],
+                actual_domain=preview["actual_domain"],
+                dimension_fallback=bool(preview["dimension_fallback"]),
+                atom_details=list(preview["atom_details"]), aggregation_rule="",
+                coupling_consumed=False, coupling="",
+                pending_reason=readiness["reason_code"],
+                exposure_input_readiness=readiness,
+            )
+            c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
+            c = self.controllability.lookup(c_input, self.structured)
+            controllability = self._result(
+                value_key="controllability_score", value=c.value, status=c.status,
+                reason=c.reason, rule_id=c.rule_id,
+                source_ref=self.structured.controllability_profile.source_ref,
+                inputs_used=c.inputs_used, selected_profile_id=c.profile_id,
+                **self._controllability_extra(c),
+            )
+            return {
+                "severity": severity,
+                "exposure": exposure,
+                "controllability": controllability,
+            }
+
         e = self.exposure.lookup(scenario, self.structured.exposure)
         exposure = self._result(
             value_key="exposure_score", value=e["value"], status=e["status"],
@@ -251,6 +294,7 @@ class StructuredRiskScoringService:
             coupling_consumed=bool(e.get("coupling_consumed", False)),
             coupling=e.get("coupling", ""),
             pending_reason=e.get("pending_reason", ""),
+            exposure_input_readiness=readiness,
         )
         c_input = self.inputs.controllability(malfunction_id, scenario_id, scenario)
         c = self.controllability.lookup(c_input, self.structured)

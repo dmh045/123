@@ -195,6 +195,13 @@ class RiskExecutionTraceService:
             "coverage_rule_ids": list(result.get("coverage_rule_ids", [])),
             "coverage_granularity": result.get("coverage_granularity", ""),
             "coverage_gate_applied": bool(result.get("coverage_gate_applied", False)),
+            "input_readiness": dict(result.get("exposure_input_readiness", {})),
+            "readiness_status": str(
+                result.get("exposure_input_readiness", {}).get("status", "")
+            ) if isinstance(result.get("exposure_input_readiness", {}), dict) else "",
+            "readiness_reason": str(
+                result.get("exposure_input_readiness", {}).get("reason_code", "")
+            ) if isinstance(result.get("exposure_input_readiness", {}), dict) else "",
             "missing_method_semantics": result.get("missing_method_semantics", ""),
             "component_category": scenario.get("component_category", ""),
             "dimensions": sorted(dimensions), "scenario_terms": scenario.get("method_scenario_dimensions", {}),

@@ -411,6 +411,18 @@ class ReviewArtifactWriter:
         with self._lock:
             self._write_json_payload("exposure_binding_audit.json", value)
 
+    def write_exposure_input_audit(self, payload: dict[str, Any]) -> None:
+        """Write the committed-run Exposure input-completeness audit."""
+        if self._disabled:
+            return
+        value = _compact_review_value(payload)
+        if not isinstance(value, dict):
+            self._warn("exposure input audit is not a JSON object")
+            return
+        value.update({"run_id": self.run_id, "recorded_at": _now()})
+        with self._lock:
+            self._write_json_payload("exposure_input_audit.json", value)
+
     def write_exposure_dimension_coverage_audit(self, payload: dict[str, Any]) -> None:
         """Write a read-only audit of formal Exposure dimension authority."""
         if self._disabled:

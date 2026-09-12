@@ -164,7 +164,8 @@ def test_missing_relative_speed_and_atoms_remain_pending_inputs():
     assert row["severity"]["status"] == "PENDING_INPUT"
     assert row["severity"]["pending_reason"] == "MISSING_RELATIVE_SPEED"
     assert row["exposure"]["status"] == "PENDING_INPUT"
-    assert row["exposure"]["pending_reason"] == "MISSING_SCENARIO_ATOMS"
+    assert row["exposure"]["pending_reason"] == "EXPOSURE_ATOM_BINDING_INCOMPLETE"
+    assert row["exposure"]["readiness_status"] == "PENDING_ATOM_BINDING"
 
 
 def test_unresolved_unknown_policy_trace_does_not_project_a_block_policy():
@@ -190,6 +191,7 @@ def test_pending_coverage_trace_records_native_fusa_execution():
     method = _method()
     facts = _scoring_facts(method)
     facts["scenario_atom_ids"] = ["FA001"]
+    facts["method_scenario_dimensions"] = {}
     facts["_exposure_dimension_coverage_decision"] = (
         ExposureDimensionCoverageService(method).decide(
             assessment_key="MF-1::SC-1", function=None, operating_mode="Active",
