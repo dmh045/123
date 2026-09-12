@@ -63,6 +63,7 @@ class ScenarioFeasibilityAgent:
 
     PROMPT_VERSION = "scenario-feasibility-v13"
     ALLOWED_RISK_DIMENSIONS = frozenset(RISK_DIMENSION_VALUES)
+    MAX_PROVIDER_OUTPUT_TOKENS = 16384
     SYSTEM_PROMPT = """ROLE
 你是汽车功能安全HARA工程因果相关性分类器，不是事故故事生成器。输入候选已通过确定性ODD过滤。你的任务是独立判断给定Malfunction在每个明确Scenario中，是否存在由已提供工程事实支持的可信因果链；不是先假设每个Scenario都有危险再寻找解释。负面结论是正常且预期的输出，不得按固定数量保留场景，也不得为了提高覆盖率强行生成Hazard。
 
@@ -153,6 +154,15 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
             max_split_depth if max_split_depth is not None
             else getattr(config, "scenario_max_split_depth", 8)
         )
+        self.provider_max_tokens = self._provider_max_tokens()
+
+    def _provider_max_tokens(self) -> int:
+        configured = int(getattr(
+            getattr(self.client, "config", None), "max_tokens", 32768,
+        ))
+        if configured <= 0:
+            raise ValueError("scenario provider max_tokens must be greater than 0")
+        return min(configured, self.MAX_PROVIDER_OUTPUT_TOKENS)
 
     def assess(self, malfunction: MalfunctionCandidate,
                scenarios: list[ScenarioCandidate],
@@ -365,12 +375,21 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
             malfunction, scenarios, project_registry, stats,
         )
         input_chars = len(self.system_prompt + self.MACHINE_OUTPUT_RULE) + len(user_prompt)
-        if input_chars > self.batch_max_chars:
+        if input_chars > self.batch_max_chars and len(scenarios) > 1:
             raise ScenarioBatchSizeError(
                 "Scenario child batch超过请求预算且已在Provider调用前阻断: "
                 f"malfunction_id={malfunction.malfunction_id} batch={parent_batch} "
                 f"split_path={split_path} estimated_chars={input_chars} "
                 f"max_chars={self.batch_max_chars}"
+            )
+        if input_chars > self.batch_max_chars:
+            print(
+                "[HARA] scenario singleton exceeds batch target "
+                f"malfunction={malfunction.malfunction_id} batch={parent_batch} "
+                f"scenario_id={scenarios[0].scenario_id} "
+                f"input_chars={input_chars} target_chars={self.batch_max_chars}",
+                file=sys.stderr,
+                flush=True,
             )
         print(
             "[HARA] scenario batch start "
@@ -395,7 +414,7 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
                 "assessment_contract_version": self.assessment_contract_version,
                 "provider_response_constraint": "NONE",
             },
-            max_tokens=8192,
+            max_tokens=self.provider_max_tokens,
         )
         batch_started = time.monotonic()
         stats["actual_llm_calls"] += 1
@@ -606,7 +625,7 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
                 "item_contract_repair": True,
                 "item_contract_repair_attempt": 1,
             },
-            max_tokens=8192,
+            max_tokens=self.provider_max_tokens,
         )
         repair_started = time.monotonic()
         stats["actual_llm_calls"] += 1

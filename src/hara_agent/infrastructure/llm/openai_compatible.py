@@ -328,6 +328,7 @@ class OpenAICompatibleClient:
     def _is_extraction_task(task: str) -> bool:
         return (
             task == "extract_core_item_artifacts"
+            or task.startswith("repair_core_item_artifact")
             or task.startswith("supplement_")
             or task.startswith("extract_targeted_project_facts:")
         )

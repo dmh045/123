@@ -41,6 +41,23 @@ class ItemArtifactExtractionAgent:
         self.validator = validator or FunctionValidator()
 
     @staticmethod
+    def _without_source_references(value: Any) -> Any:
+        """Keep a source-only repair from changing extracted engineering facts."""
+
+        if isinstance(value, dict):
+            return {
+                key: ItemArtifactExtractionAgent._without_source_references(item)
+                for key, item in value.items()
+                if key not in {"source_location", "source_excerpt"}
+            }
+        if isinstance(value, list):
+            return [
+                ItemArtifactExtractionAgent._without_source_references(item)
+                for item in value
+            ]
+        return value
+
+    @staticmethod
     def _excerpt_is_present(excerpt: str, document_text: str) -> bool:
         """Match source text across harmless DOCX/JSON formatting changes only.
 
@@ -545,19 +562,78 @@ class ItemArtifactExtractionAgent:
             response = schema_repair_response
             schema_repair_count = 1
 
-        item_raw = normalized_data["item_definition"]
-        function_raw = normalized_data["functions"]
+        def parse_entities(payload: dict[str, Any]):
+            facts_value, warnings_value = ItemDefinitionNormalizer._parse_with_warnings(
+                payload["item_definition"], source_id
+            )
+            functions_value = [
+                FunctionNormalizer._parse(item, source_id)
+                for item in payload["functions"]
+            ]
+            FunctionNormalizer._validate_unique(functions_value)
+            self.validator.ensure_valid(functions_value)
+            return facts_value, functions_value, warnings_value
 
-        facts, warnings = ItemDefinitionNormalizer._parse_with_warnings(
-            item_raw, source_id
-        )
-        functions = [FunctionNormalizer._parse(item, source_id) for item in function_raw]
-        FunctionNormalizer._validate_unique(functions)
-        self.validator.ensure_valid(functions)
-
-        source_reference_repairs = self._ensure_source_grounded(
-            facts, functions, document_text, source_blocks,
-        )
+        facts, functions, warnings = parse_entities(normalized_data)
+        source_reference_repair_response = None
+        source_reference_repair_count = 0
+        source_reference_repair_normalizations: list[dict[str, Any]] = []
+        try:
+            source_reference_repairs = self._ensure_source_grounded(
+                facts, functions, document_text, source_blocks,
+            )
+        except ValueError as error:
+            if "source excerpt is not present in Item Definition" not in str(error):
+                raise
+            print(
+                "[HARA] core item source-reference repair attempt=1/1",
+                file=sys.stderr,
+                flush=True,
+            )
+            source_repair_request = LLMRequest(
+                task="repair_core_item_artifact_sources",
+                system_prompt=(
+                    "You repair source_location and source_excerpt fields only. "
+                    "Preserve every other field, value, list order, identifier, confidence, "
+                    "and status exactly. Each source_excerpt must be a continuous, verbatim "
+                    "substring of the supplied Item Definition; do not paraphrase, abbreviate, "
+                    "join fragments, or use ellipses. Return exactly one raw JSON object "
+                    "matching CoreItemArtifacts."
+                ),
+                user_prompt=json.dumps({
+                    "source_validation_error": str(error),
+                    "invalid_payload": normalized_data,
+                    "item_definition_document": document_text,
+                }, ensure_ascii=False),
+                schema_name="CoreItemArtifacts",
+                prompt_version="item-artifacts-source-repair-v1",
+                metadata={
+                    "source_id": source_id,
+                    "strict_no_format_retry": True,
+                },
+                max_tokens=request.max_tokens,
+                response_schema=CORE_ITEM_ARTIFACTS_SCHEMA,
+            )
+            source_reference_repair_response = self.client.complete_json(source_repair_request)
+            llm_call_count += 1
+            if candidate_recorder is not None:
+                candidate_recorder(source_reference_repair_response)
+            repaired_data, source_reference_repair_normalizations = (
+                normalize_core_item_artifacts(source_reference_repair_response.data)
+            )
+            if (
+                self._without_source_references(repaired_data)
+                != self._without_source_references(normalized_data)
+            ):
+                raise ValueError(
+                    "source reference repair altered non-source Item Definition content"
+                )
+            facts, functions, warnings = parse_entities(repaired_data)
+            source_reference_repairs = self._ensure_source_grounded(
+                facts, functions, document_text, source_blocks,
+            )
+            response = source_reference_repair_response
+            source_reference_repair_count = 1
 
         # Provider labels are not approval authority.  The approved input plus
         # the deterministic schema/role/exact-source checks above are the gate.
@@ -584,6 +660,22 @@ class ItemArtifactExtractionAgent:
                 schema_repair_response.usage if schema_repair_response else {}
             ),
             "schema_repair_count": schema_repair_count,
+            "source_reference_repair_model": (
+                source_reference_repair_response.model
+                if source_reference_repair_response else ""
+            ),
+            "source_reference_repair_request_id": (
+                source_reference_repair_response.request_id
+                if source_reference_repair_response else ""
+            ),
+            "source_reference_repair_usage": (
+                source_reference_repair_response.usage
+                if source_reference_repair_response else {}
+            ),
+            "source_reference_repair_count": source_reference_repair_count,
+            "source_reference_repair_normalizations": (
+                source_reference_repair_normalizations
+            ),
             "contract_normalizations": contract_normalizations,
             "candidate_cache_hit": candidate_cache_hit,
             "function_count": len(functions),

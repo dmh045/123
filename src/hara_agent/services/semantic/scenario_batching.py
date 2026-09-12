@@ -161,7 +161,13 @@ def build_scenario_batches(
     project_registry: FactRegistry | None = None,
     causal_evidence_budget: int = DEFAULT_CAUSAL_EVIDENCE_BUDGET,
 ) -> list[list[ScenarioCandidate]]:
-    """Stable prompt-budget batching; every input appears exactly once."""
+    """Stable target-budget batching; every input appears exactly once.
+
+    ``max_chars`` limits batches containing more than one Scenario.  A single
+    Scenario cannot be split without changing its declared analysis instance,
+    so it is retained as a singleton for the provider to evaluate rather than
+    being silently omitted by a local batching heuristic.
+    """
     if max_chars <= 0:
         raise ValueError("scenario batch max_chars必须大于0")
     if max_items is not None and max_items <= 0:
@@ -177,12 +183,12 @@ def build_scenario_batches(
         ))
         single_chars = fixed_chars + serialized_chars
         if single_chars > max_chars:
-            raise ScenarioBatchSizeError(
-                "单个Scenario超过请求预算: "
-                f"malfunction_id={malfunction.malfunction_id} "
-                f"scenario_id={scenario.scenario_id} "
-                f"estimated_chars={single_chars} max_chars={max_chars}"
-            )
+            if current:
+                batches.append(current)
+                current = []
+                current_payload_chars = 0
+            batches.append([scenario])
+            continue
         next_payload_chars = current_payload_chars + serialized_chars + (1 if current else 0)
         exceeds_chars = fixed_chars + next_payload_chars > max_chars
         exceeds_items = max_items is not None and len(current) >= max_items

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections import deque
+from types import SimpleNamespace
 
 import pytest
 
 from hara_agent.infrastructure.llm import LLMJSONContractError, LLMResponse
 from hara_agent.models import MalfunctionCandidate, ScenarioCandidate
 from hara_agent.services.semantic import ScenarioFeasibilityAgent
+from hara_agent.services.semantic.scenario_batching import build_scenario_batches
 
 
 def _malfunction() -> MalfunctionCandidate:
@@ -24,6 +26,20 @@ def _scenarios() -> list[ScenarioCandidate]:
         )
         for item in ("A", "B", "C")
     ]
+
+
+def test_oversized_single_scenario_is_kept_as_a_singleton_batch():
+    scenario = ScenarioCandidate(
+        "SCN-LONG", "Parking", "object ahead", "explicit object",
+        {"object_position": "ahead"},
+        analysis_instance={"assumptions": ["x" * 1000]},
+    )
+
+    batches = build_scenario_batches(
+        _malfunction(), [scenario], max_chars=100, max_items=12,
+    )
+
+    assert batches == [[scenario]]
 
 
 def _negative(item: str) -> dict:
@@ -131,6 +147,19 @@ def test_all_valid_items_use_one_root_call():
     assert audit["adaptive_split_count"] == 0
     assert audit["item_repair_calls"] == 0
     assert audit["valid_initial_count"] == 3
+
+
+def test_scenario_request_uses_configured_budget_with_safety_cap():
+    client = _QueueClient([{
+        "assessments": [_negative(item) for item in ("A", "B", "C")]
+    }])
+    client.config = SimpleNamespace(max_tokens=32768)
+
+    ScenarioFeasibilityAgent(
+        client, batch_max_chars=50000, batch_max_items=12,
+    ).assess(_malfunction(), _scenarios())
+
+    assert client.requests[0].max_tokens == 16384
 
 
 def test_one_invalid_item_repairs_only_that_item():

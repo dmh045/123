@@ -126,7 +126,9 @@ def test_renderer_keeps_inapplicable_and_nonhazardous_guideword_rows_as_na():
     start_row = max(
         row for item in method.report_contract.hara_fields for row in item.header_rows
     ) + 1
-    workbook = load_workbook(output, read_only=True, data_only=False)
+    # Read-only worksheets may retain their package handle on Windows even
+    # after close(); this test deletes the workbook in its finally block.
+    workbook = load_workbook(output, read_only=False, data_only=False)
     try:
         sheet = workbook[method.report_contract.hara_fields[0].sheet]
         assert sheet.cell(start_row, mappings["guideword"]).value == "reverse"

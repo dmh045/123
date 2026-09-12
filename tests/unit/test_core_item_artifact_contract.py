@@ -157,6 +157,46 @@ def test_item_agent_repairs_unsafe_schema_once() -> None:
     assert audit["llm_call_count"] == 2
 
 
+def test_item_agent_repairs_ungrounded_sources_without_changing_content() -> None:
+    invalid = _payload()
+    invalid["functions"][0]["source_excerpt"] = "Control parking motion."
+    repaired = _payload()
+    client = _Client([invalid, repaired])
+    document = (
+        "AVP system definition.\n"
+        "Control vehicle motion in the parking area."
+    )
+
+    _, functions, audit = ItemArtifactExtractionAgent(client).extract(
+        document, "ItemDef.docx",
+    )
+
+    assert functions[0].description == "Control vehicle motion in the parking area."
+    assert [request.task for request in client.requests] == [
+        "extract_core_item_artifacts",
+        "repair_core_item_artifact_sources",
+    ]
+    assert audit["source_reference_repair_count"] == 1
+    assert audit["llm_call_count"] == 2
+
+
+def test_item_agent_rejects_source_repair_that_changes_content() -> None:
+    invalid = _payload()
+    invalid["functions"][0]["source_excerpt"] = "Control parking motion."
+    repaired = _payload()
+    repaired["functions"][0]["description"] = "Changed engineering content."
+    client = _Client([invalid, repaired])
+
+    with pytest.raises(
+        ValueError,
+        match="source reference repair altered non-source Item Definition content",
+    ):
+        ItemArtifactExtractionAgent(client).extract(
+            "AVP system definition.\nControl vehicle motion in the parking area.",
+            "ItemDef.docx",
+        )
+
+
 def test_item_agent_revalidates_quarantined_candidate_without_llm_call() -> None:
     payload = _payload()
     payload["functions"][0]["consequences"] = "Vehicle follows the planned path"
