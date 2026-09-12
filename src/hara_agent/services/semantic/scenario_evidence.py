@@ -26,11 +26,31 @@ from .scenario_contract import RISK_DIMENSION_VALUES, SCENARIO_CONTRACT_VERSION
 
 
 SCENARIO_ASSESSMENT_CONTRACT_VERSION = SCENARIO_CAUSAL_ASSESSMENT_VERSION
+_VALIDATED_ANALYTICAL_ATOM_BASIS = "VALIDATED_ANALYTICAL_SCENARIO_ATOM"
 
 
 # v1 hop basis values and Registry evidence kinds intentionally share values,
 # while kind and provenance remain separate axes.
 EvidenceBasisType = EvidenceKind
+
+
+def _is_validated_analytical_scenario_atom(value: EvidenceRecord | dict[str, Any]) -> bool:
+    if isinstance(value, EvidenceRecord):
+        metadata = value.metadata
+        approval = value.approval_status.value
+        sources = value.source_refs
+        provenance = value.provenance.value
+    else:
+        metadata = value
+        approval = str(value.get("approval_status", ""))
+        sources = value.get("source_refs", [])
+        provenance = str(value.get("provenance", ""))
+    return (
+        provenance == FactProvenance.SCENARIO_DEFINED.value
+        and approval == ReviewStatus.FINALIZED.value
+        and bool(sources)
+        and metadata.get("selection_basis") == _VALIDATED_ANALYTICAL_ATOM_BASIS
+    )
 
 
 class ScenarioEvidenceErrorCode(str, Enum):
@@ -213,7 +233,7 @@ class CausalEvidenceSelector:
     _P1_TERMS = (
         "relative_distance", "relative_speed", "ttc", "delta_v",
         "impact_speed", "ego_speed", "collision", "traffic_object", "road_user",
-        "stopping_margin", "geometry", "braking_distance",
+        "scenario_object", "stopping_margin", "geometry", "braking_distance",
     )
     _P2_TERMS = (
         "driver_in_vehicle", "direct_control", "remote_intervention",
@@ -223,6 +243,7 @@ class CausalEvidenceSelector:
     _P3_TERMS = (
         "operating_mode", "road", "weather", "surface", "ego_action",
         "ego_dynamics", "dynamics", "location", "driver_position",
+        "operating_scenario", "vehicle_state",
     )
     _P4_TERMS = (
         "exposure", "e_z", "e_f", "asil", "ftti", "severity",
@@ -246,10 +267,11 @@ class CausalEvidenceSelector:
         # context and would invite self-referential proof.
         if record.namespace == "MF":
             return None
+        validated_atom = _is_validated_analytical_scenario_atom(record)
         if (
             record.provenance is FactProvenance.SCENARIO_DEFINED
             or has_analysis_assumption_lineage(metadata)
-        ):
+        ) and not validated_atom:
             return None
         if record.namespace == "METHOD" and metadata.get("causal_relevance") is not True:
             return None
@@ -373,7 +395,29 @@ def build_fact_registry(
 ) -> FactRegistry:
     registry = FactRegistry()
     if project_registry is not None:
-        registry.extend(project_registry.records)
+        # Pair-scoped project risk facts are valid only for the exact
+        # malfunction/Scenario pair that produced them.  In particular, a
+        # fact attached to another analytical Scenario must not enter either
+        # the prompt view or the deterministic validator for this child.
+        def applies_to_current_pair(record: EvidenceRecord) -> bool:
+            metadata = record.metadata if isinstance(record.metadata, dict) else {}
+            context = metadata.get("context", {})
+            if not isinstance(context, dict) or not context:
+                return True
+            expected = {
+                "malfunction_id": malfunction.malfunction_id,
+                "scenario_id": scenario.scenario_id,
+            }
+            for key, current in expected.items():
+                scoped = str(context.get(key, "")).strip()
+                if scoped and scoped.casefold() != str(current).strip().casefold():
+                    return False
+            return True
+
+        registry.extend(
+            record for record in project_registry.records
+            if applies_to_current_pair(record)
+        )
     malfunction_provenance = (
         FactProvenance.DERIVED
         if malfunction.sources else FactProvenance.LLM_INFERENCE
@@ -555,6 +599,7 @@ def validate_evidence_contract(
                 fact.get("provenance") == FactProvenance.SCENARIO_DEFINED.value
                 or has_analysis_assumption_lineage(fact)
             )
+            and not _is_validated_analytical_scenario_atom(fact)
             for fact in resolved
         ):
             raise _error(
@@ -563,7 +608,10 @@ def validate_evidence_contract(
                 code=ScenarioEvidenceErrorCode.ASSUMPTION_IN_POSITIVE_CHAIN,
                 hop=hop_name, claim=claim, basis_type=basis.value,
                 invalid_refs=refs,
-                reason="SCENARIO_DEFINED analysis assumptions cannot prove a positive causal hop",
+                reason=(
+                    "unvalidated SCENARIO_DEFINED analysis assumptions cannot prove "
+                    "a positive causal hop"
+                ),
             )
         if causal and hop_name in ({"i_to_h", "h_to_harm"} if legacy_harm else {"i_to_h"}) and refs and all(
             fact.get("evidence_role") == "UPSTREAM_CAUSAL_CLAIM"

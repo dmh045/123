@@ -7,8 +7,8 @@ import pytest
 from hara_agent.contracts import CausalAssessmentStatus
 from hara_agent.method_sources import YamlBaselineCompiler
 from hara_agent.models import (
-    EvidenceKind, ItemDefinitionFacts, MalfunctionCandidate, ReviewStatus,
-    ScenarioCandidate, SourceRef,
+    EvidenceKind, EvidenceRecord, FactProvenance, ItemDefinitionFacts,
+    MalfunctionCandidate, ReviewStatus, ScenarioCandidate, SourceRef,
 )
 from hara_agent.services.analysis import (
     ExposureDimensionCoverageService, MethodRuleScoringService,
@@ -20,7 +20,7 @@ from hara_agent.services.semantic import (
 )
 from hara_agent.services.semantic.scenario_batching import build_scenario_user_prompt
 from hara_agent.services.semantic.scenario_evidence import (
-    ScenarioEvidenceContractError, build_fact_registry,
+    FactRegistry, ScenarioEvidenceContractError, build_fact_registry,
 )
 from hara_agent.template import TemplateRoleCompiler
 
@@ -85,6 +85,31 @@ def test_pre_causal_registry_contains_bounded_physics_and_no_guess_for_missing_i
     incomplete_registry = build_fact_registry(_malfunction(), incomplete)
     assert incomplete_registry.resolve_record("DERIVED.ttc_s") is None
     assert incomplete_registry.resolve_record("DERIVED.relative_speed_kph") is None
+
+
+def test_pair_scoped_project_risk_facts_cannot_cross_scenario_or_malfunction():
+    project = FactRegistry()
+    for evidence_ref, malfunction_id, scenario_id in (
+        ("PROJECT.risk.collision_exact", "MF-1", "SCN-1"),
+        ("PROJECT.risk.collision_other_scenario", "MF-1", "SCN-OTHER"),
+        ("PROJECT.risk.collision_other_malfunction", "MF-OTHER", "SCN-1"),
+    ):
+        project.register(EvidenceRecord(
+            evidence_ref, "FRONTAL", EvidenceKind.DIRECT_FACT,
+            FactProvenance.PROJECT_INPUT, ReviewStatus.FINALIZED, (_source(),),
+            {"parameter": "COLLISION_TYPE", "context": {
+                "malfunction_id": malfunction_id, "scenario_id": scenario_id,
+            }},
+        ))
+
+    registry = build_fact_registry(_malfunction(), _scenario(), project)
+
+    assert registry.resolve("PROJECT.risk.collision_exact") is not None
+    assert registry.resolve("PROJECT.risk.collision_other_scenario") is None
+    assert registry.resolve("PROJECT.risk.collision_other_malfunction") is None
+    selection = CausalEvidenceSelector(max_evidence=20).select(registry)
+    assert "PROJECT.risk.collision_exact" in selection.selected_context_evidence_refs
+    assert all("other_" not in ref for ref in selection.selected_context_evidence_refs)
 
 
 def test_v4_scenario_causal_contract_stops_at_hazardous_event():

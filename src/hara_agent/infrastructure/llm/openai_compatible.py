@@ -344,6 +344,7 @@ class OpenAICompatibleClient:
         elif task in {
             "assess_scenario_feasibility",
             "interpret_scenario_risk_facts",
+            "select_scenario_synthesis",
         }:
             configured_mode = self.config.scenario_thinking
         elif task == "repair_schema_envelope":

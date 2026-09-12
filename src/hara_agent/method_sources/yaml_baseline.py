@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 from hara_agent.contracts import (
@@ -531,6 +532,31 @@ class YamlBaselineCompiler:
                 spec.get("ego_dynamics", {})
                 if isinstance(spec.get("ego_dynamics", {}), dict) else {}
             )
+            slope = compound.get("slope", {})
+            slope = slope if isinstance(slope, dict) else {}
+            slope = slope or (
+                spec.get("slope", {})
+                if isinstance(spec.get("slope", {}), dict) else {}
+            )
+            slope = dict(slope)
+            if "pct_min" in slope and "min_inclusive" not in slope:
+                minimum = str(slope["pct_min"])
+                label = str(item.get("label", ""))
+                slope["min_inclusive"] = not bool(re.search(
+                    rf"(?:slope\s*>\s*{re.escape(minimum)}|"
+                    rf"{re.escape(minimum)}\s*%?\s*<\s*slope)",
+                    label, re.IGNORECASE,
+                ))
+            physical_semantics = {
+                key: value for key, value in {
+                    "ego_dynamics": dynamics,
+                    "slope": slope,
+                    "object": compound.get("object", spec.get("object", {})),
+                    "traffic_pattern": compound.get(
+                        "traffic_pattern", spec.get("traffic_pattern", {})
+                    ),
+                }.items() if isinstance(value, dict) and value
+            }
             speed_range = dynamics.get("v_range_kph")
             if not isinstance(speed_range, list) or len(speed_range) != 2:
                 lower = dynamics.get("v_min_kph")
@@ -546,6 +572,7 @@ class YamlBaselineCompiler:
                 "v2": str(item.get("v2", "")),
                 "v2_proper": str(item.get("v2_proper", "")),
                 "compound": compound,
+                "physical_semantics": physical_semantics,
                 "speed_range_kph": speed_range,
                 "source_asset": source_paths["exposure_atoms"],
                 "source_rule": f"atoms[{index}]",

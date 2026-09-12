@@ -363,6 +363,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--child-scenarios", type=Path,
         default=Path("output/HARA_Risk_Child_Scenarios.json"),
     )
+    synthesis = subparsers.add_parser(
+        "synthesize-scenarios",
+        help="Run governed bounded Scenario synthesis as an immutable child run",
+    )
+    synthesis.add_argument("--source-run-id", required=True)
+    synthesis.add_argument("--target-run-id", required=True)
+    synthesis.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
+    synthesis.add_argument("--review-root", type=Path, default=Path("runtime/review"))
+    synthesis.add_argument(
+        "--baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    synthesis.add_argument(
+        "--report-style-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    synthesis.add_argument("--output", required=True, type=Path)
+    synthesis.add_argument("--smoke-count", type=int, choices=range(3, 6), default=5)
+    synthesis.add_argument("--full", action="store_true")
+    synthesis.add_argument("--max-workers", type=int, default=4)
+    causal_revalidation = subparsers.add_parser(
+        "revalidate-synthesized-scenarios",
+        help="Differentially revalidate only method-valid synthesized child scenarios",
+    )
+    causal_revalidation.add_argument("--source-run-id", required=True)
+    causal_revalidation.add_argument("--target-run-id", required=True)
+    causal_revalidation.add_argument(
+        "--run-dir", type=Path, default=Path("runtime/agent")
+    )
+    causal_revalidation.add_argument(
+        "--review-root", type=Path, default=Path("runtime/review")
+    )
+    causal_revalidation.add_argument(
+        "--baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    causal_revalidation.add_argument(
+        "--report-style-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    causal_revalidation.add_argument("--max-workers", type=int, default=4)
     return parser
 
 
@@ -466,6 +507,56 @@ def main(argv: list[str] | None = None) -> int:
             "summary": payload["summary"],
             "provider_calls": 0,
         }, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "synthesize-scenarios":
+        from hara_agent.infrastructure.llm.factory import create_llm_client
+        from hara_agent.workflow.scenario_synthesis import ScenarioSynthesisRunner
+
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_style_template,
+        )
+        client = create_llm_client(LLMConfig.from_env())
+        result = ScenarioSynthesisRunner(
+            method=resolution.method, client=client,
+            run_dir=args.run_dir, review_root=args.review_root,
+        ).run(
+            source_run_id=args.source_run_id,
+            target_run_id=args.target_run_id,
+            smoke_count=args.smoke_count,
+            run_full=args.full,
+            max_workers=args.max_workers,
+            output_path=args.output,
+            baseline_path=args.baseline,
+            report_template_path=args.report_style_template,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["smoke_passed"]:
+            return 2
+        return 0
+    if args.command == "revalidate-synthesized-scenarios":
+        from hara_agent.infrastructure.llm.factory import create_llm_client
+        from hara_agent.workflow.scenario_causal_revalidation import (
+            ScenarioCausalRevalidationRunner,
+        )
+
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_style_template,
+        )
+        result = ScenarioCausalRevalidationRunner(
+            method=resolution.method,
+            client=create_llm_client(LLMConfig.from_env()),
+            run_dir=args.run_dir,
+            review_root=args.review_root,
+        ).run(
+            source_run_id=args.source_run_id,
+            target_run_id=args.target_run_id,
+            max_workers=args.max_workers,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     if args.command == "confirm-template-role":
         compiler = _role_compiler()

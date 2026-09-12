@@ -46,6 +46,12 @@ from .scenario_constraint_service import (
     ScenarioConstraintEvaluation, ScenarioConstraintExecutor,
     ScenarioConstraintStatus,
 )
+from .scenario_synthesis_service import (
+    ConstrainedScenarioSynthesisService, ScenarioSynthesisValidationError,
+)
+from .analytical_physics_instantiation_service import (
+    AnalyticalPhysicsInstantiationService,
+)
 from .project_fact_resolver import (
     ProjectContextResolutionStatus,
     ProjectFactResolutionError,
@@ -89,6 +95,8 @@ __all__ = [
     "PotentialHarmResolution", "PotentialHarmResolver",
     "ScenarioConstraintEvaluation", "ScenarioConstraintExecutor",
     "ScenarioConstraintStatus",
+    "ConstrainedScenarioSynthesisService", "ScenarioSynthesisValidationError",
+    "AnalyticalPhysicsInstantiationService",
     "MethodContractASILService",
     "ASILLookupService", "SafetyGoalService", "ScenarioScoringService",
     "ProjectContextResolutionStatus",

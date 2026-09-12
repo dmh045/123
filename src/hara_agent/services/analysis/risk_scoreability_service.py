@@ -571,6 +571,47 @@ class RiskScoreabilityService:
             return "READY_FOR_DIFFERENTIAL_PROVIDER"
         return "DETERMINISTIC_SCORING_ONLY"
 
+    @staticmethod
+    def readiness_statuses(record: dict[str, Any]) -> tuple[str, ...]:
+        """Expose orthogonal P5-D gates instead of one generic blocked bucket."""
+        statuses: list[str] = []
+        synthesis = str(record.get("scenario_synthesis_status", "METHOD_VALID"))
+        if synthesis != "METHOD_VALID":
+            statuses.append("SCENARIO_SYNTHESIS_BLOCKED")
+        causal = str(record.get(
+            "causal_delta_status",
+            "CAUSAL_REVALIDATION_REQUIRED"
+            if record.get("delta", {}).get("causal_revalidation_required") else
+            "CAUSAL_REUSE_PROVEN",
+        ))
+        if causal not in {"CAUSAL_REUSE_PROVEN", "CAUSAL_REVALIDATED"}:
+            statuses.append("CAUSAL_REVALIDATION_BLOCKED")
+        s = record.get("S", {}) if isinstance(record.get("S"), dict) else {}
+        c = record.get("C", {}) if isinstance(record.get("C"), dict) else {}
+        blockers = [
+            str(item) for item in [*s.get("blockers", []), *c.get("blockers", [])]
+        ]
+        if any(
+            token in blocker for blocker in blockers
+            for token in (
+                "ENGINEERING_ASSUMPTION_REQUIRED", "DIRECTION_MISSING",
+                "POINT_SPEED_MISSING", "DISTANCE_MISSING",
+            )
+        ):
+            statuses.append("PHYSICS_ASSUMPTION_BLOCKED")
+        if s.get("ready") is True:
+            statuses.append("S_READY")
+        exposure = record.get("exposure_readiness", {})
+        if isinstance(exposure, dict) and exposure.get("status") in {
+            "READY_COMPLETE", "READY_METHOD_IRRELEVANT_GAPS",
+        }:
+            statuses.append("E_READY")
+        if c.get("override_finalized") is True:
+            statuses.append("C_OVERRIDE_FINALIZED")
+        if c.get("ttc_ready") is True:
+            statuses.append("C_TTC_READY")
+        return tuple(dict.fromkeys(statuses))
+
     def _scope_for_record(self, record: dict[str, Any]) -> dict[str, Any]:
         """Return the smallest context needed to prevent unsafe value sharing."""
         facts = record.get("parent_facts", {})
@@ -945,6 +986,9 @@ class RiskScoreabilityService:
             if group["group_id"] not in complete_groups:
                 base_record["assumption_group_id"] = group["group_id"]
                 base_record["assumption_validation_errors"] = errors_by_group[group["group_id"]]
+                base_record["readiness_statuses"] = list(
+                    self.readiness_statuses(base_record)
+                )
                 records.append(base_record)
                 continue
             option, assessment, parent, malfunction = contexts[id(base_record)]
@@ -961,6 +1005,9 @@ class RiskScoreabilityService:
                 "status": "MATERIALIZED",
                 "child_scenario_id": child["scenario_id"],
             }
+            refreshed["readiness_statuses"] = list(
+                self.readiness_statuses(refreshed)
+            )
             records.append(refreshed)
             materialized_children.append(child)
 

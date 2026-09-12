@@ -119,7 +119,7 @@ MF.vehicle_level_hazard is an upstream causal claim, not independent proof of it
     SYSTEM_PROMPT += """
 
 CAUSAL CONTEXT VIEW AND STAGE BOUNDARY
-The complete EvidenceRegistry is retained by the deterministic validator but is not injected into this prompt. For each Scenario, use only the compact causal_evidence_view and the fixed Malfunction fields. The view is selected deterministically from P1 physical/interaction facts, P2 intervention/control facts, and P3 operating context; downstream P4 risk metadata is omitted unless explicitly marked causal. Return exact evidence_refs from that compact view. This stage ends at Hazardous Event: do not return or calculate a harm result, S/E/C, ASIL, FTTI, or exposure combination.
+The complete EvidenceRegistry is retained by the deterministic validator but is not injected into this prompt. For each Scenario, use only the compact causal_evidence_view and the fixed Malfunction fields. The view is selected deterministically from P1 physical/interaction facts, P2 intervention/control facts, and P3 operating context; downstream P4 risk metadata is omitted unless explicitly marked causal. A validated analytical Scenario atom fact included in the view is a bounded Method-instantiated condition for that Scenario and may be cited only for that Scenario; it is not a Project Fact. Unvalidated analysis assumptions remain prohibited as positive causal evidence. Return exact evidence_refs from that compact view. This stage ends at Hazardous Event: do not return or calculate a harm result, S/E/C, ASIL, FTTI, or exposure combination.
 """
 
     MACHINE_OUTPUT_RULE = """MACHINE OUTPUT RULE

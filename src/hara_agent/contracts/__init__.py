@@ -53,6 +53,15 @@ from .risk_calculation import (
     SpeedSemantic, ControllabilityCondition, ControllabilityBranchPolicy,
     ControllabilityOverride, StructuredRiskMethod,
 )
+from .scenario_synthesis import (
+    SCENARIO_SYNTHESIS_CONTRACT_VERSION, AnalyticalPhysicalInput,
+    AnalyticalScenarioInstantiation, CandidateOrigin, CoverageLabel,
+    PhysicalValueAuthority, ScenarioAtomCandidateSet,
+    ScenarioCombinationCandidate, ScenarioDimensionCandidate,
+    ScenarioSynthesisAssessment, ScenarioSynthesisInput,
+    ScenarioSynthesisResult, ScenarioSynthesisStatus,
+    SynthesisValidationStatus,
+)
 
 __all__ = [
     "METHOD_CONTRACT_VERSION",
@@ -104,4 +113,11 @@ __all__ = [
     "RiskContextFactAuthority", "RiskContextFactStatus",
     "SpeedSemantic", "ControllabilityCondition", "ControllabilityBranchPolicy",
     "ControllabilityOverride", "StructuredRiskMethod",
+    "SCENARIO_SYNTHESIS_CONTRACT_VERSION", "AnalyticalPhysicalInput",
+    "AnalyticalScenarioInstantiation", "CandidateOrigin", "CoverageLabel",
+    "PhysicalValueAuthority", "ScenarioAtomCandidateSet",
+    "ScenarioCombinationCandidate", "ScenarioDimensionCandidate",
+    "ScenarioSynthesisAssessment", "ScenarioSynthesisInput",
+    "ScenarioSynthesisResult", "ScenarioSynthesisStatus",
+    "SynthesisValidationStatus",
 ]

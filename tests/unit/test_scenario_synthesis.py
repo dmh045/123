@@ -1,0 +1,605 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import replace
+import json
+from pathlib import Path
+
+import pytest
+
+from hara_agent.infrastructure.llm.protocol import LLMResponse
+from hara_agent.contracts import CandidateOrigin
+from hara_agent.method_sources import YamlBaselineCompiler
+from hara_agent.models import (
+    MalfunctionCandidate, ReviewStatus, ScenarioCandidate,
+    ScenarioFeasibilityAssessment, SourceRef,
+)
+from hara_agent.services.analysis import (
+    AnalyticalPhysicsInstantiationService, ConstrainedScenarioSynthesisService,
+    RiskScoreabilityService, ScenarioSynthesisValidationError,
+)
+from hara_agent.services.semantic.scenario_synthesis_agent import (
+    BoundedScenarioSynthesisAgent,
+)
+from hara_agent.services.semantic.scenario_batching import (
+    select_scenario_causal_evidence,
+)
+from hara_agent.workflow.scenario_causal_revalidation import (
+    ScenarioCausalRevalidationRunner,
+)
+from hara_agent.template import TemplateRoleCompiler
+from hara_agent.workflow.scenario_synthesis import ScenarioSynthesisRunner
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_causal_resume_recovers_only_complete_validated_malfunction_audits(tmp_path):
+    assessment = ScenarioFeasibilityAssessment(
+        malfunction_id="MF-1", scenario_id="SCN-PARENT",
+        physically_feasible=True, functionally_relevant=True,
+        causally_relevant=True, risk_dimensions_changed=["operating_mode"],
+        rationale="source-linked causal chain remains valid",
+        hazardous_event="bounded hazardous event", status=ReviewStatus.FINALIZED,
+        confidence=0.9,
+    )
+    trace = tmp_path / "provider.json"
+    trace.write_text(json.dumps({
+        "artifact_version": "scenario-causal-revalidation-provider-trace-v1",
+        "source_run_id": "source", "run_id": "target",
+        "completed_malfunctions": 1, "target_malfunctions": 1,
+        "audits": [{
+            "malfunction_id": "MF-1",
+            "item_salvage_audit": [{
+                "scenario_id": "SCN-PARENT",
+                "parsed_assessment": assessment.to_dict(),
+            }],
+        }],
+    }), encoding="utf-8")
+
+    recovered = ScenarioCausalRevalidationRunner._recover_completed(
+        trace, source_run_id="source", target_run_id="target",
+        candidates_by_malfunction={"MF-1": [_parent()]},
+    )
+
+    assert list(recovered) == ["MF-1"]
+    assert recovered["MF-1"][0][0].scenario_id == "SCN-PARENT"
+
+    payload = json.loads(trace.read_text(encoding="utf-8"))
+    payload["audits"][0]["item_salvage_audit"] = []
+    trace.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="incomplete"):
+        ScenarioCausalRevalidationRunner._recover_completed(
+            trace, source_run_id="source", target_run_id="target",
+            candidates_by_malfunction={"MF-1": [_parent()]},
+        )
+
+
+@pytest.fixture(scope="module")
+def method():
+    report = TemplateRoleCompiler().compile_method(
+        ROOT / "references/HARA_Template_AI_20260327.xlsx"
+    ).report_contract
+    return YamlBaselineCompiler().compile(
+        ROOT / "method_assets/fusa_baseline_v1/manifest.yaml",
+        report_contract=report,
+    )
+
+
+def _parent() -> ScenarioCandidate:
+    return ScenarioCandidate(
+        scenario_id="SCN-PARENT", operating_scenario="室内停车场",
+        situational_description="AVP在停车场低速泊入，附近有行人和车辆",
+        situational_detailing="AVP在停车场低速泊入，附近有行人和车辆",
+        operating_mode="active",
+        facts={
+            "ego_speed_constraint": {"min_kph": 0.0, "max_kph": 20.0},
+            "object_type": "pedestrian", "road_user_type": "PEDESTRIAN",
+            "method_scenario_dimensions": {
+                "EGO_DYNAMICS": {
+                    "resolution_status": "RESOLVED", "atom_id": "FA001",
+                    "canonical_atom_id": "FA001", "project_value": "0..20 km/h",
+                },
+            },
+            "scenario_atom_ids": ["FA001"],
+        },
+        semantic_fingerprint="parent", status=ReviewStatus.FINALIZED,
+    )
+
+
+def _malfunction() -> dict:
+    return {
+        "malfunction_id": "MF-1", "function_id": "F-1", "guideword": "No/Loss",
+        "description": "泊入时行人识别丢失", "functional_effect": "车辆未对行人制动",
+        "vehicle_level_hazard": "停车场内与行人碰撞",
+        "component_category": "perception", "failure_type": "loss",
+    }
+
+
+def _assessment() -> dict:
+    return {
+        "malfunction_id": "MF-1", "scenario_id": "SCN-PARENT",
+        "hazardous_event_id": "HE-1", "hazardous_event": "停车场内碰撞行人",
+        "causal_assessment": {
+            "status": "VALIDATED", "hazardous_event": "停车场内碰撞行人",
+            "causal_chain": ["M", "B", "I", "H"],
+            "risk_dimension_changes": [],
+        },
+    }
+
+
+def _project() -> dict:
+    return {
+        "odd_locations": ["室外停车场", "室内停车场"],
+        "odd_road_types": ["停车场道路", "停车位"],
+        "odd_weather_conditions": ["晴朗", "小雨"],
+        "odd_road_surfaces": [
+            "停车场路面（支持上坡15%、下坡15%，超出JGJ100车库标准坡度功能退出）",
+        ],
+        "speed_min_kph": 0.0, "speed_max_kph": 20.0,
+    }
+
+
+def _input(method):
+    return ConstrainedScenarioSynthesisService(method).build_input(
+        malfunction=_malfunction(), parent=_parent(), assessment=_assessment(),
+        project_context=_project(),
+    )
+
+
+def _valid_payload(synthesis_input) -> dict:
+    selected = {}
+    for candidate_set in synthesis_input.dimension_candidate_sets:
+        if candidate_set.locked_atom_ids:
+            selected[candidate_set.dimension] = list(candidate_set.locked_atom_ids)
+        elif candidate_set.candidates:
+            selected[candidate_set.dimension] = [candidate_set.candidates[0].atom_id]
+        else:
+            selected[candidate_set.dimension] = []
+    return {
+        "variants": [{
+            "coverage_label": "typical", "selected_atoms": selected,
+            "semantic_rationale": "Uses the supplied parking, pedestrian and ODD context.",
+            "context_refs": [
+                "PROJECT.ODD", "HE.hazardous_event", "PARENT.scenario",
+                "METHOD.scenario_atom_catalog",
+            ],
+        }],
+    }
+
+
+def test_candidate_generation_reads_method_dimensions_and_locks_resolved_atom(method):
+    synthesis_input = _input(method)
+    assert tuple(item.dimension for item in synthesis_input.dimension_candidate_sets) == (
+        "WHERE", "ROAD", "EGO_ACTION", "EGO_X_ROAD", "TRAFFIC_PATTERN",
+        "EGO_DYNAMICS", "OBJECT",
+    )
+    by_dimension = {item.dimension: item for item in synthesis_input.dimension_candidate_sets}
+    assert by_dimension["EGO_DYNAMICS"].locked_atom_ids == ("FA001",)
+    assert len(by_dimension["WHERE"].candidates) < by_dimension["WHERE"].catalog_size
+    assert all("motorway" not in item.label.casefold() for item in by_dimension["WHERE"].candidates)
+    assert "PH014" not in {
+        item.atom_id for item in by_dimension["EGO_X_ROAD"].candidates
+    }
+    assert "FB007" not in {
+        item.atom_id for item in by_dimension["ROAD"].candidates
+    }
+
+
+def test_zero_where_match_never_falls_back_to_full_catalog(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    empty = service.build_input(
+        malfunction={
+            **_malfunction(), "description": "opaque", "functional_effect": "opaque",
+            "vehicle_level_hazard": "opaque",
+        },
+        parent=ScenarioCandidate(
+            scenario_id="SCN-OPAQUE", operating_scenario="opaque",
+            situational_description="opaque", situational_detailing="opaque",
+            facts={}, status=ReviewStatus.PENDING,
+        ),
+        assessment={**_assessment(), "scenario_id": "SCN-OPAQUE", "hazardous_event": "opaque"},
+        project_context={"odd_locations": ["不可映射语义"]},
+    )
+    where = next(item for item in empty.dimension_candidate_sets if item.dimension == "WHERE")
+    assert where.generation_status == "PENDING_NO_COMPATIBLE_ATOM"
+    assert where.candidates == ()
+    assert where.catalog_size > 0
+
+
+def test_provider_output_rejects_invented_atom(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    payload = _valid_payload(synthesis_input)
+    payload["variants"][0]["selected_atoms"]["WHERE"] = ["INVENTED"]
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.validate_provider_payload(synthesis_input, payload)
+    assert caught.value.code == "INVENTED_ATOM_ID:WHERE:INVENTED"
+
+
+def test_provider_output_rejects_wrong_dimension_and_outside_candidate(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    wrong_id = next(
+        atom_id for atom_id, atom in service.by_id.items()
+        if "EGO_ACTION" not in atom.get("filled_dimensions", [])
+    )
+    wrong = _valid_payload(synthesis_input)
+    wrong["variants"][0]["selected_atoms"]["EGO_ACTION"] = [wrong_id]
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.validate_provider_payload(synthesis_input, wrong)
+    assert caught.value.code == f"WRONG_DIMENSION:EGO_ACTION:{wrong_id}"
+
+    action_set = next(
+        item for item in synthesis_input.dimension_candidate_sets
+        if item.dimension == "EGO_ACTION"
+    )
+    supplied = {item.atom_id for item in action_set.candidates}
+    outside_id = next(
+        atom_id for atom_id, atom in service.by_id.items()
+        if "EGO_ACTION" in atom.get("filled_dimensions", []) and atom_id not in supplied
+    )
+    outside = _valid_payload(synthesis_input)
+    outside["variants"][0]["selected_atoms"]["EGO_ACTION"] = [outside_id]
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.validate_provider_payload(synthesis_input, outside)
+    assert caught.value.code == f"ATOM_OUTSIDE_CANDIDATE_SET:EGO_ACTION:{outside_id}"
+
+
+def test_provider_output_rejects_missing_required_field(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    payload = _valid_payload(synthesis_input)
+    del payload["variants"][0]["semantic_rationale"]
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.validate_provider_payload(synthesis_input, payload)
+    assert caught.value.code == "SCHEMA_VARIANT_FIELDS"
+
+
+class _Client:
+    class Config:
+        model = "configured-model"
+        scenario_thinking = "disabled"
+
+    config = Config()
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def complete_json(self, request):
+        data = self.responses.pop(0)
+        return LLMResponse(
+            data=data, model="resolved-model", request_id=f"REQ-{len(self.responses)}",
+            usage={
+                "finish_reason": "stop", "reasoning_characters": 0,
+                "latency_seconds": 0.01,
+            },
+        )
+
+
+def test_bounded_provider_selection_allows_one_repair(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    invalid = deepcopy(_valid_payload(synthesis_input))
+    invalid["variants"][0]["selected_atoms"]["OBJECT"] = ["INVENTED"]
+    agent = BoundedScenarioSynthesisAgent(
+        _Client([invalid, _valid_payload(synthesis_input)]), service,
+    )
+    assessments, trace = agent.select(synthesis_input)
+    assert len(assessments) == 1
+    assert trace["status"] == "PASS"
+    assert trace["repairs"] == 1
+    assert len(trace["calls"]) == 2
+
+
+def test_bounded_provider_selection_second_failure_stays_pending(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    invalid = deepcopy(_valid_payload(synthesis_input))
+    invalid["variants"][0]["selected_atoms"]["OBJECT"] = ["INVENTED"]
+    agent = BoundedScenarioSynthesisAgent(_Client([invalid, invalid]), service)
+    assessments, trace = agent.select(synthesis_input)
+    assert assessments == ()
+    assert trace["status"] == "PENDING_SCENARIO_SYNTHESIS"
+    assert trace["repairs"] == 1
+    assert len(trace["calls"]) == 2
+
+
+def test_odd_speed_incompatible_atom_is_pruned(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    assert service._speed_compatible(
+        {"speed_range_kph": [130, 200]}, (0, 20),
+    ) is False
+    dynamics = next(
+        item for item in _input(method).dimension_candidate_sets
+        if item.dimension == "EGO_DYNAMICS"
+    )
+    assert all(
+        service._speed_compatible(service.by_id[item.atom_id], (0, 20))
+        for item in dynamics.candidates
+    )
+
+
+def _compound_input(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    compound = service._candidate(
+        service.by_id["FA005"], origin=CandidateOrigin.METHOD_TEMPLATE,
+        refs=("METHOD.scenario_atom_catalog",),
+        reason="Test fixture uses an explicit source-defined compound.",
+    )
+    independent = service._candidate(
+        service.by_id["FA001"], origin=CandidateOrigin.DIRECT_PROJECT_BINDING,
+        refs=("METHOD.scenario_atom_catalog",),
+        reason="Test fixture uses an independent dynamics atom.",
+    )
+    candidate_sets = []
+    for item in synthesis_input.dimension_candidate_sets:
+        if item.dimension == "EGO_ACTION":
+            item = replace(item, candidates=(compound,), locked_atom_ids=())
+        elif item.dimension == "EGO_DYNAMICS":
+            item = replace(
+                item, candidates=(compound, independent), locked_atom_ids=(),
+                generation_status="CANDIDATES_AVAILABLE",
+            )
+        candidate_sets.append(item)
+    return service, replace(
+        synthesis_input, dimension_candidate_sets=tuple(candidate_sets),
+    )
+
+
+def test_compound_atom_conflict_rejected(method):
+    service, synthesis_input = _compound_input(method)
+    payload = _valid_payload(synthesis_input)
+    payload["variants"][0]["selected_atoms"]["EGO_DYNAMICS"] = ["FA001"]
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.validate_provider_payload(synthesis_input, payload)
+    assert caught.value.code.startswith("COMPOUND_ATOM_")
+
+
+def test_valid_compound_atom_fills_all_declared_dimensions(method):
+    service, synthesis_input = _compound_input(method)
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+    assert assessment.selected_atoms["EGO_ACTION"] == ("FA005",)
+    assert assessment.selected_atoms["EGO_DYNAMICS"] == ("FA005",)
+
+
+def test_candidate_order_does_not_depend_on_e_rank_metadata(method):
+    baseline_method = deepcopy(method)
+    changed_method = deepcopy(method)
+    for index, atom in enumerate(changed_method.metadata["scenario_atom_catalog"]):
+        atom["e_rank"] = "E4" if index % 2 else "E0"
+    before = _input(baseline_method)
+    after = _input(changed_method)
+    assert {
+        item.dimension: [candidate.atom_id for candidate in item.candidates]
+        for item in before.dimension_candidate_sets
+    } == {
+        item.dimension: [candidate.atom_id for candidate in item.candidates]
+        for item in after.dimension_candidate_sets
+    }
+
+
+def test_materialization_is_child_isolated_and_never_mutates_parent(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent()
+    before = parent.to_dict()
+    synthesis_input = _input(method)
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+    child, instance = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=parent, provider_evidence={"request_id": "REQ"},
+    )
+    assert parent.to_dict() == before
+    assert child.scenario_id.startswith("SCN-ANALYTICAL-")
+    assert child.source_scenario_id == parent.scenario_id
+    assert instance.parent_scenario_id == parent.scenario_id
+    assert child.facts["ego_speed_constraint"] == parent.facts["ego_speed_constraint"]
+    assert "ego_speed_kph" not in child.facts
+    scope = child.fact_provenance["scenario_atom_ids"]["applicable_scope"]
+    assert scope["malfunction_id"] == "MF-1"
+    assert scope["scenario_id"] == child.scenario_id
+
+
+def test_child_a_nested_facts_do_not_leak_to_parent_or_child_b(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent()
+    synthesis_input = _input(method)
+    first = _valid_payload(synthesis_input)
+    optional = next(
+        item for item in synthesis_input.dimension_candidate_sets
+        if item.dimension in {"EGO_X_ROAD", "TRAFFIC_PATTERN"} and item.candidates
+    )
+    second = deepcopy(first)
+    second["variants"][0]["selected_atoms"][optional.dimension] = []
+    assessment_a = service.validate_provider_payload(synthesis_input, first)[0]
+    assessment_b = service.validate_provider_payload(synthesis_input, second)[0]
+    child_a, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment_a,
+        parent=parent, provider_evidence={"request_id": "REQ-A"},
+    )
+    child_b, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment_b,
+        parent=parent, provider_evidence={"request_id": "REQ-B"},
+    )
+    child_a.facts["ego_speed_constraint"]["max_kph"] = 999
+    assert parent.facts["ego_speed_constraint"]["max_kph"] == 20.0
+    assert child_b.facts["ego_speed_constraint"]["max_kph"] == 20.0
+    assert child_a.scenario_id != child_b.scenario_id
+
+
+def test_physics_instantiation_has_no_distance_speed_or_geometry_defaults():
+    result = AnalyticalPhysicsInstantiationService().instantiate(
+        scenario=ScenarioCandidate(
+            scenario_id="SCN-1", operating_scenario="parking",
+            situational_description="parking", situational_detailing="parking",
+            facts={"ego_speed_constraint": {"min_kph": 0, "max_kph": 20}},
+        ),
+        malfunction={"malfunction_id": "MF-1"},
+        causal_status="CAUSAL_REVALIDATED",
+    )
+    inputs = {item["field"]: item for item in result["inputs"]}
+    assert inputs["ego_speed_kph"]["authority"] == "ENGINEERING_ANALYSIS_ASSUMPTION"
+    assert inputs["ego_speed_kph"]["value"] is None
+    assert inputs["object_speed_kph"]["authority"] == "UNAVAILABLE"
+    assert inputs["relative_distance_m"]["authority"] == "UNAVAILABLE"
+    assert result["derived"] == []
+
+
+def _physics_scenario(**overrides):
+    facts = {
+        "ego_speed_kph": 20.0, "object_speed_kph": 5.0,
+        "relative_distance_m": 10.0, "road_user_type": "VEHICLE",
+        "collision_type": "FRONTAL", "ego_longitudinal_direction": "FORWARD",
+        "object_longitudinal_direction": "FORWARD",
+    }
+    facts.update(overrides)
+    return ScenarioCandidate(
+        scenario_id="SCN-PHYSICS", operating_scenario="parking",
+        situational_description="physics fixture",
+        situational_detailing="physics fixture", facts=facts,
+        fact_provenance={
+            field: {"origin": "PROJECT_FACT", "approval": "FINALIZED"}
+            for field in facts if field != "method_scenario_dimensions"
+        },
+    )
+
+
+def test_explicit_stationary_object_atom_derives_zero_speed():
+    scenario = ScenarioCandidate(
+        scenario_id="SCN-STATIONARY", operating_scenario="parking",
+        situational_description="stationary object",
+        situational_detailing="stationary object",
+        facts={
+            "scenario_atom_ids": ["TEST-STATIONARY"],
+            "method_scenario_dimensions": {
+                "OBJECT": {
+                    "atom_id": "TEST-STATIONARY",
+                    "method_semantics": {"object": {"motion": "STATIONARY"}},
+                },
+            },
+        },
+    )
+    result = AnalyticalPhysicsInstantiationService().instantiate(
+        scenario=scenario, malfunction={"malfunction_id": "MF-1"},
+        causal_status="CAUSAL_REVALIDATED",
+    )
+    speed = next(item for item in result["inputs"] if item["field"] == "object_speed_kph")
+    assert speed["value"] == 0.0
+    assert speed["authority"] == "DERIVED"
+    assert speed["selection_basis"] == "METHOD_ATOM_EXPLICIT_STATIONARY_OBJECT"
+
+
+def test_relative_speed_requires_both_longitudinal_directions():
+    scenario = _physics_scenario()
+    scenario.facts.pop("object_longitudinal_direction")
+    scenario.fact_provenance.pop("object_longitudinal_direction")
+    result = AnalyticalPhysicsInstantiationService().instantiate(
+        scenario=scenario, malfunction={"malfunction_id": "MF-1"},
+        causal_status="CAUSAL_REVALIDATED",
+    )
+    assert not any(item["field"] == "relative_speed_kph" for item in result["derived"])
+
+
+def test_side_collision_does_not_use_longitudinal_relative_speed_formula():
+    result = AnalyticalPhysicsInstantiationService().instantiate(
+        scenario=_physics_scenario(collision_type="SIDE"),
+        malfunction={"malfunction_id": "MF-1"},
+        causal_status="CAUSAL_REVALIDATED",
+    )
+    assert result["derived"] == []
+
+
+def test_missing_dependency_metadata_requires_causal_revalidation(method):
+    runner = ScenarioSynthesisRunner(method=method, client=None)
+    synthesis_input = _input(method)
+    service = runner.synthesis
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+    child, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=_parent(), provider_evidence={},
+    )
+    delta = runner._causal_delta(
+        synthesis_input=synthesis_input, parent_assessment=_assessment(), child=child,
+    )
+    assert delta["status"] == "CAUSAL_REVALIDATION_REQUIRED"
+    assert delta["causal_reuse_basis"] == ""
+
+
+def test_explicit_noninterference_proof_allows_deterministic_causal_reuse(method):
+    runner = ScenarioSynthesisRunner(method=method, client=None)
+    synthesis_input = _input(method)
+    service = runner.synthesis
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+    child, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=_parent(), provider_evidence={},
+    )
+    parent_assessment = _assessment()
+    parent_assessment["dependency_metadata"] = {
+        "complete": True,
+        "causal_evidence_fields": ["MF.description"],
+        "physical_feasibility_fields": ["MF.functional_effect"],
+        "scenario_identity_fields": ["malfunction_id"],
+        "child_subset_refinement": "Explicit source proof: changed Scenario dimensions are noninterfering.",
+    }
+    delta = runner._causal_delta(
+        synthesis_input=synthesis_input,
+        parent_assessment=parent_assessment, child=child,
+    )
+    assert delta["status"] == "CAUSAL_REUSE_PROVEN"
+    assert delta["provider_required"] is False
+
+
+def test_validated_analytical_atom_facts_are_visible_to_causal_revalidation(method):
+    synthesis = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    assessment = synthesis.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+    child, _ = synthesis.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=_parent(), provider_evidence={},
+    )
+    projected = ScenarioCausalRevalidationRunner(
+        method=method, client=None,
+    )._causal_projection(child)
+    selection = select_scenario_causal_evidence(
+        MalfunctionCandidate(
+            malfunction_id="MF-1", function_id="F-1", guideword="No/Loss",
+            description="泊入时行人识别丢失",
+            functional_effect="车辆未对行人制动",
+            vehicle_level_hazard="停车场内与行人碰撞",
+            causal_chain=["M", "B", "I", "H"],
+            sources=[SourceRef("item_definition", "ITEM", "p1", "source")],
+            status=ReviewStatus.FINALIZED,
+        ),
+        projected,
+    )
+    assert "SCN.road_surface_conditions" in selection.selected_refs
+    assert "SCN.ego_road_relation" in selection.selected_refs
+    assert "SCN.operating_scenario" in selection.selected_refs
+    assert "SCN.vehicle_state" in selection.selected_refs
+    assert "SCN.ego_dynamics" in selection.selected_refs
+    assert "SCN.scenario_object_atom" in selection.selected_refs
+
+
+def test_risk_scoreability_exposes_distinct_p5d_statuses():
+    statuses = RiskScoreabilityService.readiness_statuses({
+        "scenario_synthesis_status": "PENDING_SCENARIO_SYNTHESIS",
+        "causal_delta_status": "CAUSAL_REVALIDATION_REQUIRED",
+        "S": {"ready": False, "blockers": ["EGO_POINT_SPEED_ENGINEERING_ASSUMPTION_REQUIRED"]},
+        "C": {"ready": False, "blockers": [], "override_finalized": False, "ttc_ready": False},
+    })
+    assert statuses == (
+        "SCENARIO_SYNTHESIS_BLOCKED", "CAUSAL_REVALIDATION_BLOCKED",
+        "PHYSICS_ASSUMPTION_BLOCKED",
+    )

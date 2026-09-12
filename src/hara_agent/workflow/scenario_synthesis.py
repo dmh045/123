@@ -1,0 +1,855 @@
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
+from dataclasses import replace
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Any
+
+from hara_agent.contracts import MethodContract, ScenarioSynthesisAssessment
+from hara_agent.models import (
+    EvidenceValue, ReviewStatus, RiskAssessment, ScenarioCandidate,
+    evaluate_risk_eligibility_payload,
+)
+from hara_agent.services.analysis import (
+    AnalyticalPhysicsInstantiationService, ConstrainedScenarioSynthesisService,
+    ExposureInputReadinessService, RiskExecutionTraceService,
+)
+from hara_agent.services.reporting import OfflineReportRebuilder
+from hara_agent.services.semantic.scenario_synthesis_agent import (
+    BoundedScenarioSynthesisAgent,
+)
+from hara_agent.workflow.checkpoints import CheckpointRepository
+from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
+from hara_agent.workflow.state import HARAState, WorkflowStage
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+        prefix=f".{path.stem}-", suffix=".tmp", delete=False,
+    ) as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+        temporary = Path(stream.name)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline="\n", dir=path.parent,
+        prefix=f".{path.stem}-", suffix=".tmp", delete=False,
+    ) as stream:
+        stream.write(value)
+        temporary = Path(stream.name)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class ScenarioSynthesisRunner:
+    """Execute a child-only P5-D run without mutating the accepted parent."""
+
+    def __init__(
+        self, *, method: MethodContract, client: Any | None,
+        run_dir: str | Path = "runtime/agent",
+        review_root: str | Path = "runtime/review",
+    ):
+        self.method = method
+        self.client = client
+        self.run_dir = Path(run_dir).expanduser().resolve()
+        self.review_root = Path(review_root).expanduser().resolve()
+        self.synthesis = ConstrainedScenarioSynthesisService(method)
+        self.physics = AnalyticalPhysicsInstantiationService()
+        self.exposure = ExposureInputReadinessService(method)
+
+    def _parent_inventory(self, source_run_id: str) -> dict[str, str]:
+        paths = [self.run_dir / f"{source_run_id}.checkpoint.json"]
+        review_dir = self.review_root / source_run_id
+        if review_dir.is_dir():
+            paths.extend(sorted(path for path in review_dir.rglob("*") if path.is_file()))
+        return {
+            str(path): _sha256(path) for path in paths if path.is_file()
+        }
+
+    @staticmethod
+    def _eligible_records(state: HARAState) -> list[dict[str, Any]]:
+        return [
+            item for item in state.item_definition.get("scenario_assessments", [])
+            if isinstance(item, dict) and evaluate_risk_eligibility_payload(item).eligible
+        ]
+
+    @staticmethod
+    def _project_context(state: HARAState) -> dict[str, Any]:
+        typed = state.item_definition.get("typed", {})
+        if not isinstance(typed, dict):
+            return {}
+        return {
+            key: deepcopy(typed.get(key)) for key in (
+                "system_description", "item_boundary", "operating_modes",
+                "odd_locations", "odd_road_types", "odd_weather_conditions",
+                "odd_road_surfaces", "speed_min_kph", "speed_max_kph",
+                "speed_envelopes",
+            ) if key in typed
+        }
+
+    def _prepare(
+        self, state: HARAState,
+    ) -> tuple[list[Any], dict[str, ScenarioCandidate], dict[str, dict[str, Any]],
+               dict[tuple[str, str], dict[str, Any]], dict[str, Any]]:
+        scenarios = {item.scenario_id: item for item in state.scenarios}
+        malfunctions = {
+            str(item.get("malfunction_id", "")): item
+            for item in state.malfunctions if isinstance(item, dict)
+        }
+        assessments = {
+            (str(item.get("malfunction_id", "")), str(item.get("scenario_id", ""))): item
+            for item in self._eligible_records(state)
+        }
+        inputs = []
+        missing_foreign_keys = []
+        project_context = self._project_context(state)
+        for key, assessment in sorted(assessments.items()):
+            malfunction = malfunctions.get(key[0])
+            parent = scenarios.get(key[1])
+            if malfunction is None or parent is None:
+                missing_foreign_keys.append({
+                    "malfunction_id": key[0], "scenario_id": key[1],
+                })
+                continue
+            inputs.append(self.synthesis.build_input(
+                malfunction=malfunction, parent=parent, assessment=assessment,
+                project_context=project_context,
+            ))
+        before = Counter()
+        for synthesis_input in inputs:
+            for item in synthesis_input.dimension_candidate_sets:
+                if item.resolution_status_before.upper() == "RESOLVED":
+                    before[item.dimension] += 1
+        combinations = {
+            item.semantic_group_id: self.synthesis.bounded_combinations(item)
+            for item in inputs
+        }
+        stats = {
+            "eligible_parent_he": len(assessments),
+            "unique_parent_scenarios": len({item.parent_scenario_id for item in inputs}),
+            "unique_semantic_synthesis_groups": len({item.semantic_group_id for item in inputs}),
+            "missing_foreign_keys": missing_foreign_keys,
+            "dimension_resolution_before": {
+                dimension: before[dimension] for dimension in self.synthesis.dimensions
+            },
+            "catalog_candidates_total": sum(
+                item.catalog_size for synthesis_input in inputs
+                for item in synthesis_input.dimension_candidate_sets
+            ),
+            "shortlisted_candidates_total": sum(
+                len(item.candidates) for synthesis_input in inputs
+                for item in synthesis_input.dimension_candidate_sets
+            ),
+            "candidate_search_truncated": sum(
+                any(item.search_truncated for item in synthesis_input.dimension_candidate_sets)
+                or any(
+                    "CANDIDATE_SEARCH_TRUNCATED" in combination.validation_reasons
+                    for combination in combinations[synthesis_input.semantic_group_id]
+                )
+                for synthesis_input in inputs
+            ),
+        }
+        denominator = max(1, len(inputs) * len(self.synthesis.dimensions))
+        stats["average_catalog_candidates_per_dimension"] = round(
+            stats["catalog_candidates_total"] / denominator, 3
+        )
+        stats["average_shortlist_candidates_per_dimension"] = round(
+            stats["shortlisted_candidates_total"] / denominator, 3
+        )
+        stats["max_shortlist_candidates_per_dimension"] = max((
+            len(item.candidates) for synthesis_input in inputs
+            for item in synthesis_input.dimension_candidate_sets
+        ), default=0)
+        stats["bounded_combination_count"] = sum(map(len, combinations.values()))
+        return inputs, scenarios, malfunctions, assessments, {
+            "stats": stats, "combinations": combinations,
+        }
+
+    @staticmethod
+    def _provider_ready(synthesis_input: Any) -> bool:
+        return all(
+            item.candidates or item.dimension in ConstrainedScenarioSynthesisService.optional_dimensions
+            for item in synthesis_input.dimension_candidate_sets
+        )
+
+    def _domain(self, malfunction: dict[str, Any]) -> str:
+        structured = self.method.structured_risk_method
+        if structured is None:
+            return ""
+        category = str(malfunction.get("component_category", ""))
+        matches = [
+            rule.domain.value for rule in structured.exposure.domain_rules
+            if category in rule.component_categories
+        ]
+        return matches[0] if len(matches) == 1 else ""
+
+    def _smoke_groups(self, inputs: list[Any], count: int) -> list[Any]:
+        chosen = []
+        features: set[str] = set()
+        desired = ("parking", "vehicle", "vru", "Z", "F")
+        for feature in desired:
+            for item in inputs:
+                if item in chosen or not self._provider_ready(item):
+                    continue
+                parent_facts = item.parent_scenario.get("facts", {})
+                text = json.dumps({
+                    "malfunction": item.malfunction,
+                    "parent": parent_facts,
+                    "project": item.project_context,
+                }, ensure_ascii=False).casefold()
+                domain = self._domain(item.malfunction)
+                match = (
+                    feature == "parking" and any(token in text for token in ("停车", "泊车", "parking", "garage"))
+                    or feature == "vehicle" and any(token in text for token in ("passenger_car", "vehicle", "rear_end"))
+                    or feature == "vru" and any(token in text for token in ("行人", "pedestrian", "cyclist", "两轮"))
+                    or feature in {"Z", "F"} and domain == feature
+                )
+                if match:
+                    chosen.append(item)
+                    features.add(feature)
+                    break
+            if len(chosen) >= count:
+                break
+        for item in inputs:
+            if len(chosen) >= count:
+                break
+            if item not in chosen and self._provider_ready(item):
+                chosen.append(item)
+        return chosen[:count]
+
+    @staticmethod
+    def _trace_call_count(trace: dict[str, Any]) -> int:
+        return len(trace.get("calls", []))
+
+    def _smoke_passed(self, traces: list[dict[str, Any]], expected_count: int) -> tuple[bool, list[str]]:
+        failures = []
+        if len(traces) != expected_count or any(item.get("status") != "PASS" for item in traces):
+            failures.append("SMOKE_SELECTION_OR_SCHEMA_FAILURE")
+        successful_calls = [
+            call for trace in traces for call in trace.get("calls", [])
+            if call.get("schema_status") == "PASS"
+        ]
+        models = {str(call.get("resolved_model", "")) for call in successful_calls if call.get("resolved_model")}
+        if len(models) != 1:
+            failures.append("RESOLVED_MODEL_DRIFT")
+        if any(str(call.get("thinking", "")) != "disabled" for call in successful_calls):
+            failures.append("THINKING_POLICY_CHANGED")
+        if any(int(call.get("reasoning_characters", 0) or 0) != 0 for call in successful_calls):
+            failures.append("REASONING_CONTENT_PRESENT")
+        if any(str(call.get("finish_reason", "")) != "stop" for call in successful_calls):
+            failures.append("FINISH_REASON_NOT_STOP")
+        return not failures, failures
+
+    def _run_provider_groups(
+        self, *, inputs: list[Any], max_workers: int,
+        progress_path: Path, phase: str,
+        existing: dict[str, tuple[tuple[ScenarioSynthesisAssessment, ...], dict[str, Any]]],
+    ) -> dict[str, tuple[tuple[ScenarioSynthesisAssessment, ...], dict[str, Any]]]:
+        if self.client is None:
+            raise ValueError("Provider execution requested without a configured client")
+        agent = BoundedScenarioSynthesisAgent(self.client, self.synthesis)
+        pending = [item for item in inputs if item.semantic_group_id not in existing]
+        if not pending:
+            return existing
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            futures = {executor.submit(agent.select, item): item for item in pending}
+            for future in as_completed(futures):
+                item = futures[future]
+                assessments, trace = future.result()
+                existing[item.semantic_group_id] = (assessments, trace)
+                completed += 1
+                print(
+                    f"[HARA][P5-D] {phase} {completed}/{len(pending)} "
+                    f"group={item.semantic_group_id} status={trace.get('status')}",
+                    flush=True,
+                )
+                _write_json(progress_path, {
+                    "artifact_version": "scenario-synthesis-provider-trace-v1",
+                    "phase": phase,
+                    "completed_groups": completed,
+                    "target_groups": len(pending),
+                    "groups": [value[1] for _, value in sorted(existing.items())],
+                })
+        return existing
+
+    @staticmethod
+    def _dependency_metadata(assessment: dict[str, Any]) -> dict[str, Any] | None:
+        causal = assessment.get("causal_assessment", {})
+        causal = causal if isinstance(causal, dict) else {}
+        value = assessment.get("dependency_metadata", causal.get("dependency_metadata"))
+        required = (
+            "causal_evidence_fields", "physical_feasibility_fields",
+            "scenario_identity_fields",
+        )
+        if (
+            not isinstance(value, dict) or value.get("complete") is not True
+            or not all(isinstance(value.get(field), list) for field in required)
+            or not str(value.get("child_subset_refinement", "")).strip()
+        ):
+            return None
+        return value
+
+    def _causal_delta(
+        self, *, synthesis_input: Any, parent_assessment: dict[str, Any],
+        child: ScenarioCandidate,
+    ) -> dict[str, Any]:
+        changed_dimensions = sorted(
+            dimension for dimension, binding in child.facts.get("method_scenario_dimensions", {}).items()
+            if binding.get("resolution_status") == "RESOLVED"
+            and dimension not in {
+                item.dimension for item in synthesis_input.dimension_candidate_sets
+                if item.locked_atom_ids
+            }
+        )
+        metadata = self._dependency_metadata(parent_assessment)
+        if metadata is None:
+            return {
+                "malfunction_id": synthesis_input.malfunction_id,
+                "parent_scenario_id": synthesis_input.parent_scenario_id,
+                "child_scenario_id": child.scenario_id,
+                "status": "CAUSAL_REVALIDATION_REQUIRED",
+                "changed_dimensions": changed_dimensions,
+                "causal_reuse_basis": "",
+                "reason": "DEPENDENCY_METADATA_INCOMPLETE",
+                "provider_required": True,
+            }
+        dependencies = {
+            str(item).removeprefix("SCN.")
+            for field in (
+                "causal_evidence_fields", "physical_feasibility_fields",
+                "scenario_identity_fields",
+            ) for item in metadata[field] if isinstance(item, str)
+        }
+        changed_keys = set(changed_dimensions) | {
+            {
+                "WHERE": "operating_scenario", "ROAD": "road_surface_conditions",
+                "EGO_ACTION": "vehicle_state", "OBJECT": "scenario_object_atom",
+                "TRAFFIC_PATTERN": "traffic_pattern", "EGO_X_ROAD": "ego_road_relation",
+            }.get(item, item) for item in changed_dimensions
+        }
+        dependent = sorted(changed_keys & dependencies)
+        if dependent:
+            return {
+                "malfunction_id": synthesis_input.malfunction_id,
+                "parent_scenario_id": synthesis_input.parent_scenario_id,
+                "child_scenario_id": child.scenario_id,
+                "status": "CAUSAL_REVALIDATION_REQUIRED",
+                "changed_dimensions": changed_dimensions,
+                "dependent_fields": dependent,
+                "causal_reuse_basis": "",
+                "reason": "EXPLICIT_CAUSAL_OR_IDENTITY_DEPENDENCY",
+                "provider_required": True,
+            }
+        return {
+            "malfunction_id": synthesis_input.malfunction_id,
+            "parent_scenario_id": synthesis_input.parent_scenario_id,
+            "child_scenario_id": child.scenario_id,
+            "status": "CAUSAL_REUSE_PROVEN",
+            "changed_dimensions": changed_dimensions,
+            "causal_reuse_basis": str(metadata["child_subset_refinement"]),
+            "reason": "EXPLICIT_NONINTERFERENCE",
+            "provider_required": False,
+        }
+
+    @staticmethod
+    def _rescope_parent_scenario_facts(
+        child: ScenarioCandidate, *, malfunction_id: str,
+    ) -> ScenarioCandidate:
+        """Carry source-valid parent analytical settings into one isolated child."""
+        scope = {
+            "malfunction_id": malfunction_id,
+            "scenario_id": child.scenario_id,
+            "parent_scenario_id": child.source_scenario_id,
+        }
+        provenance = deepcopy(child.fact_provenance)
+        for field in (
+            "object_type", "object_position", "relative_distance_m",
+            "object_speed_kph", "road_user_type", "collision_type",
+        ):
+            metadata = provenance.get(field)
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("origin", metadata.get("provenance", ""))).upper() != "SCENARIO_DEFINED":
+                continue
+            if field not in child.facts:
+                continue
+            metadata["analysis_assumption_scope"] = scope
+            metadata["applicable_scope"] = scope
+            metadata["parent_scenario_id"] = child.source_scenario_id
+            metadata["inherited_as_child_subset"] = True
+            provenance[field] = metadata
+        return replace(child, fact_provenance=provenance)
+
+    def _child_state(
+        self, *, parent: HARAState, target_run_id: str,
+        children: list[ScenarioCandidate], child_assessments: list[dict[str, Any]],
+        risk_results: list[RiskAssessment], pending: list[dict[str, Any]],
+    ) -> HARAState:
+        state = HARAState.read_committed(parent.to_dict())
+        state.run_id = target_run_id
+        state.stage = WorkflowStage.BLOCKED if pending else WorkflowStage.QUALITY_GATE
+        state.scenarios = children
+        state.item_definition = deepcopy(parent.item_definition)
+        state.item_definition["scenario_assessments"] = child_assessments
+        state.risk_results = risk_results
+        state.safety_goals = []
+        state.pending_reviews = pending
+        state.audit_trail = [{
+            "event": "scenario_synthesis_child_run_materialized",
+            "source_run_id": parent.run_id,
+            "target_run_id": target_run_id,
+            "child_count": len(children),
+            "provider_calls_for_upstream_regeneration": 0,
+        }]
+        state.errors = []
+        return state
+
+    @staticmethod
+    def _pending_risk(
+        index: int, child: ScenarioCandidate, malfunction_id: str,
+        hazardous_event: str, reason: str,
+    ) -> RiskAssessment:
+        def pending(axis: str) -> EvidenceValue[str]:
+            return EvidenceValue(
+                value="", status=ReviewStatus.PENDING, sources=[],
+                review_reason=f"{axis}: {reason}",
+            )
+        return RiskAssessment(
+            assessment_id=f"RA-SYNTH-{index:04d}-{malfunction_id}-{child.scenario_id}",
+            scenario_id=child.scenario_id,
+            severity=pending("Severity"), exposure=pending("Exposure"),
+            controllability=pending("Controllability"), asil=pending("ASIL"),
+            malfunction_id=malfunction_id, hazardous_event=hazardous_event,
+        )
+
+    @staticmethod
+    def _candidate_artifact(inputs: list[Any], preparation: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifact_version": "scenario-synthesis-candidates-v1",
+            "bounds": {
+                "candidate_cap_per_dimension": ConstrainedScenarioSynthesisService.candidate_cap_per_dimension,
+                "combination_cap": ConstrainedScenarioSynthesisService.combination_cap,
+            },
+            "semantic_ranking_inputs_exclude": ["e_z", "e_f", "E_total", "S", "C", "ASIL"],
+            "groups": [{
+                "semantic_group_id": item.semantic_group_id,
+                "malfunction_id": item.malfunction_id,
+                "parent_scenario_id": item.parent_scenario_id,
+                "hazardous_event_id": item.hazardous_event_id,
+                "candidate_sets": [value.to_dict() for value in item.dimension_candidate_sets],
+                "bounded_combinations": [
+                    value.to_dict() for value in preparation["combinations"][item.semantic_group_id]
+                ],
+            } for item in inputs],
+            "summary": preparation["stats"],
+        }
+
+    @staticmethod
+    def _audit_markdown(audit: dict[str, Any]) -> str:
+        summary = audit["summary"]
+        before = summary["dimension_resolution_before"]
+        after = summary.get("dimension_resolution_after", {})
+        lines = [
+            "# Scenario Synthesis Audit", "",
+            f"- Source run: `{audit['source_run_id']}`",
+            f"- Child run: `{audit['run_id']}`",
+            f"- Eligible parent HE: {summary['eligible_parent_he']}",
+            f"- Unique semantic groups: {summary['unique_semantic_synthesis_groups']}",
+            f"- Analytical children generated: {summary.get('analytical_children_generated', 0)}",
+            f"- Method-valid: {summary.get('method_valid', 0)}",
+            f"- Pending synthesis: {summary.get('pending_synthesis', 0)}",
+            f"- Candidate search truncated groups: {summary['candidate_search_truncated']}",
+            "", "## Dimension resolution", "",
+            "| Dimension | Before | After |", "|---|---:|---:|",
+        ]
+        for dimension in before:
+            lines.append(f"| {dimension} | {before[dimension]} | {after.get(dimension, 0)} |")
+        lines.extend([
+            "", "## Governance", "",
+            "- Semantic ranking does not inspect Exposure or S/E/C values.",
+            "- Empty ODD/semantic matches remain `PENDING_NO_COMPATIBLE_ATOM`; no full-catalog fallback is used.",
+            "- Parent scenarios and accepted parent artifacts remain immutable.",
+            "- Per-SC E domain decision: `KEEP_CURRENT_DOMAIN_RESOLUTION`.",
+        ])
+        return "\n".join(lines) + "\n"
+
+    def run(
+        self, *, source_run_id: str, target_run_id: str,
+        smoke_count: int = 5, run_full: bool = False, max_workers: int = 4,
+        output_path: str | Path | None = None,
+        baseline_path: str | Path = "method_assets/fusa_baseline_v1/manifest.yaml",
+        report_template_path: str | Path = "references/HARA_Template_AI_20260327.xlsx",
+    ) -> dict[str, Any]:
+        if target_run_id == source_run_id:
+            raise ValueError("Scenario synthesis must use a distinct child run ID")
+        parent_inventory_before = self._parent_inventory(source_run_id)
+        parent = CheckpointRepository(self.run_dir).load(source_run_id)
+        inputs, scenarios, malfunctions, parent_assessments, preparation = self._prepare(parent)
+        review_dir = self.review_root / target_run_id
+        provider_trace_path = review_dir / "scenario_synthesis_provider_trace.json"
+        candidate_payload = self._candidate_artifact(inputs, preparation)
+        _write_json(review_dir / "scenario_synthesis_candidates.json", candidate_payload)
+
+        provider_ready = [item for item in inputs if self._provider_ready(item)]
+        deterministic_resolved = [
+            item for item in inputs
+            if all(value.locked_atom_ids or value.dimension in self.synthesis.optional_dimensions
+                   for value in item.dimension_candidate_sets)
+        ]
+        preparation["stats"].update({
+            "raw_eligible_records": len(inputs),
+            "deterministically_resolved_groups": len(deterministic_resolved),
+            "provider_required_groups": len(provider_ready),
+            "provider_ineligible_groups": len(inputs) - len(provider_ready),
+        })
+        selections: dict[str, tuple[tuple[ScenarioSynthesisAssessment, ...], dict[str, Any]]] = {}
+        smoke_inputs = self._smoke_groups(provider_ready, smoke_count)
+        if smoke_inputs:
+            selections = self._run_provider_groups(
+                inputs=smoke_inputs, max_workers=1, progress_path=provider_trace_path,
+                phase="smoke", existing=selections,
+            )
+        smoke_traces = [selections[item.semantic_group_id][1] for item in smoke_inputs]
+        smoke_passed, smoke_failures = self._smoke_passed(smoke_traces, len(smoke_inputs))
+        full_started = bool(run_full and smoke_passed)
+        if full_started:
+            selections = self._run_provider_groups(
+                inputs=provider_ready, max_workers=max_workers,
+                progress_path=provider_trace_path, phase="full", existing=selections,
+            )
+
+        all_traces = [value[1] for _, value in sorted(selections.items())]
+        successful_calls = [
+            call for trace in all_traces for call in trace.get("calls", [])
+            if call.get("schema_status") == "PASS"
+        ]
+        provider_payload = {
+            "artifact_version": "scenario-synthesis-provider-trace-v1",
+            "configured_model": str(getattr(getattr(self.client, "config", None), "model", "")),
+            "resolved_models": sorted({
+                str(item.get("resolved_model", "")) for item in successful_calls
+                if item.get("resolved_model")
+            }),
+            "thinking": str(getattr(getattr(self.client, "config", None), "scenario_thinking", "")),
+            "smoke": {
+                "requested": smoke_count, "executed": len(smoke_inputs),
+                "passed": smoke_passed, "failures": smoke_failures,
+                "semantic_group_ids": [item.semantic_group_id for item in smoke_inputs],
+            },
+            "full_synthesis_started": full_started,
+            "full_synthesis_groups": len(provider_ready) if full_started else 0,
+            "groups": all_traces,
+            "summary": {
+                "provider_calls": sum(self._trace_call_count(item) for item in all_traces),
+                "smoke_cache_hits_in_full": len(smoke_inputs) if full_started else 0,
+                "repairs": sum(int(item.get("repairs", 0)) for item in all_traces),
+                "failures": sum(item.get("status") != "PASS" for item in all_traces),
+            },
+        }
+        _write_json(provider_trace_path, provider_payload)
+
+        children: list[ScenarioCandidate] = []
+        instantiations = []
+        child_contexts: dict[str, tuple[Any, dict[str, Any]]] = {}
+        if full_started:
+            for synthesis_input in inputs:
+                selection = selections.get(synthesis_input.semantic_group_id)
+                if selection is None:
+                    continue
+                assessments, trace = selection
+                parent_scenario = scenarios[synthesis_input.parent_scenario_id]
+                for assessment in assessments:
+                    child, instantiation = self.synthesis.materialize(
+                        synthesis_input=synthesis_input, assessment=assessment,
+                        parent=parent_scenario,
+                        provider_evidence={
+                            "semantic_group_id": synthesis_input.semantic_group_id,
+                            "request_ids": [
+                                call.get("request_id", "") for call in trace.get("calls", [])
+                                if call.get("request_id")
+                            ],
+                            "resolved_model": next((
+                                call.get("resolved_model", "") for call in reversed(trace.get("calls", []))
+                                if call.get("resolved_model")
+                            ), ""),
+                            "prompt_version": "p5-d-scenario-synthesis-v1",
+                            "rationale": assessment.semantic_rationale,
+                            "context_refs": list(assessment.context_refs),
+                        },
+                    )
+                    child = self._rescope_parent_scenario_facts(
+                        child, malfunction_id=synthesis_input.malfunction_id,
+                    )
+                    children.append(child)
+                    instantiations.append(instantiation.to_dict())
+                    child_contexts[child.scenario_id] = (
+                        synthesis_input,
+                        parent_assessments[(synthesis_input.malfunction_id, synthesis_input.parent_scenario_id)],
+                    )
+
+        after = Counter()
+        for child in children:
+            for dimension, binding in child.facts.get("method_scenario_dimensions", {}).items():
+                if binding.get("resolution_status") == "RESOLVED":
+                    after[dimension] += 1
+        pending_synthesis = (
+            len(inputs) - len({
+                item.semantic_group_id for item, _ in child_contexts.values()
+            }) if full_started else len(inputs)
+        )
+        preparation["stats"].update({
+            "analytical_children_generated": len(children),
+            "method_valid": len(children),
+            "method_invalid": 0,
+            "pending_synthesis": pending_synthesis,
+            "dimension_resolution_after": {
+                dimension: after[dimension] for dimension in self.synthesis.dimensions
+            },
+        })
+
+        causal_records = []
+        for child in children:
+            synthesis_input, parent_assessment = child_contexts[child.scenario_id]
+            causal_records.append(self._causal_delta(
+                synthesis_input=synthesis_input,
+                parent_assessment=parent_assessment, child=child,
+            ))
+        causal_counts = Counter(item["status"] for item in causal_records)
+        causal_payload = {
+            "artifact_version": "scenario-synthesis-causal-delta-queue-v1",
+            "run_id": target_run_id,
+            "records": causal_records,
+            "summary": {
+                "total": len(causal_records),
+                "deterministic_reuse": causal_counts["CAUSAL_REUSE_PROVEN"],
+                "provider_revalidation": causal_counts["CAUSAL_REVALIDATION_REQUIRED"],
+                "causal_gap": causal_counts["CAUSAL_GAP"],
+                "source_conflict": causal_counts["SOURCE_CONFLICT"],
+            },
+        }
+        _write_json(review_dir / "causal_delta_queue.json", causal_payload)
+
+        exposure_records = []
+        causal_by_child = {item["child_scenario_id"]: item for item in causal_records}
+        e_counts = Counter()
+        readiness_counts = Counter()
+        for child in children:
+            synthesis_input, _ = child_contexts[child.scenario_id]
+            scenario = {
+                **child.facts,
+                "component_category": synthesis_input.malfunction.get("component_category", ""),
+            }
+            readiness = self.exposure.assess(scenario)
+            readiness_counts[readiness["status"]] += 1
+            causal_status = causal_by_child[child.scenario_id]["status"]
+            executed = causal_status == "CAUSAL_REUSE_PROVEN" and readiness["status"] in {
+                "READY_COMPLETE", "READY_METHOD_IRRELEVANT_GAPS",
+            }
+            result = readiness["baseline_exposure"] if executed else {}
+            value = str(result.get("value", "")) if executed else ""
+            e_counts[value if value in {"E0", "E1", "E2", "E3", "E4"} else "Pending"] += 1
+            exposure_records.append({
+                "malfunction_id": synthesis_input.malfunction_id,
+                "scenario_id": child.scenario_id,
+                "causal_status": causal_status,
+                "readiness": readiness,
+                "execution_status": "FINALIZED" if executed else "NOT_REACHED_CAUSAL_OR_INPUT_GATE",
+                "result": result,
+            })
+
+        physics_records = []
+        for child in children:
+            synthesis_input, _ = child_contexts[child.scenario_id]
+            physics_records.append(self.physics.instantiate(
+                scenario=child, malfunction=synthesis_input.malfunction,
+                causal_status=causal_by_child[child.scenario_id]["status"],
+            ))
+        physics_payload = {
+            "artifact_version": "analytical-physics-inputs-v1",
+            "run_id": target_run_id,
+            "records": physics_records,
+            "summary": {
+                "authority_distributions": self.physics.authority_distributions(physics_records),
+                "relative_speed_derived": sum(
+                    any(item.get("field") == "relative_speed_kph" for item in record.get("derived", []))
+                    for record in physics_records
+                ),
+                "ttc_derived": sum(
+                    any(item.get("field") == "ttc_s" for item in record.get("derived", []))
+                    for record in physics_records
+                ),
+            },
+        }
+        _write_json(review_dir / "analytical_physics_inputs.json", physics_payload)
+        assumption_pack = self.physics.assumption_pack(
+            physics_records, {item.scenario_id: item for item in children}, malfunctions,
+        )
+        assumption_pack["run_id"] = target_run_id
+        _write_json(review_dir / "engineering_assumption_pack.json", assumption_pack)
+
+        child_assessments = []
+        pending_reviews = []
+        risk_results = []
+        for index, child in enumerate(children, start=1):
+            synthesis_input, parent_assessment = child_contexts[child.scenario_id]
+            causal = causal_by_child[child.scenario_id]
+            reason = (
+                "Analytical child contains new Scenario semantics; causal dependency metadata "
+                "does not prove noninterference. Differential causal validation is required."
+                if causal["status"] == "CAUSAL_REVALIDATION_REQUIRED" else
+                "Analytical child is pending downstream physical/risk evaluation."
+            )
+            assessment = {
+                "malfunction_id": synthesis_input.malfunction_id,
+                "scenario_id": child.scenario_id,
+                "hazardous_event_id": synthesis_input.hazardous_event_id,
+                "physically_feasible": False, "functionally_relevant": False,
+                "causally_relevant": False, "risk_dimensions_changed": [],
+                "rationale": reason,
+                "hazardous_event": parent_assessment.get("hazardous_event", ""),
+                "potential_harm": "", "status": "PENDING", "confidence": 0.0,
+                "breakpoint": "", "causal_chain": {}, "risk_dimension_changes": [],
+                "evidence_contract_version": "scenario-causal-assessment-v4",
+                "final_retain": False,
+                "risk_eligibility_status": "PENDING_FEASIBILITY",
+                "risk_eligibility_reason_codes": ["CAUSAL_REVALIDATION_REQUIRED"],
+                "scenario_synthesis_status": "METHOD_VALID",
+                "causal_delta_status": causal["status"],
+            }
+            child_assessments.append(assessment)
+            pending_reviews.append({
+                "field": "scenario_causal_validation",
+                "malfunction_id": synthesis_input.malfunction_id,
+                "scenario_id": child.scenario_id, "reason": reason,
+            })
+            risk_results.append(self._pending_risk(
+                index, child, synthesis_input.malfunction_id,
+                str(parent_assessment.get("hazardous_event", "")), reason,
+            ))
+
+        child_state = self._child_state(
+            parent=parent, target_run_id=target_run_id, children=children,
+            child_assessments=child_assessments, risk_results=risk_results,
+            pending=pending_reviews,
+        )
+        checkpoint_path = None
+        risk_trace_path = review_dir / "risk_execution_trace.json"
+        excel_path = None
+        if full_started:
+            checkpoint_path = CheckpointRepository(self.run_dir).save(child_state)
+            writer = ReviewArtifactWriter(target_run_id, self.review_root)
+            for function in child_state.functions:
+                writer.record_function(function)
+            for malfunction in child_state.malfunctions:
+                writer.record_malfunction(malfunction)
+            for child in children:
+                synthesis_input, _ = child_contexts[child.scenario_id]
+                writer.record_scenario_candidate(
+                    child, generated_for_malfunction_ids=(synthesis_input.malfunction_id,),
+                )
+            for assessment in child_assessments:
+                malfunction = malfunctions.get(assessment["malfunction_id"], {})
+                writer.record_scenario_feasibility(
+                    assessment, function_id=str(malfunction.get("function_id", "")),
+                    guideword=str(malfunction.get("guideword", "")),
+                )
+            trace = RiskExecutionTraceService(self.method).project(
+                run_id=target_run_id, assessments=child_assessments,
+                candidates=children, committed=True, risks=risk_results,
+            )
+            trace["scenario_synthesis"] = {
+                "causal_delta_summary": causal_payload["summary"],
+                "exposure_readiness": dict(sorted(readiness_counts.items())),
+                "exposure_distribution": {
+                    key: e_counts[key] for key in ("E0", "E1", "E2", "E3", "E4", "Pending")
+                },
+                "physics": physics_payload["summary"],
+            }
+            _write_json(risk_trace_path, trace)
+            writer.write_summary(child_state, status="BLOCKED" if pending_reviews else "COMPLETED")
+            if output_path is not None:
+                excel_path = OfflineReportRebuilder().rebuild(
+                    checkpoint_path=checkpoint_path,
+                    method_baseline_path=baseline_path,
+                    report_style_template_path=report_template_path,
+                    output_path=output_path, review_root=self.review_root,
+                )
+
+        audit_payload = {
+            "artifact_version": "scenario-synthesis-audit-v1",
+            "run_id": target_run_id, "source_run_id": source_run_id,
+            "full_started": full_started,
+            "smoke": provider_payload["smoke"],
+            "provider": provider_payload["summary"],
+            "summary": {
+                **preparation["stats"],
+                "causal_delta": causal_payload["summary"],
+                "exposure_readiness": dict(sorted(readiness_counts.items())),
+                "exposure_distribution": {
+                    key: e_counts[key] for key in ("E0", "E1", "E2", "E3", "E4", "Pending")
+                },
+                "physics": physics_payload["summary"],
+                "engineering_assumptions_requiring_approval": assumption_pack["summary"]["fields_requiring_approval"],
+            },
+            "e_domain_decision": {
+                "decision": "KEEP_CURRENT_DOMAIN_RESOLUTION",
+                "reason": (
+                    "Original per-SC resolver was free-form LLM inference with FM fallback; "
+                    "no source-governed per-SC domain rule was present."
+                ),
+            },
+            "parent_artifact_hashes_before": parent_inventory_before,
+        }
+        parent_inventory_after = self._parent_inventory(source_run_id)
+        audit_payload["parent_artifact_hashes_after"] = parent_inventory_after
+        audit_payload["parent_artifacts_mutated"] = parent_inventory_before != parent_inventory_after
+        _write_json(review_dir / "scenario_synthesis_audit.json", audit_payload)
+        _write_text(review_dir / "scenario_synthesis_audit.md", self._audit_markdown(audit_payload))
+
+        result = {
+            "source_run_id": source_run_id, "target_run_id": target_run_id,
+            "smoke_passed": smoke_passed, "smoke_failures": smoke_failures,
+            "full_started": full_started,
+            "summary": audit_payload["summary"],
+            "configured_model": provider_payload["configured_model"],
+            "resolved_models": provider_payload["resolved_models"],
+            "thinking": provider_payload["thinking"],
+            "provider": provider_payload["summary"],
+            "parent_artifacts_mutated": audit_payload["parent_artifacts_mutated"],
+            "checkpoint": str(checkpoint_path) if checkpoint_path else "",
+            "risk_trace": str(risk_trace_path) if full_started else "",
+            "excel": str(excel_path) if excel_path else "",
+            "review_dir": str(review_dir),
+        }
+        return result
+
+
+__all__ = ["ScenarioSynthesisRunner"]
