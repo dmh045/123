@@ -41,12 +41,61 @@ class HARAReportProjectionService:
             ids.append("EC-02")
         return "; ".join(ids)
 
+    @staticmethod
+    def _causal_status_by_pair(
+        causal_trace: Mapping[str, Any] | None,
+    ) -> dict[tuple[str, str], str]:
+        statuses: dict[tuple[str, str], str] = {}
+        for audit in (causal_trace or {}).get("audits", []):
+            if not isinstance(audit, Mapping):
+                continue
+            for item in audit.get("item_salvage_audit", []):
+                if not isinstance(item, Mapping):
+                    continue
+                parsed = item.get("parsed_assessment", {})
+                if not isinstance(parsed, Mapping):
+                    continue
+                pair = (
+                    str(parsed.get("malfunction_id", "")),
+                    str(parsed.get("scenario_id", "")),
+                )
+                if not all(pair):
+                    continue
+                statuses[pair] = (
+                    "METHOD_VALID — CAUSAL_REVALIDATED"
+                    if bool(parsed.get("final_retain"))
+                    else "CAUSAL_GAP — EXCLUDED_FROM_RISK"
+                )
+        return statuses
+
+    @classmethod
+    def _assessment_status(
+        cls, *, risk: Any, scenario: Any, trace: Mapping[str, Any],
+        causal_status: str,
+    ) -> str:
+        if bool(trace.get("risk_scoring_invoked")):
+            return "ELIGIBLE — RISK SCORING INVOKED"
+        if causal_status:
+            return causal_status
+        instance = getattr(scenario, "analysis_instance", {}) or {}
+        if str(instance.get("validation_status", "")).upper() == "VALIDATED":
+            return "METHOD_VALID — CAUSAL_REVALIDATION_REQUIRED"
+        finalized = all(
+            _status(getattr(risk, field)) == "FINALIZED"
+            for field in ("severity", "exposure", "controllability", "asil")
+        )
+        return (
+            "ELIGIBLE — RISK SCORING INVOKED"
+            if finalized else "PENDING — RISK SCORING NOT EXECUTED"
+        )
+
     def project(
         self,
         state: HARAState,
         method: MethodContract,
         *,
         risk_trace: Mapping[str, Any] | None = None,
+        causal_trace: Mapping[str, Any] | None = None,
         run_summary: Mapping[str, Any] | None = None,
         style_template_hash: str = "",
         risk_trace_reference: str = "",
@@ -56,6 +105,7 @@ class HARAReportProjectionService:
             (str(item.get("malfunction_id", "")), str(item.get("scenario_id", ""))): item
             for item in trace_rows if isinstance(item, Mapping)
         }
+        causal_status_by_pair = self._causal_status_by_pair(causal_trace)
         malfunctions = {str(item.get("malfunction_id", "")): item for item in state.malfunctions}
         scenarios = {str(item.scenario_id): item for item in state.scenarios}
         functions = {str(item.get("function_id", "")): item for item in state.functions}
@@ -78,6 +128,12 @@ class HARAReportProjectionService:
                 "controllability": _value(risk.controllability) or self.text.pending_value(risk.controllability),
                 "asil": _value(risk.asil) or self.text.pending_value(risk.asil),
             }
+            assessment_status = self._assessment_status(
+                risk=risk, scenario=scenario, trace=trace,
+                causal_status=causal_status_by_pair.get(
+                    (risk.malfunction_id, risk.scenario_id), ""
+                ),
+            )
             row = HARAReportRowView(
                 hara_id=f"HARA_{offset:03d}",
                 malfunction_id=risk.malfunction_id,
@@ -106,7 +162,7 @@ class HARAReportProjectionService:
                 sg_id="",
                 safety_goal="",
                 safe_state="",
-                assessment_status="ELIGIBLE — RISK SCORING INVOKED",
+                assessment_status=assessment_status,
                 clarification_ids=self._clarifications(risk),
                 remark="",
             )
@@ -141,8 +197,16 @@ class HARAReportProjectionService:
             report_schema_version=self.schema.schema_version,
             report_schema_hash=self.schema.schema_hash,
             style_template_hash=style_template_hash,
-            report_status="DRAFT_READY",
-            release_status="DRAFT — NOT FOR RELEASE",
+            report_status=(
+                "SCENARIO SYNTHESIS COMPLETE — CAUSAL REVALIDATION IN PROGRESS — "
+                "RISK SCORING NOT YET EXECUTED"
+                if any(
+                    row.assessment_status
+                    != "ELIGIBLE — RISK SCORING INVOKED" for row in rows
+                )
+                else "DRAFT_READY"
+            ),
+            release_status="NOT FOR RELEASE",
             function_count=len(state.functions),
             guideword_assessment_count=len(state.guideword_assessments),
             malfunction_count=len(state.malfunctions),

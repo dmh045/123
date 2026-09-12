@@ -37,34 +37,82 @@ class EngineeringReportTextMapper:
             return ""
         return f"车辆速度为 {minimum:g}–{maximum:g} km/h"
 
-    def scenario(self, scenario: Any) -> tuple[str, str]:
-        """Project only supplied scenario facts; unresolved facts stay in detail."""
+    @staticmethod
+    def _dimensions(scenario: Any) -> Mapping[str, Any]:
         facts = getattr(scenario, "facts", {}) or {}
-        base = str(getattr(scenario, "operating_scenario", "") or "").strip().rstrip("。；;")
-        mode = self._display_mode(getattr(scenario, "operating_mode", "") or facts.get("operating_mode", ""))
-        parts = [part for part in (base, f"AVP 处于 {mode} 状态" if mode else "", self._speed_text(facts.get("ego_speed_constraint"))) if part]
-        operational = "，".join(parts) + "。" if parts else "运行场景未提供。"
+        value = facts.get("method_scenario_dimensions", {})
+        return value if isinstance(value, Mapping) else {}
 
-        details: list[str] = []
+    @staticmethod
+    def _resolved_value(dimensions: Mapping[str, Any], name: str) -> str:
+        binding = dimensions.get(name, {})
+        if not isinstance(binding, Mapping):
+            return ""
+        if str(binding.get("resolution_status", "")).upper() != "RESOLVED":
+            return ""
+        value = str(binding.get("method_value", "") or "").strip()
+        return value.split("|", 1)[-1].strip() if "|" in value else value
+
+    @staticmethod
+    def _dimension_detail(dimensions: Mapping[str, Any], name: str) -> str:
+        if name not in dimensions:
+            return ""
+        binding = dimensions.get(name, {})
+        if not isinstance(binding, Mapping):
+            return ""
+        if str(binding.get("resolution_status", "")).upper() == "RESOLVED":
+            value = str(binding.get("method_value", "") or "").strip()
+            if "|" in value:
+                value = value.split("|", 1)[-1].strip()
+            return f"{name}={value}" if value else f"{name}=已解析"
+        labels = {
+            "WHERE": "场所未解析",
+            "ROAD": "道路条件未解析",
+            "EGO_ACTION": "自车动作未解析",
+            "EGO_X_ROAD": "自车与道路关系未解析",
+            "TRAFFIC_PATTERN": "交通关系/交通模式未解析",
+            "EGO_DYNAMICS": "自车动态未解析",
+            "OBJECT": "对象/交通参与者未解析",
+        }
+        return f"{name}={labels.get(name, '未解析')}"
+
+    def scenario(self, scenario: Any) -> tuple[str, str]:
+        """Project supplied child facts without deriving new scenario semantics."""
+        facts = getattr(scenario, "facts", {}) or {}
+        dimensions = self._dimensions(scenario)
+        where = self._resolved_value(dimensions, "WHERE")
+        action = self._resolved_value(dimensions, "EGO_ACTION")
+        dynamics = self._resolved_value(dimensions, "EGO_DYNAMICS")
+        object_value = self._resolved_value(dimensions, "OBJECT")
+        base = where or str(
+            getattr(scenario, "operating_scenario", "") or ""
+        ).strip().rstrip("。；;")
+        mode = self._display_mode(getattr(scenario, "operating_mode", "") or facts.get("operating_mode", ""))
+        parts = [
+            part for part in (
+                f"场所：{base}" if base else "",
+                f"AVP 处于 {mode} 状态" if mode else "",
+                f"自车动作：{action}" if action else "",
+                f"自车动态：{dynamics}" if dynamics else "",
+                f"对象：{object_value}" if object_value else "",
+                self._speed_text(facts.get("ego_speed_constraint")),
+            ) if part
+        ]
+        operational = "；".join(parts) + "。" if parts else "运行场景未提供。"
+
+        details = [
+            value for value in (
+                self._dimension_detail(dimensions, name)
+                for name in (
+                    "WHERE", "ROAD", "EGO_ACTION", "EGO_X_ROAD",
+                    "TRAFFIC_PATTERN", "EGO_DYNAMICS", "OBJECT",
+                )
+            ) if value
+        ]
         if facts.get("weather_conditions"):
             details.append(f"天气条件：{facts['weather_conditions']}")
-        if facts.get("road_surface_conditions"):
+        if facts.get("road_surface_conditions") and not self._resolved_value(dimensions, "ROAD"):
             details.append(f"路面条件：{facts['road_surface_conditions']}")
-
-        dimensions = facts.get("method_scenario_dimensions", {})
-        if isinstance(dimensions, Mapping):
-            def unresolved(name: str) -> bool:
-                item = dimensions.get(name, {})
-                return isinstance(item, Mapping) and bool(item.get("unresolved_reason"))
-
-            if unresolved("ROAD"):
-                details.append("道路条件未明确")
-            if unresolved("TRAFFIC_PATTERN"):
-                details.append("交通参与者信息未提供")
-            if unresolved("OBJECT"):
-                details.append("对象信息未提供")
-            if unresolved("EGO_X_ROAD"):
-                details.append("道路交互条件未提供")
         return operational, "；".join(details) + "。" if details else "未提供额外场景上下文。"
 
     def pending_value(self, evidence: Any) -> str:

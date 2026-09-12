@@ -8,6 +8,9 @@ from .report_schema import (
     ReportField, ReportSchema, ReportSchemaError, ReportSchemaValidation,
     ReportSchemaValidator, ReportSheet, load_report_schema,
 )
+from .scenario_output_quality_audit import (
+    DIMENSIONS, ScenarioOutputQualityAuditService,
+)
 from .view_model import (
     AuditReferenceView, HARAReportRowView, HARAReportViewModel,
     MethodBasisView, SafetyGoalView, SummaryView,
@@ -19,5 +22,6 @@ __all__ = [
     "MethodBasisView", "OfflineReportRebuilder", "ReportField", "ReportSchema",
     "ReportSchemaError", "ReportSchemaValidation", "ReportSchemaValidator",
     "ReportSheet", "SafetyGoalView", "SummaryView", "load_report_schema",
+    "DIMENSIONS", "ScenarioOutputQualityAuditService",
     "audit_content_presentation", "audit_potential_harm_path", "style_template_hash",
 ]

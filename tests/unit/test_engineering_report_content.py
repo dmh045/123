@@ -66,10 +66,39 @@ def test_text_mapper_keeps_scenario_facts_and_hides_dimension_reason_codes():
     mapper = EngineeringReportTextMapper()
     scenario = _state().scenarios[0]
     operational, detail = mapper.scenario(scenario)
-    assert operational == "室外停车场，AVP 处于 Active 状态，车辆速度为 0–20 km/h。"
-    assert detail == "道路条件未明确；交通参与者信息未提供；对象信息未提供；道路交互条件未提供。"
+    assert operational == "场所：室外停车场；AVP 处于 Active 状态；车辆速度为 0–20 km/h。"
+    assert detail == (
+        "ROAD=道路条件未解析；EGO_X_ROAD=自车与道路关系未解析；"
+        "TRAFFIC_PATTERN=交通关系/交通模式未解析；OBJECT=对象/交通参与者未解析。"
+    )
+    assert "交通参与者信息未提供" not in detail
     assert "AMBIGUOUS_BINDING" not in detail
     assert "NO_ITEM_FACT" not in detail
+
+
+def test_text_mapper_projects_resolved_synthesized_dimensions_separately():
+    scenario = ScenarioCandidate(
+        "SCN-CHILD", "legacy location", "", "", operating_mode="active",
+        facts={
+            "method_scenario_dimensions": {
+                "WHERE": {"resolution_status": "RESOLVED", "method_value": "SO010 | Garage"},
+                "ROAD": {"resolution_status": "RESOLVED", "method_value": "FB005 | Normal friction"},
+                "EGO_ACTION": {"resolution_status": "RESOLVED", "method_value": "FV010 | Parking in/out"},
+                "EGO_X_ROAD": {"resolution_status": "RESOLVED", "method_value": "PH012 | Slope 5-8%"},
+                "TRAFFIC_PATTERN": {"resolution_status": "PENDING", "unresolved_reason": "NO_ITEM_FACT"},
+                "EGO_DYNAMICS": {"resolution_status": "RESOLVED", "method_value": "FA001 | Low speed"},
+                "OBJECT": {"resolution_status": "RESOLVED", "method_value": "CN_other_road_users | Pedestrian"},
+            },
+        },
+    )
+    operational, detail = EngineeringReportTextMapper().scenario(scenario)
+    assert "场所：Garage" in operational
+    assert "自车动作：Parking in/out" in operational
+    assert "自车动态：Low speed" in operational
+    assert "对象：Pedestrian" in operational
+    assert "EGO_X_ROAD=Slope 5-8%" in detail
+    assert "TRAFFIC_PATTERN=交通关系/交通模式未解析" in detail
+    assert "交通参与者信息未提供" not in detail
 
 
 def test_potential_harm_path_is_upstream_pending_not_a_projection_gap():
@@ -91,6 +120,36 @@ def test_projection_preserves_a_resolved_potential_harm_without_recomputing_it()
     state = _state(potential_harm="人员受伤")
     view = HARAReportProjectionService(load_report_schema()).project(state, _method())
     assert view.rows[0].potential_harm == "人员受伤"
+
+
+def test_projection_derives_synthesis_causal_and_risk_statuses():
+    state = _state()
+    state.scenarios[0].analysis_instance = {
+        "malfunction_id": "MF-1", "validation_status": "VALIDATED",
+    }
+    service = HARAReportProjectionService(load_report_schema())
+    synthesis = service.project(state, _method())
+    assert synthesis.rows[0].assessment_status == (
+        "METHOD_VALID — CAUSAL_REVALIDATION_REQUIRED"
+    )
+    assert "RISK SCORING NOT YET EXECUTED" in synthesis.summary.report_status
+
+    parsed = {
+        "malfunction_id": "MF-1", "scenario_id": "SCN-1",
+        "final_retain": True,
+    }
+    causal = service.project(state, _method(), causal_trace={
+        "audits": [{"item_salvage_audit": [{"parsed_assessment": parsed}]}],
+    })
+    assert causal.rows[0].assessment_status == "METHOD_VALID — CAUSAL_REVALIDATED"
+
+    scored = service.project(state, _method(), risk_trace={
+        "assessments": [{
+            "malfunction_id": "MF-1", "scenario_id": "SCN-1",
+            "risk_scoring_invoked": True,
+        }],
+    })
+    assert scored.rows[0].assessment_status == "ELIGIBLE — RISK SCORING INVOKED"
 
 
 def test_exposure_rationale_is_trace_derived_for_finalized_evidence():

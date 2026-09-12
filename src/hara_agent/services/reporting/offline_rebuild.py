@@ -28,6 +28,8 @@ class OfflineReportRebuilder:
         report_style_template_path: str | Path,
         output_path: str | Path,
         review_root: str | Path = "runtime/review",
+        causal_trace_path: str | Path | None = None,
+        audit_output_dir: str | Path | None = None,
     ) -> Path:
         checkpoint = Path(checkpoint_path).expanduser().resolve()
         state = HARAState.read_committed(json.loads(checkpoint.read_text(encoding="utf-8")))
@@ -42,17 +44,30 @@ class OfflineReportRebuilder:
         trace = {}
         if trace_path.is_file():
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        causal_trace = {}
+        if causal_trace_path is not None:
+            causal_path = Path(causal_trace_path).expanduser().resolve()
+            if causal_path.is_file():
+                causal_trace = json.loads(causal_path.read_text(encoding="utf-8"))
+            else:
+                raise FileNotFoundError(f"Causal trace not found: {causal_path}")
         summary = review_reader.summary()
         template_hash = style_template_hash(report_style_template_path)
         view_model = HARAReportProjectionService(self.schema).project(
             state,
             resolution.method,
             risk_trace=trace,
+            causal_trace=causal_trace,
             run_summary=summary,
             style_template_hash=template_hash,
             risk_trace_reference=str(trace_path),
         )
-        p2c_audit_dir = Path(review_root).expanduser().resolve() / "p2c-content"
+        audit_root = (
+            Path(audit_output_dir).expanduser().resolve()
+            if audit_output_dir is not None
+            else Path(review_root).expanduser().resolve()
+        )
+        p2c_audit_dir = audit_root / "p2c-content"
         p2c_audit_dir.mkdir(parents=True, exist_ok=True)
         potential_harm_path = audit_potential_harm_path(state, view_model)
         self._write_json(
@@ -60,7 +75,7 @@ class OfflineReportRebuilder:
             potential_harm_path,
         )
         renderer = HARAReportWorkbookRenderer()
-        style_audit_dir = Path(review_root).expanduser().resolve() / "p2b-template-style"
+        style_audit_dir = audit_root / "p2b-template-style"
         style_audit_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(
             style_audit_dir / "template_style_audit.json",
@@ -78,13 +93,13 @@ class OfflineReportRebuilder:
         cleanup_audit = renderer.new_sheet_style_isolation_audit(
             output, before_path=prior_report if prior_report.is_file() else None,
         )
-        cleanup_audit_dir = Path(review_root).expanduser().resolve() / "p2b1-style-cleanup"
+        cleanup_audit_dir = audit_root / "p2b1-style-cleanup"
         cleanup_audit_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(
             cleanup_audit_dir / "new_sheet_style_isolation_audit.json",
             cleanup_audit,
         )
-        audit_dir = Path(review_root).expanduser().resolve() / "p2-report-rebuild"
+        audit_dir = audit_root / "p2-report-rebuild"
         audit_dir.mkdir(parents=True, exist_ok=True)
         self._write_json(audit_dir / "report_contract_audit.json", self._contract_audit(resolution.method, template_hash))
         self._write_json(audit_dir / "report_projection_audit.json", self._projection_audit(view_model, artifacts))

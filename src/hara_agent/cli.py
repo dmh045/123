@@ -34,10 +34,12 @@ from hara_agent.services.analysis import (
     ScenarioCoverageProposalService,
 )
 from hara_agent.services.reporting import (
-    OfflineReportRebuilder, ReportSchemaValidator, load_report_schema,
+    OfflineReportRebuilder, ReportSchemaValidator,
+    ScenarioOutputQualityAuditService, load_report_schema,
 )
 from hara_agent.services.extraction import DocumentReader
 from hara_agent.workflow import ReviewArtifactReader, ReviewArtifactWriter, render_review
+from hara_agent.workflow.state import HARAState
 
 
 def _role_compiler() -> TemplateRoleCompiler:
@@ -327,6 +329,26 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--review-root", type=Path, default=Path("runtime/review"))
     rebuild.add_argument("--run-dir", type=Path, default=Path("runtime/agent"))
     rebuild.add_argument("--output", type=Path, default=Path("output/HARA_P2C_Content_Cleanup.xlsx"))
+    rebuild.add_argument("--causal-trace", type=Path)
+    rebuild.add_argument("--audit-output-dir", type=Path)
+    scenario_output_audit = subparsers.add_parser(
+        "scenario-output-quality-audit",
+        help="Audit accepted synthesized child scenarios offline without a Provider",
+    )
+    scenario_output_audit.add_argument("--checkpoint", required=True, type=Path)
+    scenario_output_audit.add_argument("--review-run-id", required=True)
+    scenario_output_audit.add_argument(
+        "--baseline", type=Path,
+        default=Path("method_assets/fusa_baseline_v1/manifest.yaml"),
+    )
+    scenario_output_audit.add_argument(
+        "--report-style-template", type=Path,
+        default=Path("references/HARA_Template_AI_20260327.xlsx"),
+    )
+    scenario_output_audit.add_argument("--review-root", type=Path, default=Path("runtime/review"))
+    scenario_output_audit.add_argument("--causal-trace", type=Path)
+    scenario_output_audit.add_argument("--output-dir", required=True, type=Path)
+    scenario_output_audit.add_argument("--sample-output", required=True, type=Path)
     rescore = subparsers.add_parser(
         "rescore-risk", help="Recompute only risk from a committed checkpoint without a Provider",
     )
@@ -410,6 +432,55 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     load_local_env()
     args = build_parser().parse_args(argv)
+    if args.command == "scenario-output-quality-audit":
+        checkpoint = args.checkpoint.expanduser().resolve()
+        state = HARAState.read_committed(
+            json.loads(checkpoint.read_text(encoding="utf-8"))
+        )
+        if state.run_id != args.review_run_id:
+            raise ValueError(
+                "Scenario audit checkpoint run ID does not match --review-run-id"
+            )
+        resolution = MethodSourceResolver().resolve(
+            template_path=None,
+            baseline_manifest_path=args.baseline,
+            report_template_path=args.report_style_template,
+        )
+        causal_trace = {}
+        if args.causal_trace is not None:
+            causal_path = args.causal_trace.expanduser().resolve()
+            causal_trace = json.loads(causal_path.read_text(encoding="utf-8"))
+        output_dir = args.output_dir.expanduser().resolve()
+        service = ScenarioOutputQualityAuditService(resolution.method)
+        audit = service.audit(
+            state, causal_trace=causal_trace, checkpoint_path=checkpoint,
+            synthesis_review_dir=args.review_root / args.review_run_id,
+        )
+        json_path = output_dir / "scenario_output_quality_audit.json"
+        markdown_path = output_dir / "scenario_output_quality_audit.md"
+        _write_json_atomic(json_path, audit)
+        _write_text_atomic(markdown_path, service.render_markdown(audit))
+        _write_text_atomic(
+            args.sample_output.expanduser().resolve(), service.render_sample(audit)
+        )
+        print(json.dumps({
+            "run_id": state.run_id,
+            "quality_audit_json": str(json_path),
+            "quality_audit_markdown": str(markdown_path),
+            "quality_sample": str(args.sample_output.expanduser().resolve()),
+            "summary": audit["summary"],
+            "diversity_metrics": {
+                key: value for key, value in audit["diversity_metrics"].items()
+                if key not in {
+                    "cross_malfunction_clusters",
+                    "parent_group_ids_where_all_three_differ_only_by_where_road",
+                    "scenario_variant_low_diversity_group_ids",
+                }
+            },
+            "hazard_consistency": audit["hazard_consistency"],
+            "provider_calls": 0,
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "exposure-input-audit":
         checkpoint_path = args.checkpoint or (
             args.run_dir / f"{args.review_run_id}.checkpoint.json"
@@ -634,6 +705,8 @@ def main(argv: list[str] | None = None) -> int:
             report_style_template_path=args.report_style_template,
             output_path=args.output,
             review_root=args.review_root,
+            causal_trace_path=args.causal_trace,
+            audit_output_dir=args.audit_output_dir,
         )
         print(json.dumps({
             "run_id": args.review_run_id,
