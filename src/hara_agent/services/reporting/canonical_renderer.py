@@ -348,7 +348,9 @@ class HARAReportWorkbookRenderer:
             for cell in row:
                 cell.value = None
         sheet.auto_filter.ref = None
-        sheet.print_area = None
+        # openpyxl 3.0 accepts an empty list while its print_area setter
+        # rejects None; 3.1 supports both.  The project supports >=3.0.
+        sheet.print_area = []
 
     @staticmethod
     def _set_title(sheet: Any, merged_range: str, coordinate: str, value: str, registry: TemplateStyleRegistry, token: str) -> None:

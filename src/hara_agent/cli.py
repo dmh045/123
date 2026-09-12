@@ -321,7 +321,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scoreability.add_argument(
         "--assumption-pack", type=Path,
-        default=Path("output/HARA_Risk_Minimal_Assumption_Pack.json"),
+        default=Path("output/HARA_Risk_Assumption_Pack_Final.json"),
+    )
+    scoreability.add_argument(
+        "--child-scenarios", type=Path,
+        default=Path("output/HARA_Risk_Child_Scenarios.json"),
     )
     return parser
 
@@ -344,30 +348,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "risk-scoreability":
         checkpoint = json.loads(args.checkpoint.read_text(encoding="utf-8"))
         supplement = json.loads(args.risk_input_supplement.read_text(encoding="utf-8"))
+        existing_pack = (
+            json.loads(args.assumption_pack.read_text(encoding="utf-8"))
+            if args.assumption_pack.exists() else None
+        )
         resolution = MethodSourceResolver().resolve(
             template_path=None,
             baseline_manifest_path=args.baseline,
             report_template_path=args.report_style_template,
         )
         payload, queue = RiskScoreabilityService(resolution.method).generate(
-            checkpoint=checkpoint, supplement=supplement,
-        )
-        pack = RiskScoreabilityService.minimal_assumption_pack(
-            checkpoint_sha256=hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
+            checkpoint=checkpoint,
             supplement=supplement,
-            records=payload["records"],
+            assumption_pack=existing_pack,
+            checkpoint_sha256=hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         )
+        pack = payload["assumption_pack"]
         review_root = args.review_root / args.review_run_id
-        _write_json_atomic(review_root / "risk_scoreability_v2.json", payload)
-        _write_json_atomic(review_root / "differential_validation_queue_v2.json", queue)
+        _write_json_atomic(review_root / "risk_scoreability_v3.json", payload)
+        _write_json_atomic(review_root / "differential_validation_queue_v3.json", queue)
         _write_json_atomic(args.assumption_pack, pack)
+        if payload["materialized_children"]:
+            _write_json_atomic(args.child_scenarios, {
+                "artifact_version": "hara-risk-child-scenarios-v1",
+                "children": payload["materialized_children"],
+            })
         print(json.dumps({
             "run_id": args.review_run_id,
-            "risk_scoreability": str(review_root / "risk_scoreability_v2.json"),
+            "risk_scoreability": str(review_root / "risk_scoreability_v3.json"),
             "differential_validation_queue": str(
-                review_root / "differential_validation_queue_v2.json"
+                review_root / "differential_validation_queue_v3.json"
             ),
-            "minimum_assumption_pack": str(args.assumption_pack),
+            "assumption_pack": str(args.assumption_pack),
+            "child_scenarios": str(args.child_scenarios) if payload["materialized_children"] else "",
             "summary": payload["summary"],
             "provider_calls": 0,
         }, ensure_ascii=False, indent=2))

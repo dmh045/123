@@ -99,7 +99,18 @@ class TemplateWorkbookScanner:
         try:
             sheets = tuple(self._scan_sheet(sheet) for sheet in workbook.worksheets)
             named_ranges = []
-            for name, defined_name in workbook.defined_names.items():
+            defined_names = workbook.defined_names
+            # openpyxl 3.0 exposes a DefinedNameList, while 3.1 exposes a
+            # mapping-like DefinedNameDict.  requirements.txt intentionally
+            # supports both versions.
+            if hasattr(defined_names, "items"):
+                named_name_items = defined_names.items()
+            else:
+                named_name_items = (
+                    (str(item.name), item)
+                    for item in getattr(defined_names, "definedName", ())
+                )
+            for name, defined_name in named_name_items:
                 try:
                     destinations = tuple(
                         (str(sheet), str(region)) for sheet, region in defined_name.destinations
