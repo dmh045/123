@@ -158,15 +158,23 @@ def test_exposure_rationale_is_trace_derived_for_finalized_evidence():
         {
             "requested_domain": "Z", "domain": "Z", "result": "E3",
             "atom_bindings": [
-                {"atom_id": "FA001", "E_class": "E4", "used": True},
-                {"atom_id": "PH005", "E_class": "E3", "used": True},
+                {
+                    "atom_id": "FA001", "dimension": ["EGO_DYNAMICS"],
+                    "E_class": "E4", "used": True,
+                },
+                {
+                    "atom_id": "PH005", "dimension": ["EGO_ACTION"],
+                    "E_class": "E3", "used": True,
+                },
             ],
             "dependency_coupling": {"policy_branch": "e3_e4_mix"},
         },
     )
     assert "请求 Z 域" in rationale
-    assert "FA001=E4" in rationale
-    assert "PH005=E3" in rationale
+    assert "自车动态=E4" in rationale
+    assert "自车动作=E3" in rationale
+    assert "FA001" not in rationale
+    assert "PH005" not in rationale
     assert "FUSA v1" in rationale
     assert "最终 E3" in rationale
     assert rationale != "已按当前方法完成 E 评定。"

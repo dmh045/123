@@ -17,6 +17,15 @@ class EngineeringReportTextMapper:
     """
 
     _PENDING_VALUE = "Pending"
+    _EXPOSURE_DIMENSION_LABELS = {
+        "WHERE": "场所",
+        "ROAD": "道路条件",
+        "EGO_ACTION": "自车动作",
+        "EGO_X_ROAD": "自车与道路关系",
+        "TRAFFIC_PATTERN": "交通关系/交通模式",
+        "EGO_DYNAMICS": "自车动态",
+        "OBJECT": "对象/交通参与者",
+    }
 
     @staticmethod
     def _has_reason(value: Any, token: str) -> bool:
@@ -147,10 +156,19 @@ class EngineeringReportTextMapper:
                 for item in bindings:
                     if not isinstance(item, Mapping) or not item.get("used"):
                         continue
-                    atom_id = str(item.get("atom_id", "")).strip()
                     level = str(item.get("E_class", "")).strip()
-                    if atom_id and level:
-                        atoms.append(f"{atom_id}={level}")
+                    dimensions = item.get("dimension", [])
+                    if not isinstance(dimensions, (list, tuple)):
+                        dimensions = [dimensions]
+                    labels = [
+                        self._EXPOSURE_DIMENSION_LABELS.get(
+                            str(dimension).strip().upper(), "其他场景维度"
+                        )
+                        for dimension in dimensions if str(dimension).strip()
+                    ]
+                    if level:
+                        labels = labels or ["其他场景维度"]
+                        atoms.append(f"{'/'.join(labels)}={level}")
             coupling = trace.get("dependency_coupling", {})
             coupling = coupling if isinstance(coupling, Mapping) else {}
             branch = str(coupling.get("policy_branch", "") or "")

@@ -331,7 +331,7 @@ def test_selector_quality_audit_reports_plan_metrics_without_provider(method):
     assert audit["ranking"]["combination_beam_truncated_groups"] == 0
 
 
-def test_immutable_r3_causal_trace_remains_resumable_without_provider():
+def test_completed_r3_causal_trace_remains_resumable_without_provider():
     source_run_id = "hara-full-baseline-20260912-r1-synthesis-r3"
     target_run_id = f"{source_run_id}-causal-r2"
     checkpoint_path = ROOT / "runtime/agent" / f"{source_run_id}.checkpoint.json"
@@ -340,7 +340,7 @@ def test_immutable_r3_causal_trace_remains_resumable_without_provider():
         "2DBBCBFCF7AECC09332A8BBC2642513D98A2558E1CD33305F432415351E7D357"
     )
     assert _sha256(trace_path) == (
-        "FCFE431F4BF9655D316CDC1ACE174BE7CAF249D7F04259F6E4ED5D0DE7AD8767"
+        "8359E7A35EB4DF8E77D9E16D2CAD6151D4327CEC6D7EA57B48603BA159E25BC7"
     )
 
     state = CheckpointRepository(ROOT / "runtime/agent").load(source_run_id)
@@ -359,9 +359,6 @@ def test_immutable_r3_causal_trace_remains_resumable_without_provider():
         for assessment in assessments
     }
     assert len(candidates_by_malfunction) == 57
-    assert len(recovered) == 49
-    assert len(recovered_child_ids) == 975
-    assert sorted(set(candidates_by_malfunction) - set(recovered)) == [
-        "MF-F10-002", "MF-F10-003", "MF-F11-002", "MF-F11-003",
-        "MF-F12-002", "MF-F12-003", "MF-F12-004", "MF-F12-005",
-    ]
+    assert len(recovered) == 57
+    assert len(recovered_child_ids) == 1236
+    assert sorted(set(candidates_by_malfunction) - set(recovered)) == []
