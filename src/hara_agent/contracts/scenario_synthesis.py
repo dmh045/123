@@ -54,6 +54,14 @@ class ScenarioDimensionApplicability(str, Enum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class SemanticCompatibility(str, Enum):
+    """Tri-state semantic relation between a query and a Method atom."""
+
+    SUPPORTED = "SUPPORTED"
+    UNKNOWN = "UNKNOWN"
+    CONTRADICTED = "CONTRADICTED"
+
+
 class PhysicalValueAuthority(str, Enum):
     PROJECT_FACT = "PROJECT_FACT"
     METHOD_DEFINED = "METHOD_DEFINED"
@@ -148,6 +156,8 @@ class ScenarioDimensionCandidate:
     speed_range_kph: tuple[float | None, float | None] | None = None
     binding_authority: str = "ANALYTICAL_SELECTION"
     template_relationship: str = "NONE"
+    semantic_compatibility: SemanticCompatibility = SemanticCompatibility.UNKNOWN
+    semantic_family: str = ""
     ranking_scores: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -175,6 +185,10 @@ class ScenarioAtomCandidateSet:
     generation_status: str = "CANDIDATES_AVAILABLE"
     reason: str = ""
     shortlist_truncated: bool = False
+    shortlist_budget: int = 0
+    shortlist_policy: str = "NOT_APPLICABLE"
+    shortlist_diagnostics: dict[str, int] = field(default_factory=dict)
+    hard_filter_diagnostics: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         ids = [item.atom_id for item in self.candidates]

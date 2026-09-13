@@ -20,6 +20,7 @@ from hara_agent.services.analysis import (
     AnalyticalPhysicsInstantiationService, ConstrainedScenarioSynthesisService,
     ExposureInputReadinessService, RiskExecutionTraceService,
 )
+from hara_agent.services.analysis.scenario_selection_quality import ScenarioShortlistPolicy
 from hara_agent.services.reporting import (
     OfflineReportRebuilder, ScenarioSelectorQualityAudit,
 )
@@ -205,7 +206,7 @@ class ScenarioSynthesisRunner:
     def _provider_ready(synthesis_input: Any) -> bool:
         return all(
             (
-                bool(item.candidates)
+                bool(item.candidates) and item.generation_status != "METHOD_GAP"
                 if item.applicability.status.value == "REQUIRED"
                 else not item.candidates
                 if item.applicability.status.value == "NOT_APPLICABLE"
@@ -470,7 +471,11 @@ class ScenarioSynthesisRunner:
         return {
             "artifact_version": "scenario-synthesis-candidates-v1",
             "bounds": {
-                "candidate_cap_per_dimension": ConstrainedScenarioSynthesisService.candidate_cap_per_dimension,
+                "shortlist_policy": "coverage-aware adaptive family shortlist",
+                "primary_budget": ScenarioShortlistPolicy.PRIMARY_BUDGET,
+                "secondary_budget": ScenarioShortlistPolicy.SECONDARY_BUDGET,
+                "default_budget": ScenarioShortlistPolicy.DEFAULT_BUDGET,
+                "max_adaptive_budget": ScenarioShortlistPolicy.MAX_ADAPTIVE_BUDGET,
             },
             "semantic_ranking_inputs_exclude": ["e_z", "e_f", "E_total", "S", "C", "ASIL"],
             "groups": [{

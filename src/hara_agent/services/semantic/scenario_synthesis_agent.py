@@ -112,6 +112,10 @@ Return raw JSON matching the schema exactly, without Markdown."""
                 "catalog_size": item.catalog_size,
                 "hard_filtered_pool_size": item.hard_filtered_pool_size,
                 "shortlist_truncated": item.shortlist_truncated,
+                "shortlist_budget": item.shortlist_budget,
+                "shortlist_policy": item.shortlist_policy,
+                "shortlist_diagnostics": item.shortlist_diagnostics,
+                "hard_filter_diagnostics": item.hard_filter_diagnostics,
                 "candidates": [{
                     "atom_id": candidate.atom_id,
                     "canonical_atom_id": candidate.canonical_atom_id,
@@ -128,6 +132,8 @@ Return raw JSON matching the schema exactly, without Markdown."""
                     "compact_physical_semantics": candidate.method_semantics,
                     "ranking_scores": candidate.ranking_scores,
                     "template_relationship": candidate.template_relationship,
+                    "semantic_compatibility": candidate.semantic_compatibility.value,
+                    "semantic_family": candidate.semantic_family,
                 } for candidate in item.candidates],
             }
         return {

@@ -9,12 +9,14 @@ Free-text parsing is deliberately limited to explicit engineering terms.
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import math
 import re
 from typing import Any, Iterable
 
 from hara_agent.contracts import (
+    SemanticCompatibility,
     ScenarioAtomCandidateSet, ScenarioBindingAuthority,
     ScenarioBindingDecision, ScenarioCoveragePlan,
     ScenarioDimensionApplicability,
@@ -38,6 +40,10 @@ _CATEGORY_MARKERS: dict[str, tuple[str, ...]] = {
     "ACTION_STOP": ("stopping", "stop", "braking", "deceleration", "制动", "停止", "停滞"),
     "ACTION_ACCELERATE": ("acceleration", "accelerate", "propulsion", "加速", "驱动"),
     "ACTION_TURN": ("steering", "turn", "lateral", "转向", "横向"),
+    "ACTION_ABORT": (
+        "abort", "cancel", "cancellation", "takeover", "take-over",
+        "control handover", "handover", "hand-over",
+    ),
     "OBJECT_PEDESTRIAN": ("pedestrian", "person", "vru", "行人"),
     "OBJECT_CYCLIST": ("cyclist", "bicycle", "two-wheel", "骑行", "自行车"),
     "OBJECT_VEHICLE": (
@@ -475,6 +481,233 @@ class ScenarioDimensionApplicabilityService:
         )
 
 
+class ScenarioSemanticCompatibilityClassifier:
+    """Classify semantics without converting missing support into a rejection."""
+
+    @staticmethod
+    def _domain_categories(dimension: str, categories: set[str]) -> set[str]:
+        if dimension == "OBJECT":
+            return categories & _OBJECT_CATEGORIES
+        if dimension == "TRAFFIC_PATTERN":
+            return categories & _TRAFFIC_CATEGORIES
+        if dimension == "EGO_ACTION":
+            return categories & (_ACTION_CATEGORIES | _TRAFFIC_CATEGORIES)
+        if dimension == "EGO_DYNAMICS":
+            return categories & _ACTION_CATEGORIES
+        if dimension == "WHERE":
+            return {item for item in categories if item.startswith("LOCATION_")}
+        if dimension in {"ROAD", "EGO_X_ROAD"}:
+            return categories & _ROAD_CATEGORIES
+        return set()
+
+    @staticmethod
+    def _query_categories(dimension: str, query: dict[str, Any]) -> set[str]:
+        if dimension == "OBJECT":
+            return set(map(str, query.get("object_categories", [])))
+        if dimension == "TRAFFIC_PATTERN":
+            return set(map(str, query.get("traffic_relations", [])))
+        if dimension == "EGO_ACTION":
+            return set(map(str, query.get("action_categories", []))) | set(
+                map(str, query.get("traffic_relations", []))
+            )
+        if dimension == "EGO_DYNAMICS":
+            return set(map(str, query.get("action_categories", [])))
+        if dimension == "WHERE":
+            return set(map(str, query.get("location_categories", [])))
+        if dimension in {"ROAD", "EGO_X_ROAD"}:
+            return set(map(str, query.get("road_relations", [])))
+        return set()
+
+    @classmethod
+    def classify(
+        cls, *, dimension: str, atom: dict[str, Any], query: dict[str, Any],
+        fm_template: dict[str, Any], parent_atom_id: str = "",
+    ) -> tuple[SemanticCompatibility, str]:
+        atom_id = str(atom.get("atom_id", ""))
+        if parent_atom_id and atom_id == parent_atom_id:
+            return SemanticCompatibility.SUPPORTED, "EXACT_PARENT_BINDING"
+
+        atom_categories = cls._domain_categories(
+            dimension, ScenarioCandidateRanker.atom_categories(atom),
+        )
+        query_categories = cls._query_categories(dimension, query)
+
+        if dimension == "OBJECT":
+            active = fm_template.get("active_option", {})
+            expected = normalize_object_category(
+                active.get("obj_type", "") if isinstance(active, dict) else ""
+            )
+            if expected:
+                if atom_categories and expected not in atom_categories:
+                    return SemanticCompatibility.CONTRADICTED, "FM_TEMPLATE_OBJECT_CONTRADICTION"
+                if expected in atom_categories:
+                    return SemanticCompatibility.SUPPORTED, "FM_TEMPLATE_OBJECT_MATCH"
+
+        if query_categories:
+            if atom_categories & query_categories:
+                return SemanticCompatibility.SUPPORTED, "EXPLICIT_FIELD_CATEGORY_MATCH"
+            if atom_categories:
+                return SemanticCompatibility.CONTRADICTED, "EXPLICIT_FIELD_CATEGORY_CONTRADICTION"
+            return SemanticCompatibility.UNKNOWN, "ATOM_HAS_NO_EXPLICIT_DOMAIN_SEMANTICS"
+
+        return SemanticCompatibility.UNKNOWN, "NO_EXPLICIT_QUERY_SEMANTIC"
+
+
+class ScenarioShortlistPolicy:
+    """Bounded family-aware shortlist; evidence authority is never cut by K."""
+
+    PRIMARY_BUDGET = 14
+    SECONDARY_BUDGET = 6
+    DEFAULT_BUDGET = 8
+    MAX_ADAPTIVE_BUDGET = 18
+
+    _INTENSITY_TERMS = frozenset({
+        "normal", "medium", "strong", "emergency", "light", "heavy",
+        "low", "high", "maximum", "minimum", "hard", "soft",
+    })
+
+    @staticmethod
+    def _speed_regime(candidate: Any) -> str:
+        speed = candidate.speed_range_kph
+        if speed is None:
+            return "NO_SPEED_RANGE"
+        lower, upper = speed
+        if upper == 0:
+            return "STANDSTILL"
+        if upper is not None and upper <= 15:
+            return "LOW_SPEED"
+        if upper is not None and upper <= 50:
+            return "URBAN_SPEED"
+        if lower is not None and lower >= 100:
+            return "HIGH_SPEED"
+        return "BROAD_SPEED"
+
+    @classmethod
+    def semantic_family(cls, dimension: str, candidate: Any) -> str:
+        categories = ScenarioCandidateRanker.atom_categories({
+            "label": candidate.label,
+            "physical_semantics": candidate.method_semantics,
+        })
+        domain = ScenarioSemanticCompatibilityClassifier._domain_categories(
+            dimension, categories,
+        )
+        semantics = candidate.method_semantics or {}
+
+        def shape(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: shape(item) for key, item in sorted(value.items())
+                    if not isinstance(item, (int, float))
+                    and not any(term in key.casefold() for term in (
+                        "accel", "decel", "intensity", "magnitude", "rate",
+                    ))
+                }
+            if isinstance(value, (list, tuple)):
+                return [shape(item) for item in value if not isinstance(item, (int, float))]
+            if isinstance(value, str) and value.casefold() in cls._INTENSITY_TERMS:
+                return "INTENSITY"
+            return value
+
+        label_tokens = [
+            token for token in _tokens(candidate.label)
+            if token not in cls._INTENSITY_TERMS and not token.isdigit()
+        ]
+        motion = "reverse" if "ACTION_REVERSE" in categories else (
+            "lateral" if "ACTION_TURN" in categories else
+            "longitudinal" if categories & {"ACTION_STOP", "ACTION_ACCELERATE"} else
+            "unspecified"
+        )
+        payload = (
+            dimension,
+            tuple(sorted(domain)) or tuple(label_tokens[:4]),
+            motion,
+            _json_text(shape(semantics)),
+            candidate.template_relationship,
+            cls._speed_regime(candidate),
+        )
+        return hashlib.sha256(_json_text(payload).encode("utf-8")).hexdigest()[:16]
+
+    @classmethod
+    def _intensity_driven(cls, query: dict[str, Any]) -> bool:
+        text = " ".join(map(str, (
+            query.get("failure_type", ""), query.get("guideword", ""),
+            query.get("semantic_text", ""),
+        ))).casefold()
+        return any(term in text for term in (
+            "too much", "too little", "excess", "insufficient", "intensity",
+            "magnitude", "stronger", "weaker", "more than", "less than",
+        ))
+
+    @classmethod
+    def select(
+        cls, *, dimension: str, ranked: Iterable[Any], applicability: Any,
+        exact: bool, primary_dimensions: Iterable[str],
+        secondary_dimensions: Iterable[str], query: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], int, str]:
+        ordered = tuple(ranked)
+        if applicability.status is ScenarioDimensionApplicability.NOT_APPLICABLE:
+            return (), 0, "NOT_APPLICABLE"
+        if exact:
+            return ordered[:1], 1, "EXACT_FIXED"
+        primary = dimension in set(primary_dimensions)
+        secondary = dimension in set(secondary_dimensions)
+        base = (
+            cls.PRIMARY_BUDGET if primary else
+            cls.SECONDARY_BUDGET if secondary else cls.DEFAULT_BUDGET
+        )
+        policy = "PRIMARY" if primary else "SECONDARY" if secondary else "DEFAULT"
+        if not ordered:
+            return (), base, policy
+
+        families: dict[str, list[Any]] = {}
+        for candidate in ordered:
+            family = candidate.semantic_family or cls.semantic_family(dimension, candidate)
+            families.setdefault(family, []).append(candidate)
+
+        mandatory = [
+            item for item in ordered
+            if float(item.ranking_scores.get("source_evidence_tier", 0.0)) >= 3
+            or item.template_relationship != "NONE"
+            or item.binding_authority != ScenarioBindingAuthority.ANALYTICAL_SELECTION.value
+        ]
+        high_family_representatives = [
+            values[0] for values in families.values()
+            if float(values[0].ranking_scores.get("source_evidence_tier", 0.0)) >= 2
+        ]
+        required = []
+        required_ids: set[str] = set()
+        for item in (*mandatory, *high_family_representatives):
+            if item.atom_id not in required_ids:
+                required.append(item)
+                required_ids.add(item.atom_id)
+        budget = max(base, len(required))
+        budget = min(cls.MAX_ADAPTIVE_BUDGET, budget)
+        # Authority wins over the nominal maximum if the Method catalog itself
+        # contains more authoritative candidates than the prompt budget.
+        budget = max(budget, len(mandatory))
+
+        selected = list(required)
+        for values in families.values():
+            if len(selected) >= budget:
+                break
+            if values[0] not in selected:
+                selected.append(values[0])
+
+        intensity_driven = cls._intensity_driven(query)
+        family_counts = Counter(item.semantic_family for item in selected)
+        for item in ordered:
+            if len(selected) >= budget:
+                break
+            if item in selected:
+                continue
+            if not intensity_driven and family_counts[item.semantic_family] >= 2:
+                continue
+            selected.append(item)
+            family_counts[item.semantic_family] += 1
+        selected.sort(key=lambda item: ordered.index(item))
+        return tuple(selected), budget, f"{policy}_FAMILY_AWARE"
+
+
 class ScenarioCoveragePlanner:
     """Create evidence-driven sibling coverage intent for one semantic group."""
 
@@ -505,23 +738,15 @@ class ScenarioCoveragePlanner:
         )
 
     @classmethod
-    def plan(
-        cls, *, query: dict[str, Any], candidate_sets: Iterable[ScenarioAtomCandidateSet],
-    ) -> ScenarioCoveragePlan:
-        sets = tuple(candidate_sets)
-        fixed = tuple(
-            item.dimension for item in sets
-            if item.binding_decision.parent_atom_id and not item.binding_decision.refinable
-        )
+    def axis_priority(
+        cls, *, query: dict[str, Any], dimensions: Iterable[str],
+        fixed_dimensions: Iterable[str] = (),
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        applicable = set(dimensions) - set(fixed_dimensions)
         actions = set(map(str, query.get("action_categories", [])))
         traffic = set(map(str, query.get("traffic_relations", [])))
         road = set(map(str, query.get("road_relations", [])))
         objects = set(map(str, query.get("object_categories", [])))
-        applicable = {
-            item.dimension for item in sets
-            if item.applicability.status is not ScenarioDimensionApplicability.NOT_APPLICABLE
-            and item.dimension not in fixed
-        }
         if "ROAD_SLOPE" in road and "ACTION_HOLD" in actions:
             ordered_primary = ("ROAD", "EGO_X_ROAD", "EGO_ACTION")
         elif "ACTION_REVERSE" in actions and "OBJECT_PEDESTRIAN" in objects:
@@ -534,12 +759,32 @@ class ScenarioCoveragePlanner:
             ordered_primary = ("EGO_ACTION", "EGO_DYNAMICS", "OBJECT")
         primary = tuple(item for item in ordered_primary if item in applicable)
         if not primary:
-            primary = tuple(item.dimension for item in sets if item.dimension in applicable)[:1]
+            primary = tuple(item for item in dimensions if item in applicable)[:1]
         secondary = tuple(
             item for item in ("WHERE", "ROAD", "EGO_X_ROAD", "EGO_DYNAMICS", "OBJECT")
             if item in applicable and item not in primary
         )
         prohibited = tuple(item for item in ("WHERE", "ROAD") if item in secondary)
+        return primary, secondary, prohibited
+
+    @classmethod
+    def plan(
+        cls, *, query: dict[str, Any], candidate_sets: Iterable[ScenarioAtomCandidateSet],
+    ) -> ScenarioCoveragePlan:
+        sets = tuple(candidate_sets)
+        fixed = tuple(
+            item.dimension for item in sets
+            if item.binding_decision.parent_atom_id and not item.binding_decision.refinable
+        )
+        applicable = {
+            item.dimension for item in sets
+            if item.applicability.status is not ScenarioDimensionApplicability.NOT_APPLICABLE
+            and item.dimension not in fixed
+        }
+        primary, secondary, prohibited = cls.axis_priority(
+            query=query,
+            dimensions=tuple(item.dimension for item in sets if item.dimension in applicable),
+        )
         supported_counts = {
             item.dimension: len({
                 signature for candidate in item.candidates
@@ -572,6 +817,10 @@ class ScenarioCoveragePlanner:
                 "supported_primary_signature_counts": supported_counts,
                 "risk_classification_objective": False,
             })
+        actions = set(map(str, query.get("action_categories", [])))
+        traffic = set(map(str, query.get("traffic_relations", [])))
+        road = set(map(str, query.get("road_relations", [])))
+        objects = set(map(str, query.get("object_categories", [])))
         mechanism_parts = [
             *sorted(actions), *sorted(traffic), *sorted(road), *sorted(objects),
             str(query.get("failure_type", "")), str(query.get("guideword", "")),
@@ -659,7 +908,8 @@ class ScenarioCandidateRanker:
         self, *, dimension: str, atom: dict[str, Any], query: dict[str, Any],
         fm_template: dict[str, Any], corpus_labels: Iterable[str], odd_passed: bool,
     ) -> tuple[dict[str, float], str]:
-        categories = self.atom_categories(atom)
+        category_sources = self.atom_category_sources(atom)
+        categories = set(category_sources)
         actions = set(map(str, query.get("action_categories", [])))
         objects = set(map(str, query.get("object_categories", [])))
         traffic = set(map(str, query.get("traffic_relations", [])))
@@ -715,11 +965,15 @@ class ScenarioCandidateRanker:
             categories & relevant_categories
             & set(map(str, query.get("structured_source_categories", [])))
         ))
+        physical_semantics_score = float(any(
+            category in relevant_categories and source.startswith("physical_semantics.")
+            for category, source in category_sources.items()
+        ))
         source_evidence_tier = float(
             4 if template_score else
-            3 if structured_source_score else
-            2 if causal_score or mechanism_score else
-            1 if any((action_score, object_score, traffic_score, category_context_score)) else
+            3 if structured_source_score or physical_semantics_score else
+            2 if any((action_score, object_score, traffic_score, category_context_score)) else
+            1 if odd_score else
             0
         )
         scores = {
@@ -733,11 +987,13 @@ class ScenarioCandidateRanker:
             "lexical_score": lexical_score,
             "category_context_score": category_context_score,
             "structured_source_score": structured_source_score,
+            "physical_semantics_score": physical_semantics_score,
             "source_evidence_tier": source_evidence_tier,
         }
         scores["final_rank_score"] = round(
             5.0 * template_score + 4.0 * traffic_score + 3.0 * action_score
             + 3.0 * object_score + 3.0 * category_context_score
+            + 3.0 * physical_semantics_score
             + 2.0 * mechanism_score
             + odd_score + causal_score + lexical_score,
             6,
@@ -792,5 +1048,6 @@ __all__ = [
     "normalize_object_category",
     "ScenarioBindingPolicy", "ScenarioCandidateRanker", "ScenarioCoveragePlanner",
     "ScenarioDimensionApplicabilityService", "ScenarioSemanticQueryBuilder",
+    "ScenarioSemanticCompatibilityClassifier", "ScenarioShortlistPolicy",
     "ScenarioVariantDiversityValidator",
 ]

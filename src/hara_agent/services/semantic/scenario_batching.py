@@ -108,7 +108,7 @@ def _prompt_parts(
         "Never cite MF.vehicle_level_hazard as the m_to_b anchor. "
         "\n这里只评估当前batch列出的Scenario。必须逐一返回，不得遗漏，不得增加未提供Scenario。"
         "返回assessments数组，每项包含scenario_id、physically_feasible、functionally_relevant、"
-        "causally_relevant、breakpoint、causal_chain、risk_dimension_changes、rationale、hazardous_event、"
+        "causally_relevant、breakpoint、causal_chain、risk_dimension_changes、hazardous_event、"
         "confidence、status。保留场景的hazardous_event必须结合当前失效和具体场景；Potential Harm"
         "由下游确定性 MethodContract 计算，不在此阶段生成。不得复制其他子系统模板。"
         "risk_dimension_changes必须为JSON object array；每项包含dimension、evidence_refs、reason。"
@@ -121,6 +121,7 @@ def _prompt_parts(
         "禁止使用缩写或别名（例如S/E/C），除非该字符串本身位于上述canonical allowed values中。"
         "confidence必须为0.0到1.0范围内的JSON number；禁止使用high、medium、low等文字等级，"
         "禁止字符串数字、百分数、null或缺失。"
+        "不要返回rationale；可读说明由Python根据已验证的结构化因果字段确定性生成。"
     )
     return prefix, suffix
 

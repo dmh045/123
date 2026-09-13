@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
-import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,24 +16,15 @@ from hara_agent.services.analysis.scenario_selection_quality import (
     ScenarioCandidateRanker, ScenarioCoveragePlanner,
     ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
 )
-from hara_agent.services.analysis.scenario_ranking_recall import top_k_recall_audit
+from hara_agent.evaluation.scenario_selector import top_k_recall_audit
 from hara_agent.services.semantic.scenario_synthesis_agent import (
     BoundedScenarioSynthesisAgent,
 )
 from hara_agent.services.reporting import ScenarioSelectorQualityAudit
 from hara_agent.template import TemplateRoleCompiler
-from hara_agent.workflow.checkpoints import CheckpointRepository
-from hara_agent.workflow.scenario_causal_revalidation import (
-    ScenarioCausalRevalidationRunner,
-)
 
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest().upper()
 
 
 @pytest.fixture(scope="module")
@@ -285,8 +274,9 @@ def test_unrepresentable_crossing_relation_is_method_gap_not_catalog_fallback(me
     ))["TRAFFIC_PATTERN"]
     assert traffic.applicability.status.value == "REQUIRED"
     assert traffic.generation_status == "METHOD_GAP"
-    assert traffic.candidates == ()
-    assert traffic.hard_filtered_pool_size == 0
+    assert traffic.candidates
+    assert all(item.semantic_compatibility.value == "UNKNOWN" for item in traffic.candidates)
+    assert traffic.hard_filtered_pool_size >= len(traffic.candidates)
 
 
 def _query(*, malfunction_text="", hazard_text="", parent=None, facts=None):
@@ -412,7 +402,7 @@ def test_source_defined_compound_traffic_atom_survives_hard_filter(method):
         applicability=applicability, decision=binding, exact_locks={},
         fm_template={},
     )
-    assert (passed, reason) == (True, "PASS_TRAFFIC_RELATION_MATCH")
+    assert (passed, reason) == (True, "SUPPORTED:EXPLICIT_FIELD_CATEGORY_MATCH")
 
 
 def test_structured_physical_semantics_override_conflicting_label_marker():
@@ -438,7 +428,7 @@ def test_bm25_cannot_resurrect_hard_incompatible_candidate(method):
         decision=candidate_set.binding_decision, exact_locks={}, fm_template={},
     )
     assert passed is False
-    assert reason == "SEMANTIC_OBJECT_CATEGORY_MISMATCH"
+    assert reason == "CONTRADICTED:EXPLICIT_FIELD_CATEGORY_CONTRADICTION"
 
 
 def test_fm_object_filter_uses_active_option_not_first_query_category(method):
@@ -458,7 +448,7 @@ def test_fm_object_filter_uses_active_option_not_first_query_category(method):
         applicability=applicability, decision=decision, exact_locks={},
         fm_template={"active_option": {"obj_type": "passenger_car"}},
     )
-    assert (passed, reason) == (True, "PASS_OBJECT_CATEGORY_MATCH")
+    assert (passed, reason) == (True, "SUPPORTED:FM_TEMPLATE_OBJECT_MATCH")
 
 
 def test_top_k_audit_flags_stronger_source_evidence_below_cutoff():
@@ -501,6 +491,7 @@ def test_offline_provider_request_contains_governance_and_bounded_metadata(metho
         "template_score", "mechanism_score", "action_score", "object_score",
         "traffic_relation_score", "odd_score", "causal_score", "lexical_score",
         "category_context_score", "structured_source_score",
+        "physical_semantics_score",
         "source_evidence_tier", "final_rank_score",
     }
     assert "E_total" not in str(payload)
@@ -530,36 +521,3 @@ def test_selector_quality_audit_reports_plan_metrics_without_provider(method):
     assert audit["traffic_pattern"]["required_but_missing"] == 0
     assert audit["traffic_pattern"]["not_applicable"] == 2
     assert audit["ranking"]["combination_beam_truncated_groups"] == 0
-
-
-def test_completed_r3_causal_trace_remains_resumable_without_provider():
-    source_run_id = "hara-full-baseline-20260912-r1-synthesis-r3"
-    target_run_id = f"{source_run_id}-causal-r2"
-    checkpoint_path = ROOT / "runtime/agent" / f"{source_run_id}.checkpoint.json"
-    trace_path = ROOT / "runtime/review" / target_run_id / "causal_revalidation_provider_trace.json"
-    assert _sha256(checkpoint_path) == (
-        "2DBBCBFCF7AECC09332A8BBC2642513D98A2558E1CD33305F432415351E7D357"
-    )
-    assert _sha256(trace_path) == (
-        "8359E7A35EB4DF8E77D9E16D2CAD6151D4327CEC6D7EA57B48603BA159E25BC7"
-    )
-
-    state = CheckpointRepository(ROOT / "runtime/agent").load(source_run_id)
-    candidates_by_malfunction = defaultdict(list)
-    for scenario in state.scenarios:
-        candidates_by_malfunction[
-            str(scenario.analysis_instance["malfunction_id"])
-        ].append(scenario)
-    recovered = ScenarioCausalRevalidationRunner._recover_completed(
-        trace_path, source_run_id=source_run_id, target_run_id=target_run_id,
-        candidates_by_malfunction=dict(candidates_by_malfunction),
-    )
-    recovered_child_ids = {
-        assessment.scenario_id
-        for assessments, _audit in recovered.values()
-        for assessment in assessments
-    }
-    assert len(candidates_by_malfunction) == 57
-    assert len(recovered) == 57
-    assert len(recovered_child_ids) == 1236
-    assert sorted(set(candidates_by_malfunction) - set(recovered)) == []

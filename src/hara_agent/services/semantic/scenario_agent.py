@@ -77,16 +77,16 @@ HAZARD VERSUS HARM BOUNDARY
 Hazardous Event是“危险车辆状态与运行场景的组合”，不是已经发生的事故或伤害。例如，在明确的Active运行状态和车速下发生非预期横纵向控制、无法退出车辆控制、制动/转向能力丧失或轨迹显著偏离，可在无需假设具体障碍物的情况下形成Hazardous Event。Potential Harm才描述该危险状态可直接导致的通用伤害类型。若输入没有具体对象，只能使用“可能发生碰撞/冲击并造成伤害”等通用表述，不得写成与特定行人、车辆或设施必然碰撞。缺少具体碰撞对象本身不能作为B_TO_I或I_TO_H断裂的唯一理由；只有当VehicleLevelHazard必须依赖某个未提供条件才存在时，才标记ASSUMPTION。
 
 COUNTERFACTUAL TEST
-设置causally_relevant=true前，内部检查：禁止加入任何输入未提供的新事件时，仅依靠当前明确事实，危险车辆状态是否仍能由Malfunction在该Scenario中合理产生？不要把“是否已存在具体碰撞对象”误作“危险状态是否存在”。若危险状态本身仍需一个未提供的独立条件才成立，必须返回causally_relevant=false、risk_dimensions_changed=[]、hazardous_event=""，并在rationale说明M→B、B→I或I→H在哪一跳断裂。
+设置causally_relevant=true前，内部检查：禁止加入任何输入未提供的新事件时，仅依靠当前明确事实，危险车辆状态是否仍能由Malfunction在该Scenario中合理产生？不要把“是否已存在具体碰撞对象”误作“危险状态是否存在”。若危险状态本身仍需一个未提供的独立条件才成立，必须返回causally_relevant=false、risk_dimensions_changed=[]、hazardous_event=""，并通过breakpoint及结构化hop说明M→B、B→I或I→H在哪一跳断裂。
 
 RISK DIMENSION TEST
-risk_dimensions_changed表示“当前Scenario中哪些明确事实需要下游重新评估风险维度”，不是相对于一个未提供的虚构基准，也不是列出所有涉及或理论上可能相关的维度。每个选择的dimension都必须能在rationale中对应一个明确Scenario fact及因果解释；无法指出支持事实就不得选择。禁止blanket selection。因果链成立但当前事实不能证明某个canonical dimension需要变化时允许返回[]；这不会否定因果链，缺失的评分事实由后续评分质量门处理。severity只有在可信H→Harm链成立后才可因明确对象/条件改变；exposure可由明确的运行场景或暴露条件触发重新评估，具体E等级由后续MethodContract计算；controllability可由明确车速、车辆状态、driver position、direct control、remote monitoring或intervention channel等事实触发重新评估，不得假设恐慌；ftti/safe_state只可依据明确时间、距离、速度、干预通道或safe-state reachability事实。
+risk_dimensions_changed表示“当前Scenario中哪些明确事实需要下游重新评估风险维度”，不是相对于一个未提供的虚构基准，也不是列出所有涉及或理论上可能相关的维度。每个选择的dimension都必须在risk_dimension_changes中对应一个明确Scenario fact及因果解释；无法指出支持事实就不得选择。禁止blanket selection。因果链成立但当前事实不能证明某个canonical dimension需要变化时允许返回[]；这不会否定因果链，缺失的评分事实由后续评分质量门处理。severity只有在可信H→Harm链成立后才可因明确对象/条件改变；exposure可由明确的运行场景或暴露条件触发重新评估，具体E等级由后续MethodContract计算；controllability可由明确车速、车辆状态、driver position、direct control、remote monitoring或intervention channel等事实触发重新评估，不得假设恐慌；ftti/safe_state只可依据明确时间、距离、速度、干预通道或safe-state reachability事实。
 
 CONTRACT ILLUSTRATIONS
 无rear vehicle事实时，“unexpected braking→rear vehicle collision”无效。无driver panic/steering error事实时，“unexpected braking→driver panics→steering error→pedestrian collision”无效。相反，“active状态下的非预期横纵向控制→车辆轨迹不受预期控制”可构成危险车辆状态，通用Potential Harm可描述其可能造成碰撞/冲击伤害，但不得虚构具体碰撞对象；“failure to brake + explicit obstacle ahead + closing speed→distance continues decreasing→collision”则是对象和碰撞机制均明确的完整链。这些仅说明证据规则，不预设当前输入结论。
 
 OUTPUT PRINCIPLES
-rationale对true必须清楚表达M→B→I→H以及每个risk dimension的事实依据；对false必须说明断裂点。confidence表示“当前分类判断由给定证据支持”的置信度，不是对生成故事详细程度的信心。不要生成无输入依据的概率、频率或可能性等级。此步骤只筛选候选，不直接计算S/E/C/ASIL。"""
+不要返回rationale。可读说明由Python根据已验证的causal_chain、breakpoint和risk_dimension_changes确定性生成。confidence表示“当前分类判断由给定证据支持”的置信度，不是对生成故事详细程度的信心。不要生成无输入依据的概率、频率或可能性等级。此步骤只筛选候选，不直接计算S/E/C/ASIL。"""
 
     SYSTEM_PROMPT += """
 
@@ -100,7 +100,7 @@ Each assessment is an independent engineering classification. Do NOT compare sce
     SYSTEM_PROMPT += """
 
 STRUCTURED CAUSAL EVIDENCE CONTRACT
-The readable rationale is not authoritative causal evidence. Return breakpoint, a structured causal_chain with m_to_b, b_to_i, and i_to_h hops, and structured risk_dimension_changes. Every hop contains claim, basis_type, and evidence_refs. Cite only exact keys in that Scenario's read-only fact_registry. A fact's existence does not automatically prove a causal hop: the claim must explain how those cited facts support that exact transition. A causal claim without resolvable evidence cannot support causally_relevant=true.
+Readable rationale is not part of the Provider contract. Python renders it later from validated structured fields. Return breakpoint, a structured causal_chain with m_to_b, b_to_i, and i_to_h hops, and structured risk_dimension_changes. Every hop contains claim, basis_type, and evidence_refs. Cite only exact keys in that Scenario's read-only fact_registry. A fact's existence does not automatically prove a causal hop: the claim must explain how those cited facts support that exact transition. A causal claim without resolvable evidence cannot support causally_relevant=true.
 
 DIRECT_FACT cites explicit facts. DERIVED_PHYSICS cites only a precomputed DERIVED fact in the registry; raw speed, distance, or actor facts do not license arbitrary vehicle dynamics or human behavior. APPROVED_RULE cites only a registry entry explicitly marked approved. ASSUMPTION identifies a necessary unsupported condition. If any hop needed for a true chain is an ASSUMPTION, return causally_relevant=false at the appropriate breakpoint. Do not reduce confidence to preserve an unsupported chain.
 
@@ -1382,13 +1382,6 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
                 "breakpoint=NONE; causally_relevant=false requires the enum for the first unsupported "
                 "hop. I_TO_HARM is invalid and must never be returned."
             )
-        if "rationale" in str(error).casefold():
-            return (
-                "Return a non-empty rationale string. For a positive result it must summarize "
-                "the supported M-to-B-to-I-to-H chain; for a negative result it must identify "
-                "the first unsupported transition. Do not use null, an empty string, or only "
-                "whitespace."
-            )
         return (
             "Rebuild the complete assessment against the declared machine schema and supplied "
             "fact_registry; correct the reported contract field without adding new facts."
@@ -1525,6 +1518,41 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
         )
 
     @staticmethod
+    def _deterministic_rationale(item: dict[str, Any]) -> str:
+        """Render presentation text from validated machine-authority fields."""
+        chain = item.get("causal_chain", {})
+        chain = chain if isinstance(chain, dict) else {}
+        claims = [
+            str(chain.get(hop, {}).get("claim", "")).strip()
+            for hop in ("m_to_b", "b_to_i", "i_to_h")
+            if isinstance(chain.get(hop), dict)
+            and str(chain.get(hop, {}).get("claim", "")).strip()
+        ]
+        if item.get("causally_relevant") is True:
+            dimensions = [
+                str(change.get("dimension", "")).strip()
+                for change in item.get("risk_dimension_changes", [])
+                if isinstance(change, dict) and str(change.get("dimension", "")).strip()
+            ]
+            suffix = (
+                f" Risk dimensions requiring re-evaluation: {', '.join(dimensions)}."
+                if dimensions else " No risk-dimension change is asserted."
+            )
+            return "Validated structured causal path: " + " -> ".join(claims) + "." + suffix
+        breakpoint = str(item.get("breakpoint", "UNSPECIFIED")).strip() or "UNSPECIFIED"
+        failed_hop = {
+            "M_TO_B": "m_to_b", "B_TO_I": "b_to_i", "I_TO_H": "i_to_h",
+        }.get(breakpoint)
+        failed_claim = (
+            str(chain.get(failed_hop, {}).get("claim", "")).strip()
+            if failed_hop and isinstance(chain.get(failed_hop), dict) else ""
+        )
+        return (
+            f"Structured causal validation stopped at {breakpoint}: "
+            f"{failed_claim or 'the required transition lacks accepted evidence'}."
+        )
+
+    @staticmethod
     def _parse(
         malfunction: MalfunctionCandidate,
         item: Any,
@@ -1554,14 +1582,6 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
         if scenario is None:
             raise ScenarioSchemaContractError(
                 f"Scenario assessment引用未知scenario_id={scenario_id!r}"
-            )
-        rationale = str(item.get("rationale", "")).strip()
-        if not rationale:
-            raise ScenarioSchemaContractError(
-                "Scenario assessment rationale must be a non-empty string: "
-                f"malfunction_id={malfunction.malfunction_id} "
-                f"scenario_id={scenario_id} batch={batch} "
-                f"split_path={split_path} split_depth={split_depth}"
             )
         causal = item["causally_relevant"]
         hazardous_event = str(item.get("hazardous_event", "")).strip()
@@ -1620,7 +1640,7 @@ Return exactly one JSON object matching the requested schema. Do not use Markdow
             functionally_relevant=item["functionally_relevant"],
             causally_relevant=item["causally_relevant"],
             risk_dimensions_changed=[value for value in normalized_dimensions if value],
-            rationale=rationale,
+            rationale=ScenarioFeasibilityAgent._deterministic_rationale(item),
             hazardous_event=hazardous_event,
             potential_harm="",
             status=status,

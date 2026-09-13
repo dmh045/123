@@ -14,6 +14,8 @@ from typing import Any
 
 from hara_agent.contracts import MethodContract, UnknownOverridePolicy
 
+from .scenario_physics import TTC_FORMULA_IDENTITY
+
 
 class RiskContextSourceCoverageAuditService:
     """Classify source availability before proposing any RiskContext change."""
@@ -414,7 +416,7 @@ class RiskContextSourceCoverageAuditService:
                         {
                             "rule": "scenario_physics.derive_scenario_physics:TTC",
                             "status": "PRESENT_AND_WIRED_REQUIRES_DISTANCE_AND_POSITIVE_RELATIVE_SPEED",
-                            "formula": "relative_distance_m / (relative_speed_kph / 3.6)",
+                            "formula": TTC_FORMULA_IDENTITY,
                         } if field == "ttc_s" else {"status": "NO_FIELD_DERIVATION_RULE"}
                     ),
                     "H_adapters_resolvers": {

@@ -435,7 +435,7 @@ def test_single_scenario_contract_repair_exhaustion_becomes_pending_record():
     assert audit["single_item_failures"] == 1
 
 
-def test_blank_rationale_gets_one_bounded_contract_repair():
+def test_readable_rationale_is_deterministic_and_not_a_provider_gate():
     class Client:
         def __init__(self):
             self.calls = 0
@@ -443,11 +443,7 @@ def test_blank_rationale_gets_one_bounded_contract_repair():
         def complete_json(self, request):
             self.calls += 1
             payload = _negative_payload("SCN-1")
-            if self.calls == 1:
-                payload["rationale"] = ""
-            else:
-                assert request.metadata["item_contract_repair"] is True
-                assert "non-empty rationale" in request.user_prompt
+            payload.pop("rationale", None)
             return LLMResponse(data={"assessments": [payload]}, model="fake")
 
     malfunction = MalfunctionCandidate(
@@ -463,9 +459,9 @@ def test_blank_rationale_gets_one_bounded_contract_repair():
         Client(), batch_max_chars=50000, batch_max_items=12,
     ).assess(malfunction, [scenario])
 
-    assert assessments[0].rationale
-    assert audit["schema_error_count"] == 1
-    assert audit["item_contract_repair_count"] == 1
+    assert assessments[0].rationale.startswith("Structured causal validation stopped at")
+    assert audit["schema_error_count"] == 0
+    assert audit["item_contract_repair_count"] == 0
     assert audit["item_contract_repair_failure_count"] == 0
 
 

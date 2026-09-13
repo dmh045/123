@@ -7,6 +7,7 @@ Legacy FUSA used both behaviours; neither is method authority in V13.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -16,7 +17,7 @@ from typing import Any, Iterable
 
 from hara_agent.contracts import (
     AnalyticalScenarioInstantiation, CandidateOrigin, CoverageLabel,
-    MethodContract, ScenarioAtomCandidateSet, ScenarioBindingAuthority,
+    MethodContract, SemanticCompatibility, ScenarioAtomCandidateSet, ScenarioBindingAuthority,
     ScenarioDimensionApplicability,
     ScenarioDimensionCandidate, ScenarioSynthesisAssessment,
     ScenarioSynthesisInput, ScenarioSynthesisStatus,
@@ -32,6 +33,7 @@ from .scenario_selection_quality import (
     normalize_object_category,
     ScenarioBindingPolicy, ScenarioCandidateRanker, ScenarioCoveragePlanner,
     ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
+    ScenarioSemanticCompatibilityClassifier, ScenarioShortlistPolicy,
     ScenarioVariantDiversityValidator,
 )
 
@@ -44,8 +46,6 @@ class ScenarioSynthesisValidationError(ValueError):
 
 class ConstrainedScenarioSynthesisService:
     """Create bounded candidate sets and materialize validated analytical children."""
-
-    candidate_cap_per_dimension = 12
 
     def __init__(self, method: MethodContract):
         self.method = method
@@ -63,6 +63,8 @@ class ConstrainedScenarioSynthesisService:
         self.applicability_service = ScenarioDimensionApplicabilityService()
         self.coverage_planner = ScenarioCoveragePlanner()
         self.ranker = ScenarioCandidateRanker()
+        self.semantic_classifier = ScenarioSemanticCompatibilityClassifier()
+        self.shortlist_policy = ScenarioShortlistPolicy()
         self.diversity_validator = ScenarioVariantDiversityValidator()
         self.scenario_method = ScenarioMethodService(method)
         if not self.dimensions or not self.catalog:
@@ -178,11 +180,12 @@ class ConstrainedScenarioSynthesisService:
         refs: Iterable[str], reason: str, validated: bool = False,
         binding_authority: str = ScenarioBindingAuthority.ANALYTICAL_SELECTION.value,
         template_relationship: str = "NONE",
+        semantic_compatibility: SemanticCompatibility = SemanticCompatibility.UNKNOWN,
         ranking_scores: dict[str, float] | None = None,
     ) -> ScenarioDimensionCandidate:
         atom_id = str(atom.get("atom_id", "")).strip()
         canonical = str(atom.get("v2") or atom.get("v2_proper") or atom_id).strip()
-        return ScenarioDimensionCandidate(
+        candidate = ScenarioDimensionCandidate(
             atom_id=atom_id,
             canonical_atom_id=canonical,
             dimensions=tuple(str(item) for item in atom.get("filled_dimensions", [])),
@@ -201,7 +204,15 @@ class ConstrainedScenarioSynthesisService:
             speed_range_kph=self._speed_range(atom),
             binding_authority=binding_authority,
             template_relationship=template_relationship,
+            semantic_compatibility=semantic_compatibility,
             ranking_scores=dict(ranking_scores or {}),
+        )
+        return replace(
+            candidate,
+            semantic_family=self.shortlist_policy.semantic_family(
+                candidate.dimensions[0] if len(candidate.dimensions) == 1 else "COMPOUND",
+                candidate,
+            ),
         )
 
     @staticmethod
@@ -329,75 +340,20 @@ class ConstrainedScenarioSynthesisService:
         ):
             return False, "COMPOUND_EXACT_LOCK_CONFLICT"
 
-        categories = self.ranker.atom_categories(atom)
-        actions = set(map(str, query.get("action_categories", [])))
-        objects = set(map(str, query.get("object_categories", [])))
-        traffic = set(map(str, query.get("traffic_relations", [])))
-        road = set(map(str, query.get("road_relations", [])))
-        locations = set(map(str, query.get("location_categories", [])))
-        label_tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]{1,}", str(atom.get("label", "")).casefold()))
-        context_tokens = set(map(str, query.get("query_tokens", [])))
-
-        if decision.parent_atom_id == atom_id:
-            return True, "PASS_PARENT_BINDING"
-        if dimension == "TRAFFIC_PATTERN":
-            return (
-                (True, "PASS_TRAFFIC_RELATION_MATCH")
-                if categories & traffic else
-                (False, "SEMANTIC_TRAFFIC_RELATION_MISMATCH")
-            )
-        if dimension == "EGO_X_ROAD":
-            return (
-                (True, "PASS_ROAD_RELATION_MATCH")
-                if categories & road else
-                (False, "SEMANTIC_ROAD_RELATION_MISMATCH")
-            )
-        if dimension == "OBJECT" and objects:
-            if not categories & objects:
-                return False, "SEMANTIC_OBJECT_CATEGORY_MISMATCH"
-            active = fm_template.get("active_option", {})
-            if isinstance(active, dict) and active:
-                expected_category = normalize_object_category(
-                    active.get("obj_type", "")
-                )
-                if expected_category and expected_category not in categories:
-                    return False, "FM_TEMPLATE_OBJECT_MISMATCH"
-            return True, "PASS_OBJECT_CATEGORY_MATCH"
-        if dimension == "EGO_ACTION" and (actions or traffic):
-            return (
-                (True, "PASS_ACTION_OR_INTERACTION_MATCH")
-                if categories & (actions | traffic) else
-                (False, "SEMANTIC_ACTION_CATEGORY_MISMATCH")
-            )
-        if dimension == "EGO_DYNAMICS" and actions:
-            return (
-                (True, "PASS_DYNAMICS_ACTION_MATCH")
-                if categories & actions else
-                (False, "SEMANTIC_DYNAMICS_ACTION_MISMATCH")
-            )
-        if dimension == "WHERE":
-            return (
-                (True, "PASS_LOCATION_CATEGORY_MATCH")
-                if categories & locations else
-                (False, "SEMANTIC_LOCATION_CATEGORY_MISMATCH")
-            )
-        if dimension == "ROAD" and road:
-            return (
-                (True, "PASS_ROAD_CATEGORY_MATCH")
-                if categories & road else
-                (False, "SEMANTIC_ROAD_CATEGORY_MISMATCH")
-            )
-        if dimension == "EGO_DYNAMICS" and decision.authority is ScenarioBindingAuthority.RANGE_CONTAINMENT:
-            return (
-                (True, "PASS_SPEED_REFINEMENT")
-                if self._speed_range(atom) else
-                (False, "SEMANTIC_DYNAMICS_NO_SPEED_REFINEMENT")
-            )
-        if label_tokens & context_tokens:
-            return True, "PASS_LEXICAL_CONTEXT_MATCH"
-        if dimension == "ROAD":
-            return True, "PASS_ODD_ROAD_CATALOG"
-        return False, "SEMANTIC_LEXICAL_CONTEXT_MISMATCH"
+        compatibility, reason = self.semantic_classifier.classify(
+            dimension=dimension, atom=atom, query=query,
+            fm_template=fm_template, parent_atom_id=decision.parent_atom_id,
+        )
+        if compatibility is SemanticCompatibility.CONTRADICTED:
+            return False, f"CONTRADICTED:{reason}"
+        if (
+            dimension == "EGO_DYNAMICS"
+            and decision.authority is ScenarioBindingAuthority.RANGE_CONTAINMENT
+            and compatibility is SemanticCompatibility.UNKNOWN
+            and self._speed_range(atom)
+        ):
+            return True, "SUPPORTED:SPEED_RANGE_REFINEMENT"
+        return True, f"{compatibility.value}:{reason}"
 
     def _traffic_representation_elsewhere(
         self, query: dict[str, Any], parent: ScenarioCandidate,
@@ -428,6 +384,45 @@ class ConstrainedScenarioSynthesisService:
                 })
         return result
 
+    @staticmethod
+    def _shortlist_diagnostics(
+        ranked: Iterable[ScenarioDimensionCandidate],
+        selected: Iterable[ScenarioDimensionCandidate],
+    ) -> dict[str, int]:
+        ranked_items = tuple(ranked)
+        selected_items = tuple(selected)
+        selected_ids = {item.atom_id for item in selected_items}
+        dropped = [item for item in ranked_items if item.atom_id not in selected_ids]
+        selected_high_families = {
+            item.semantic_family for item in selected_items
+            if float(item.ranking_scores.get("source_evidence_tier", 0)) >= 2
+        }
+        dropped_high_families = {
+            item.semantic_family for item in dropped
+            if float(item.ranking_scores.get("source_evidence_tier", 0)) >= 2
+        }
+        return {
+            "ranked_pool_size": len(ranked_items),
+            "selected_size": len(selected_items),
+            "authoritative_below_cutoff": sum(
+                float(item.ranking_scores.get("source_evidence_tier", 0)) >= 4
+                or item.binding_authority
+                != ScenarioBindingAuthority.ANALYTICAL_SELECTION.value
+                for item in dropped
+            ),
+            "fm_template_below_cutoff": sum(
+                item.template_relationship != "NONE" for item in dropped
+            ),
+            "exact_structured_source_below_cutoff": sum(
+                bool(item.ranking_scores.get("structured_source_score", 0))
+                or bool(item.ranking_scores.get("physical_semantics_score", 0))
+                for item in dropped
+            ),
+            "high_evidence_family_below_cutoff": len(
+                dropped_high_families - selected_high_families
+            ),
+        }
+
     def candidate_sets(
         self, *, malfunction: dict[str, Any], parent: ScenarioCandidate,
         assessment: dict[str, Any], project_context: dict[str, Any],
@@ -449,8 +444,17 @@ class ConstrainedScenarioSynthesisService:
             for dimension, decision in decisions.items()
             if decision.parent_atom_id and not decision.refinable
         }
+        variable_dimensions = tuple(
+            dimension for dimension in self.dimensions
+            if applicability[dimension].status is not ScenarioDimensionApplicability.NOT_APPLICABLE
+            and dimension not in exact_locks
+        )
+        primary_dimensions, secondary_dimensions, _ = self.coverage_planner.axis_priority(
+            query=query, dimensions=variable_dimensions,
+        )
         bindings = parent.facts.get("method_scenario_dimensions", {})
         result = []
+        ranked_by_dimension: dict[str, tuple[ScenarioDimensionCandidate, ...]] = {}
         for dimension in self.dimensions:
             catalog = [
                 item for item in self.catalog
@@ -477,9 +481,11 @@ class ConstrainedScenarioSynthesisService:
                         "causal_score": 0.0, "lexical_score": 0.0,
                         "category_context_score": 0.0,
                         "structured_source_score": 0.0,
-                        "source_evidence_tier": 5.0,
+                        "physical_semantics_score": 0.0,
+                        "source_evidence_tier": 4.0,
                         "final_rank_score": 0.0,
                     },
+                    semantic_compatibility=SemanticCompatibility.SUPPORTED,
                 )
                 result.append(ScenarioAtomCandidateSet(
                     dimension=dimension, catalog_size=len(catalog),
@@ -489,12 +495,30 @@ class ConstrainedScenarioSynthesisService:
                     resolution_status_before=before,
                     generation_status="LOCKED_EXACT_AUTHORITY",
                     reason=decision.basis,
+                    shortlist_budget=1,
+                    shortlist_policy="EXACT_FIXED",
+                    shortlist_diagnostics={
+                        "ranked_pool_size": 1, "selected_size": 1,
+                        "authoritative_below_cutoff": 0,
+                        "fm_template_below_cutoff": 0,
+                        "exact_structured_source_below_cutoff": 0,
+                        "high_evidence_family_below_cutoff": 0,
+                    },
+                    hard_filter_diagnostics={
+                        "illegal_rejected": 0, "contradicted_rejected": 0,
+                        "unknown_retained": 0, "supported_retained": 1,
+                    },
                 ))
+                ranked_by_dimension[dimension] = (locked,)
                 continue
 
             hard_pool = []
+            hard_counts = {
+                "illegal_rejected": 0, "contradicted_rejected": 0,
+                "unknown_retained": 0, "supported_retained": 0,
+            }
             for atom in catalog:
-                passed, _ = self.hard_filter_decision(
+                passed, hard_reason = self.hard_filter_decision(
                     dimension=dimension, atom=atom, parent=parent,
                     project_context=project_context, query=query,
                     applicability=applicable, decision=decision,
@@ -502,9 +526,23 @@ class ConstrainedScenarioSynthesisService:
                 )
                 if passed:
                     hard_pool.append(atom)
+                    key = (
+                        "supported_retained"
+                        if hard_reason.startswith("SUPPORTED:")
+                        else "unknown_retained"
+                    )
+                    hard_counts[key] += 1
+                elif hard_reason.startswith("CONTRADICTED:"):
+                    hard_counts["contradicted_rejected"] += 1
+                else:
+                    hard_counts["illegal_rejected"] += 1
             corpus = [str(atom.get("label", "")) for atom in hard_pool]
             ranked = []
             for atom in hard_pool:
+                compatibility, compatibility_reason = self.semantic_classifier.classify(
+                    dimension=dimension, atom=atom, query=query,
+                    fm_template=fm_template, parent_atom_id=decision.parent_atom_id,
+                )
                 scores, rank_reason = self.ranker.score(
                     dimension=dimension, atom=atom, query=query,
                     fm_template=fm_template, corpus_labels=corpus, odd_passed=True,
@@ -545,16 +583,43 @@ class ConstrainedScenarioSynthesisService:
                         else ScenarioBindingAuthority.ANALYTICAL_SELECTION.value
                     ),
                     template_relationship=relationship,
+                    semantic_compatibility=compatibility,
                     ranking_scores=scores,
+                )
+                candidate = replace(
+                    candidate,
+                    semantic_family=self.shortlist_policy.semantic_family(
+                        dimension, candidate,
+                    ),
+                    selection_reason=(
+                        candidate.selection_reason
+                        + f"; semantic_compatibility={compatibility.value}:"
+                        + compatibility_reason
+                    ),
                 )
                 ranked.append(candidate)
             ranked.sort(key=lambda item: self.ranker.rank_key(
                 item.atom_id, item.ranking_scores,
             ))
-            candidates = tuple(ranked[:self.candidate_cap_per_dimension])
+            ranked_by_dimension[dimension] = tuple(ranked)
+            candidates, shortlist_budget, shortlist_name = self.shortlist_policy.select(
+                dimension=dimension, ranked=ranked, applicability=applicable,
+                exact=False, primary_dimensions=primary_dimensions,
+                secondary_dimensions=secondary_dimensions, query=query,
+            )
+            explicit_requirement = bool(
+                self.semantic_classifier._query_categories(dimension, query)
+            )
+            supported = any(
+                candidate.semantic_compatibility is SemanticCompatibility.SUPPORTED
+                for candidate in candidates
+            )
             if applicable.status is ScenarioDimensionApplicability.NOT_APPLICABLE:
                 status = "NOT_APPLICABLE"
-            elif not candidates and applicable.status is ScenarioDimensionApplicability.REQUIRED:
+            elif (
+                applicable.status is ScenarioDimensionApplicability.REQUIRED
+                and (not candidates or (explicit_requirement and not supported))
+            ):
                 status = "METHOD_GAP"
             elif not candidates:
                 status = "OPTIONAL_NO_SUPPORTED_ATOM"
@@ -566,45 +631,162 @@ class ConstrainedScenarioSynthesisService:
                 applicability=applicable, binding_decision=decision,
                 resolution_status_before=before, generation_status=status,
                 reason=(
-                    "Required semantic relation has no compatible Method atom."
+                    "Required semantic relation has no supported Method atom; "
+                    "non-contradicted UNKNOWN candidates remain visible for review."
                     if status == "METHOD_GAP" else
                     applicable.reason if status == "NOT_APPLICABLE" else
                     "Candidates passed hard Method/ODD/compound/applicability filters "
                     "and were ranked by structured features plus BM25."
                 ),
                 shortlist_truncated=len(ranked) > len(candidates),
+                shortlist_budget=shortlist_budget,
+                shortlist_policy=shortlist_name,
+                shortlist_diagnostics=self._shortlist_diagnostics(ranked, candidates),
+                hard_filter_diagnostics=hard_counts,
             ))
 
-        present = {
-            item.dimension: {candidate.atom_id for candidate in item.candidates}
-            for item in result
-        }
-        incomplete_compounds = {
-            candidate.atom_id
-            for item in result for candidate in item.candidates
-            if len({dim for dim in candidate.dimensions if dim in self.dimensions}) > 1
-            and any(
-                candidate.atom_id not in present.get(dim, set())
-                for dim in candidate.dimensions if dim in self.dimensions
-            )
-        }
-        if incomplete_compounds:
+        # Compound closure is one deterministic shortlist step.  A high-evidence
+        # compound is expanded into every filled dimension; a weak compound that
+        # cannot be represented everywhere is removed from every dimension.
+        for _ in range(len(self.dimensions)):
+            by_dimension = {item.dimension: item for item in result}
+            present = {
+                dimension: {candidate.atom_id for candidate in item.candidates}
+                for dimension, item in by_dimension.items()
+            }
+            additions: dict[str, set[str]] = defaultdict(set)
+            removals: set[str] = set()
+            for item in result:
+                for candidate in item.candidates:
+                    filled = tuple(
+                        dimension for dimension in candidate.dimensions
+                        if dimension in self.dimensions
+                    )
+                    if len(filled) <= 1:
+                        continue
+                    ranked_membership = {
+                        dimension: next((
+                            value for value in ranked_by_dimension.get(dimension, ())
+                            if value.atom_id == candidate.atom_id
+                        ), None)
+                        for dimension in filled
+                    }
+                    if any(value is None for value in ranked_membership.values()):
+                        removals.add(candidate.atom_id)
+                        continue
+                    high_evidence = any(
+                        float(value.ranking_scores.get("source_evidence_tier", 0)) >= 2
+                        or value.template_relationship != "NONE"
+                        for value in ranked_membership.values() if value is not None
+                    )
+                    missing = [
+                        dimension for dimension in filled
+                        if candidate.atom_id not in present.get(dimension, set())
+                    ]
+                    if missing and high_evidence:
+                        for dimension in missing:
+                            additions[dimension].add(candidate.atom_id)
+                    elif missing:
+                        removals.add(candidate.atom_id)
+            if not additions and not removals:
+                break
+            if removals:
+                ranked_by_dimension = {
+                    dimension: tuple(
+                        candidate for candidate in candidates
+                        if candidate.atom_id not in removals
+                    )
+                    for dimension, candidates in ranked_by_dimension.items()
+                }
             updated = []
             for item in result:
-                candidates = tuple(
+                candidates = [
                     candidate for candidate in item.candidates
-                    if candidate.atom_id not in incomplete_compounds
-                )
-                status = item.generation_status
-                if not candidates and item.applicability.status is ScenarioDimensionApplicability.REQUIRED:
-                    status = "METHOD_GAP"
-                elif not candidates and item.applicability.status is ScenarioDimensionApplicability.OPTIONAL:
-                    status = "OPTIONAL_NO_SUPPORTED_ATOM"
-                updated.append(replace(
-                    item, candidates=candidates, generation_status=status,
-                    reason=item.reason + " Incomplete compound candidates were removed.",
-                ))
+                    if candidate.atom_id not in removals
+                ]
+                for candidate in ranked_by_dimension.get(item.dimension, ()):
+                    if (
+                        candidate.atom_id in additions.get(item.dimension, set())
+                        and all(value.atom_id != candidate.atom_id for value in candidates)
+                    ):
+                        candidates.append(candidate)
+                order = {
+                    candidate.atom_id: index
+                    for index, candidate in enumerate(ranked_by_dimension.get(item.dimension, ()))
+                }
+                candidates.sort(key=lambda candidate: order.get(candidate.atom_id, len(order)))
+                updated.append(replace(item, candidates=tuple(candidates)))
             result = updated
+
+        # Refill any high-evidence family whose first representative was an
+        # invalid compound removed above, then close those valid compounds.
+        refilled = []
+        for item in result:
+            candidates = list(item.candidates)
+            selected_families = {
+                candidate.semantic_family for candidate in candidates
+                if float(candidate.ranking_scores.get("source_evidence_tier", 0)) >= 2
+            }
+            for candidate in ranked_by_dimension.get(item.dimension, ()):
+                if (
+                    float(candidate.ranking_scores.get("source_evidence_tier", 0)) >= 2
+                    and candidate.semantic_family not in selected_families
+                ):
+                    candidates.append(candidate)
+                    selected_families.add(candidate.semantic_family)
+            refilled.append(replace(item, candidates=tuple(candidates)))
+        result = refilled
+        by_dimension = {item.dimension: item for item in result}
+        additions: dict[str, set[str]] = defaultdict(set)
+        for item in result:
+            for candidate in item.candidates:
+                filled = tuple(
+                    dimension for dimension in candidate.dimensions
+                    if dimension in self.dimensions
+                )
+                if len(filled) <= 1:
+                    continue
+                for dimension in filled:
+                    if (
+                        all(value.atom_id != candidate.atom_id for value in by_dimension[dimension].candidates)
+                        and any(
+                            value.atom_id == candidate.atom_id
+                            for value in ranked_by_dimension.get(dimension, ())
+                        )
+                    ):
+                        additions[dimension].add(candidate.atom_id)
+        if additions:
+            closed = []
+            for item in result:
+                candidates = list(item.candidates)
+                for candidate in ranked_by_dimension.get(item.dimension, ()):
+                    if candidate.atom_id in additions.get(item.dimension, set()):
+                        candidates.append(candidate)
+                order = {
+                    candidate.atom_id: index
+                    for index, candidate in enumerate(ranked_by_dimension.get(item.dimension, ()))
+                }
+                candidates.sort(key=lambda candidate: order.get(candidate.atom_id, len(order)))
+                closed.append(replace(item, candidates=tuple(candidates)))
+            result = closed
+
+        updated = []
+        for item in result:
+            status = item.generation_status
+            if not item.candidates and item.applicability.status is ScenarioDimensionApplicability.REQUIRED:
+                status = "METHOD_GAP"
+            elif not item.candidates and item.applicability.status is ScenarioDimensionApplicability.OPTIONAL:
+                status = "OPTIONAL_NO_SUPPORTED_ATOM"
+            updated.append(replace(
+                item, generation_status=status,
+                shortlist_truncated=(
+                    len(ranked_by_dimension.get(item.dimension, ())) > len(item.candidates)
+                ),
+                shortlist_diagnostics=self._shortlist_diagnostics(
+                    ranked_by_dimension.get(item.dimension, ()), item.candidates,
+                ),
+            ))
+        result = updated
         return tuple(result)
 
     def build_input(

@@ -18,6 +18,49 @@ class DerivedPhysicsType(str, Enum):
 
 _ANALYSIS_ORIGIN = FactProvenance.SCENARIO_DEFINED.value
 _FINAL_APPROVALS = {ReviewStatus.FINALIZED.value, "APPROVED"}
+TTC_FORMULA_IDENTITY = "relative_distance_m / (relative_speed_kph / 3.6)"
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return float(value)
+
+
+def is_lateral_collision(value: Any) -> bool:
+    normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return any(token in normalized for token in (
+        "SIDE", "LATERAL", "PERPENDICULAR", "CROSSING",
+    ))
+
+
+def closing_relative_speed_kph(
+    ego_speed_kph: Any, object_speed_kph: Any, *,
+    ego_direction: Any, object_direction: Any, collision_type: Any,
+) -> float | None:
+    """Return the governed longitudinal relative-speed derivation."""
+    ego = _nonnegative_number(ego_speed_kph)
+    obj = _nonnegative_number(object_speed_kph)
+    ego_dir = str(ego_direction or "").strip().upper()
+    obj_dir = str(object_direction or "").strip().upper()
+    if (
+        ego is None or obj is None
+        or ego_dir not in {"FORWARD", "REVERSE"}
+        or obj_dir not in {"FORWARD", "REVERSE", "STATIONARY"}
+        or is_lateral_collision(collision_type)
+    ):
+        return None
+    opposing = obj_dir != "STATIONARY" and ego_dir != obj_dir
+    return round(ego + obj if opposing else abs(ego - obj), 6)
+
+
+def time_to_collision_s(distance_m: Any, relative_speed_kph: Any) -> float | None:
+    """Return TTC for a positive closing speed, otherwise fail closed."""
+    distance = _nonnegative_number(distance_m)
+    speed = _nonnegative_number(relative_speed_kph)
+    if distance is None or speed is None or speed <= 0:
+        return None
+    return round(distance / (speed / 3.6), 6)
 
 
 def _distance_m(value: Any) -> float | None:
@@ -270,12 +313,8 @@ def derive_scenario_physics(
             metadata,
         ))
     relative_speed = scenario.facts.get("relative_speed_kph")
-    if (
-        distance_m is not None
-        and not isinstance(relative_speed, bool)
-        and isinstance(relative_speed, (int, float))
-        and relative_speed > 0
-    ):
+    ttc = time_to_collision_s(distance_m, relative_speed)
+    if ttc is not None:
         input_keys = (distance_input_key, "relative_speed_kph")
         input_metadata = [_input_metadata(scenario, key) for key in input_keys]
         derived_sources = tuple(dict.fromkeys(
@@ -305,7 +344,7 @@ def derive_scenario_physics(
             metadata["semantic_fingerprint"] = scenario.semantic_fingerprint
         records.append(EvidenceRecord(
             "DERIVED.ttc_s",
-            round(distance_m / (float(relative_speed) / 3.6), 6),
+            ttc,
             EvidenceKind.DERIVED_PHYSICS,
             FactProvenance.DERIVED,
             derived_status,

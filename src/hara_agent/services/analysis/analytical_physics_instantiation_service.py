@@ -8,6 +8,10 @@ from typing import Any
 from hara_agent.contracts import AnalyticalPhysicalInput, PhysicalValueAuthority
 from hara_agent.models import ScenarioCandidate
 
+from .scenario_physics import (
+    TTC_FORMULA_IDENTITY, closing_relative_speed_kph, time_to_collision_s,
+)
+
 
 class AnalyticalPhysicsInstantiationService:
     """Inventory or derive physical inputs only after the causal gate passes."""
@@ -104,13 +108,6 @@ class AnalyticalPhysicsInstantiationService:
         atom_id = str(binding.get("atom_id", "")).strip()
         return stationary, (atom_id,) if atom_id else ()
 
-    @staticmethod
-    def _lateral_collision(value: Any) -> bool:
-        normalized = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
-        return any(token in normalized for token in (
-            "SIDE", "LATERAL", "PERPENDICULAR", "CROSSING",
-        ))
-
     def instantiate(
         self, *, scenario: ScenarioCandidate, malfunction: dict[str, Any],
         causal_status: str,
@@ -159,19 +156,16 @@ class AnalyticalPhysicsInstantiationService:
         ego_direction = by_field["ego_longitudinal_direction"]
         object_direction = by_field["object_longitudinal_direction"]
         collision = by_field["collision_type"]
-        if (
-            self._point(ego.value) and self._point(obj.value)
-            and ego_direction.value in {"FORWARD", "REVERSE"}
-            and object_direction.value in {"FORWARD", "REVERSE", "STATIONARY"}
-            and not self._lateral_collision(collision.value)
-        ):
+        relative = closing_relative_speed_kph(
+            ego.value, obj.value,
+            ego_direction=ego_direction.value,
+            object_direction=object_direction.value,
+            collision_type=collision.value,
+        )
+        if relative is not None:
             opposing = (
                 object_direction.value != "STATIONARY"
                 and ego_direction.value != object_direction.value
-            )
-            relative = (
-                float(ego.value) + float(obj.value)
-                if opposing else abs(float(ego.value) - float(obj.value))
             )
             derived.append({
                 "field": "relative_speed_kph", "value": round(relative, 6),
@@ -182,12 +176,13 @@ class AnalyticalPhysicsInstantiationService:
                     "ego_longitudinal_direction", "object_longitudinal_direction",
                 ],
             })
-            if self._point(distance.value) and relative > 0:
+            ttc = time_to_collision_s(distance.value, relative)
+            if ttc is not None:
                 derived.append({
                     "field": "ttc_s",
-                    "value": round(float(distance.value) / (relative / 3.6), 6),
+                    "value": ttc,
                     "unit": "s", "authority": "DERIVED",
-                    "derivation": "relative_distance_m / (relative_speed_kph / 3.6)",
+                    "derivation": TTC_FORMULA_IDENTITY,
                     "inputs": ["relative_distance_m", "relative_speed_kph"],
                 })
         assumption_blocked = any(

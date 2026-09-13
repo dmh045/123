@@ -540,7 +540,6 @@ class OpenAICompatibleClient:
                 and all(isinstance(data.get(field), bool) for field in (
                     "physically_feasible", "functionally_relevant", "causally_relevant",
                 ))
-                and isinstance(data.get("rationale"), str)
                 and "confidence" in data
             )
         if schema_name == "ScenarioRiskFacts":

@@ -238,7 +238,7 @@ def test_candidate_generation_reads_method_dimensions_and_locks_exact_atom(metho
     }
 
 
-def test_zero_where_match_never_falls_back_to_full_catalog(method):
+def test_zero_where_match_retains_bounded_unknown_candidates(method):
     service = ConstrainedScenarioSynthesisService(method)
     empty = service.build_input(
         malfunction={
@@ -254,8 +254,10 @@ def test_zero_where_match_never_falls_back_to_full_catalog(method):
         project_context={"odd_locations": ["不可映射语义"]},
     )
     where = next(item for item in empty.dimension_candidate_sets if item.dimension == "WHERE")
-    assert where.generation_status == "METHOD_GAP"
-    assert where.candidates == ()
+    assert where.generation_status == "CANDIDATES_AVAILABLE"
+    assert where.candidates
+    assert all(item.semantic_compatibility.value == "UNKNOWN" for item in where.candidates)
+    assert all(item.ranking_scores["source_evidence_tier"] <= 1 for item in where.candidates)
     assert where.catalog_size > 0
 
 

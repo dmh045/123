@@ -1,9 +1,4 @@
-"""Independent evidence checks for Scenario shortlist recall.
-
-The selector's scalar score is not treated as engineering ground truth here.
-This module compares candidates using source-role evidence that is independent
-of BM25 and the final weighted score.
-"""
+"""Reusable offline metrics for Scenario selector recall and coverage."""
 
 from __future__ import annotations
 
@@ -11,22 +6,28 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
-_AUTHORITATIVE_CLASSES = frozenset({
-    "EXACT_BINDING", "APPROVED_ALIAS", "FM_TEMPLATE_SOURCE_MATCH",
-    "EXACT_STRUCTURED_SOURCE_MATCH",
+_EXACT_AUTHORITY_CLASSES = frozenset({
+    "EXACT_BINDING", "EXACT_METHOD_BINDING", "APPROVED_ALIAS",
+    "EXACT_SOURCE_TEMPLATE_CONSTRAINT",
 })
-_EXPLICIT_CLASSES = frozenset({
-    "EXPLICIT_HAZARD_OR_CAUSAL_MATCH", "METHOD_PHYSICAL_SEMANTICS_MATCH",
+_STRUCTURED_SOURCE_CLASSES = frozenset({
+    "EXACT_STRUCTURED_SOURCE_MATCH", "METHOD_PHYSICAL_SEMANTICS_MATCH",
+    "FM_TEMPLATE_SOURCE_MATCH",
+})
+_EXPLICIT_FIELD_CLASSES = frozenset({
+    "EXPLICIT_HAZARD_OR_CAUSAL_MATCH", "FIELD_CORRECT_CATEGORY_MATCH",
 })
 
 
 def independent_evidence_tier(classes: Iterable[str]) -> int:
     values = set(map(str, classes))
-    if values & _AUTHORITATIVE_CLASSES:
+    if values & _EXACT_AUTHORITY_CLASSES:
+        return 4
+    if values & _STRUCTURED_SOURCE_CLASSES:
         return 3
-    if values & _EXPLICIT_CLASSES:
+    if values & _EXPLICIT_FIELD_CLASSES:
         return 2
-    if "FIELD_CORRECT_CATEGORY_MATCH" in values:
+    if "ODD_CONTEXT_COMPATIBILITY" in values:
         return 1
     return 0
 
@@ -54,9 +55,7 @@ def top_k_recall_audit(
     return {
         "truncated": bool(below),
         "rank_k_score": float(kth.get("final_rank_score", 0.0) or 0.0),
-        "rank_k_plus_1_score": float(
-            next_item.get("final_rank_score", 0.0) or 0.0
-        ),
+        "rank_k_plus_1_score": float(next_item.get("final_rank_score", 0.0) or 0.0),
         "score_margin": round(
             float(kth.get("final_rank_score", 0.0) or 0.0)
             - float(next_item.get("final_rank_score", 0.0) or 0.0),
