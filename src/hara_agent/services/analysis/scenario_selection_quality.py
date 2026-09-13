@@ -263,11 +263,22 @@ class ScenarioSemanticQueryBuilder:
                     "inference_rule": "STRUCTURED_COLLISION_RELATION",
                 })
 
-        location_text = _json_text({
-            "parent_operating_scenario": parent.operating_scenario,
+        project_location_text = _json_text({
             "odd_locations": project_context.get("odd_locations", []),
             "odd_road_types": project_context.get("odd_road_types", []),
         })
+        parent_location_text = _json_text({
+            "parent_operating_scenario": parent.operating_scenario,
+            "parent_operating_scenario_fact": facts.get("operating_scenario", ""),
+        })
+        project_location_categories = {
+            category for category in _explicit_categories(project_location_text)
+            if category.startswith("LOCATION_")
+        }
+        parent_location_categories = {
+            category for category in _explicit_categories(parent_location_text)
+            if category.startswith("LOCATION_")
+        }
         odd_road_text = _json_text({
             "odd_weather_conditions": project_context.get("odd_weather_conditions", []),
             "odd_road_surfaces": project_context.get("odd_road_surfaces", []),
@@ -281,9 +292,12 @@ class ScenarioSemanticQueryBuilder:
             "object_categories": sorted(categories & _OBJECT_CATEGORIES),
             "traffic_relations": sorted(categories & _TRAFFIC_CATEGORIES),
             "road_relations": sorted(categories & _ROAD_CATEGORIES),
+            # Project ODD is hard legality authority.  Parent location is kept
+            # separately as ranking context and must never widen that authority.
+            "project_location_categories": sorted(project_location_categories),
+            "parent_location_categories": sorted(parent_location_categories),
             "location_categories": sorted(
-                category for category in _explicit_categories(location_text)
-                if category.startswith("LOCATION_")
+                project_location_categories | parent_location_categories
             ),
             "odd_road_categories": sorted(
                 category for category in _explicit_categories(odd_road_text)
@@ -513,7 +527,7 @@ class ScenarioSemanticCompatibilityClassifier:
         if dimension == "EGO_DYNAMICS":
             return set(map(str, query.get("action_categories", [])))
         if dimension == "WHERE":
-            return set(map(str, query.get("location_categories", [])))
+            return set(map(str, query.get("project_location_categories", [])))
         if dimension in {"ROAD", "EGO_X_ROAD"}:
             return set(map(str, query.get("road_relations", [])))
         return set()
@@ -551,6 +565,35 @@ class ScenarioSemanticCompatibilityClassifier:
             return SemanticCompatibility.UNKNOWN, "ATOM_HAS_NO_EXPLICIT_DOMAIN_SEMANTICS"
 
         return SemanticCompatibility.UNKNOWN, "NO_EXPLICIT_QUERY_SEMANTIC"
+
+
+class ScenarioRefinementEvidencePolicy:
+    """One evidence rule shared by refinement generation and validation."""
+
+    _STRUCTURED_SCORE_KEYS = (
+        "template_score", "action_score", "object_score",
+        "traffic_relation_score", "category_context_score",
+        "structured_source_score", "physical_semantics_score",
+    )
+
+    @classmethod
+    def classify(cls, candidate: Any, decision: Any) -> tuple[str, str]:
+        if candidate.atom_id == decision.parent_atom_id:
+            return "REFINEMENT_SUPPORTED", "EXACT_PARENT_BINDING"
+        if (
+            decision.authority is ScenarioBindingAuthority.RANGE_CONTAINMENT
+            and candidate.speed_range_kph is not None
+        ):
+            return "REFINEMENT_SUPPORTED", "RANGE_CONTAINMENT"
+        if candidate.template_relationship != "NONE":
+            return "REFINEMENT_SUPPORTED", "METHOD_TEMPLATE_EVIDENCE"
+        for key in cls._STRUCTURED_SCORE_KEYS:
+            if float(candidate.ranking_scores.get(key, 0.0)) > 0:
+                return "REFINEMENT_SUPPORTED", f"STRUCTURED_EVIDENCE:{key}"
+        return (
+            "REFINEMENT_UNSUPPORTED",
+            "NO_EXACT_TEMPLATE_STRUCTURED_CATEGORY_OR_PHYSICAL_EVIDENCE",
+        )
 
 
 class ScenarioShortlistPolicy:
@@ -1048,6 +1091,7 @@ __all__ = [
     "normalize_object_category",
     "ScenarioBindingPolicy", "ScenarioCandidateRanker", "ScenarioCoveragePlanner",
     "ScenarioDimensionApplicabilityService", "ScenarioSemanticQueryBuilder",
-    "ScenarioSemanticCompatibilityClassifier", "ScenarioShortlistPolicy",
+    "ScenarioRefinementEvidencePolicy", "ScenarioSemanticCompatibilityClassifier",
+    "ScenarioShortlistPolicy",
     "ScenarioVariantDiversityValidator",
 ]

@@ -231,15 +231,25 @@ def _ranking(inputs: Iterable[Any]) -> dict[str, Any]:
                     "dimension": candidate_set.dimension,
                     "diagnostics": dict(diagnostics),
                 })
+            generic_family_counts = Counter(
+                candidate.semantic_family for candidate in candidate_set.candidates
+                if candidate.binding_authority == "ANALYTICAL_SELECTION"
+                and candidate.template_relationship == "NONE"
+                and not candidate.ranking_scores.get("structured_source_score", 0)
+                and not candidate.ranking_scores.get("physical_semantics_score", 0)
+            )
             if (
                 candidate_set.dimension == "EGO_DYNAMICS"
                 and candidate_set.dimension in item.coverage_plan.primary_variation_dimensions
-                and max(family_counts.values(), default=0) >= 3
+                and not ScenarioShortlistPolicy._intensity_driven(
+                    item.structured_semantic_query
+                )
+                and max(generic_family_counts.values(), default=0) >= 3
             ):
                 intensity_risks.append({
                     "malfunction_id": item.malfunction_id,
                     "parent_scenario_id": item.parent_scenario_id,
-                    "max_same_family_candidates": max(family_counts.values()),
+                    "max_same_family_candidates": max(generic_family_counts.values()),
                 })
     return {
         "evidence_tier_distribution": dict(sorted(tier_distribution.items())),

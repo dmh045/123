@@ -25,7 +25,7 @@ from hara_agent.services.reporting import (
     OfflineReportRebuilder, ScenarioSelectorQualityAudit,
 )
 from hara_agent.services.semantic.scenario_synthesis_agent import (
-    BoundedScenarioSynthesisAgent,
+    BoundedScenarioSynthesisAgent, SCENARIO_SYNTHESIS_PROMPT_VERSION,
 )
 from hara_agent.workflow.checkpoints import CheckpointRepository
 from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
@@ -226,11 +226,78 @@ class ScenarioSynthesisRunner:
         ]
         return matches[0] if len(matches) == 1 else ""
 
-    def _smoke_groups(self, inputs: list[Any], count: int) -> list[Any]:
+    @staticmethod
+    def _stable_identity(item: Any) -> tuple[str, str, str]:
+        return (
+            item.malfunction_id, item.parent_scenario_id, item.hazardous_event_id,
+        )
+
+    def _apply_smoke_plan_overrides(
+        self, inputs: list[Any], identities: list[dict[str, Any]] | None,
+    ) -> list[Any]:
+        """Preserve a historical smoke's requested shape without changing Method scope."""
+        if identities is None:
+            return inputs
+        requested = {}
+        for record in identities:
+            identity = (
+                str(record.get("malfunction_id", "")),
+                str(record.get("parent_scenario_id", "")),
+                str(record.get("hazardous_event_id", "")),
+            )
+            raw_count = record.get("requested_variant_count")
+            if raw_count in (None, ""):
+                continue
+            count = int(raw_count)
+            if count not in {1, 2, 3}:
+                raise ValueError(f"Invalid historical smoke variant count: {count}")
+            requested[identity] = count
+        result = []
+        for item in inputs:
+            count = requested.get(self._stable_identity(item))
+            current = item.coverage_plan.desired_variant_count
+            if count is None or count == current:
+                result.append(item)
+                continue
+            if count > current:
+                raise ValueError(
+                    "Historical smoke variant count exceeds the current supported "
+                    f"Coverage Plan for {self._stable_identity(item)}: {count}>{current}"
+                )
+            result.append(replace(
+                item,
+                coverage_plan=replace(
+                    item.coverage_plan,
+                    desired_variant_count=count,
+                    variant_intents=item.coverage_plan.variant_intents[:count],
+                ),
+            ))
+        return result
+
+    def _smoke_groups(
+        self, inputs: list[Any], count: int,
+        identities: list[dict[str, Any]] | None = None,
+    ) -> list[Any]:
         ready = sorted(
             (item for item in inputs if self._provider_ready(item)),
             key=lambda item: item.semantic_group_id,
         )
+        if identities is not None:
+            by_identity = {self._stable_identity(item): item for item in ready}
+            requested = [(
+                str(item.get("malfunction_id", "")),
+                str(item.get("parent_scenario_id", "")),
+                str(item.get("hazardous_event_id", "")),
+            ) for item in identities]
+            missing = [identity for identity in requested if identity not in by_identity]
+            if missing:
+                raise ValueError(
+                    "Requested recovery-smoke identities are not Provider-ready: "
+                    + json.dumps(missing, ensure_ascii=False)
+                )
+            if len(requested) != len(set(requested)):
+                raise ValueError("Recovery-smoke identities must be unique")
+            return [by_identity[identity] for identity in requested]
         target_strata = (
             "vehicle_interaction", "vru", "reversing", "parking_in_out",
             "slope_road_relation", "strong_fm_template", "no_fm_template",
@@ -322,13 +389,24 @@ class ScenarioSynthesisRunner:
         failures = []
         if len(traces) != expected_count or any(item.get("status") != "PASS" for item in traces):
             failures.append("SMOKE_SELECTION_OR_SCHEMA_FAILURE")
+        all_calls = [call for trace in traces for call in trace.get("calls", [])]
         successful_calls = [
-            call for trace in traces for call in trace.get("calls", [])
+            call for call in all_calls
             if call.get("schema_status") == "PASS"
         ]
+        if any(call.get("schema_status") != "PASS" for call in all_calls):
+            failures.append("SCHEMA_NOT_ALL_PASS")
         models = {str(call.get("resolved_model", "")) for call in successful_calls if call.get("resolved_model")}
         if len(models) != 1:
             failures.append("RESOLVED_MODEL_DRIFT")
+        elif models != {"doubao-seed-2-1-turbo-260628"}:
+            failures.append("RESOLVED_MODEL_UNEXPECTED")
+        configured = {
+            str(call.get("configured_model", "")) for call in all_calls
+            if call.get("configured_model")
+        }
+        if configured != {"doubao-seed-2.0-pro"}:
+            failures.append("CONFIGURED_MODEL_UNEXPECTED")
         if any(str(call.get("thinking", "")) != "disabled" for call in successful_calls):
             failures.append("THINKING_POLICY_CHANGED")
         if any(int(call.get("reasoning_characters", 0) or 0) != 0 for call in successful_calls):
@@ -582,6 +660,7 @@ class ScenarioSynthesisRunner:
     def run(
         self, *, source_run_id: str, target_run_id: str,
         smoke_count: int = 5, run_full: bool = False, max_workers: int = 4,
+        smoke_identities: list[dict[str, Any]] | None = None,
         output_path: str | Path | None = None,
         baseline_path: str | Path = "method_assets/fusa_baseline_v1/manifest.yaml",
         report_template_path: str | Path = "references/HARA_Template_AI_20260327.xlsx",
@@ -591,6 +670,7 @@ class ScenarioSynthesisRunner:
         parent_inventory_before = self._parent_inventory(source_run_id)
         parent = CheckpointRepository(self.run_dir).load(source_run_id)
         inputs, scenarios, malfunctions, parent_assessments, preparation = self._prepare(parent)
+        inputs = self._apply_smoke_plan_overrides(inputs, smoke_identities)
         review_dir = self.review_root / target_run_id
         provider_trace_path = review_dir / "scenario_synthesis_provider_trace.json"
         candidate_payload = self._candidate_artifact(inputs, preparation)
@@ -619,7 +699,12 @@ class ScenarioSynthesisRunner:
             "provider_ineligible_groups": len(inputs) - len(provider_ready),
         })
         selections: dict[str, tuple[tuple[ScenarioSynthesisAssessment, ...], dict[str, Any]]] = {}
-        smoke_inputs = self._smoke_groups(provider_ready, smoke_count)
+        effective_smoke_count = (
+            len(smoke_identities) if smoke_identities is not None else smoke_count
+        )
+        smoke_inputs = self._smoke_groups(
+            provider_ready, effective_smoke_count, smoke_identities,
+        )
         if smoke_inputs:
             selections = self._run_provider_groups(
                 inputs=smoke_inputs, max_workers=1, progress_path=provider_trace_path,
@@ -648,9 +733,15 @@ class ScenarioSynthesisRunner:
             }),
             "thinking": str(getattr(getattr(self.client, "config", None), "scenario_thinking", "")),
             "smoke": {
-                "requested": smoke_count, "executed": len(smoke_inputs),
+                "requested": effective_smoke_count, "executed": len(smoke_inputs),
                 "passed": smoke_passed, "failures": smoke_failures,
                 "semantic_group_ids": [item.semantic_group_id for item in smoke_inputs],
+                "stable_identities": [{
+                    "malfunction_id": item.malfunction_id,
+                    "parent_scenario_id": item.parent_scenario_id,
+                    "hazardous_event_id": item.hazardous_event_id,
+                    "requested_variant_count": item.coverage_plan.desired_variant_count,
+                } for item in smoke_inputs],
                 "strata": self._smoke_strata(smoke_inputs),
                 "selection_records": [{
                     "semantic_group_id": item.semantic_group_id,
@@ -667,6 +758,10 @@ class ScenarioSynthesisRunner:
                 "provider_calls": sum(self._trace_call_count(item) for item in all_traces),
                 "smoke_cache_hits_in_full": len(smoke_inputs) if full_started else 0,
                 "repairs": sum(int(item.get("repairs", 0)) for item in all_traces),
+                "method_compound_canonicalizations": sum(
+                    int(item.get("method_compound_canonicalizations", 0))
+                    for item in all_traces
+                ),
                 "failures": sum(item.get("status") != "PASS" for item in all_traces),
             },
         }
@@ -699,7 +794,7 @@ class ScenarioSynthesisRunner:
                                 call.get("resolved_model", "") for call in reversed(trace.get("calls", []))
                                 if call.get("resolved_model")
                             ), ""),
-                            "prompt_version": "p5-d2-scenario-synthesis-v2",
+                            "prompt_version": SCENARIO_SYNTHESIS_PROMPT_VERSION,
                             "rationale": assessment.semantic_rationale,
                             "context_refs": list(assessment.context_refs),
                         },

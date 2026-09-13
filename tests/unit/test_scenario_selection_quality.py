@@ -15,6 +15,7 @@ from hara_agent.services.analysis import ConstrainedScenarioSynthesisService
 from hara_agent.services.analysis.scenario_selection_quality import (
     ScenarioCandidateRanker, ScenarioCoveragePlanner,
     ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
+    ScenarioRefinementEvidencePolicy,
 )
 from hara_agent.evaluation.scenario_selector import top_k_recall_audit
 from hara_agent.services.semantic.scenario_synthesis_agent import (
@@ -279,7 +280,10 @@ def test_unrepresentable_crossing_relation_is_method_gap_not_catalog_fallback(me
     assert traffic.hard_filtered_pool_size >= len(traffic.candidates)
 
 
-def _query(*, malfunction_text="", hazard_text="", parent=None, facts=None):
+def _query(
+    *, malfunction_text="", hazard_text="", parent=None, facts=None,
+    project=None,
+):
     parent = parent or ScenarioCandidate(
         "SCN-FIELD", "parking garage", "", "", operating_mode="active",
         facts=dict(facts or {}),
@@ -294,7 +298,7 @@ def _query(*, malfunction_text="", hazard_text="", parent=None, facts=None):
             "hazardous_event": hazard_text,
             "causal_assessment": {"causal_chain": []},
         },
-        project_context={"odd_locations": ["parking garage"]},
+        project_context=project or {"odd_locations": ["parking garage"]},
         fm_template={},
     )
 
@@ -302,6 +306,8 @@ def _query(*, malfunction_text="", hazard_text="", parent=None, facts=None):
 def test_parking_location_alone_does_not_prove_action_park():
     query = _query(malfunction_text="control output unavailable")
     assert query["location_categories"] == ["LOCATION_PARKING"]
+    assert query["project_location_categories"] == ["LOCATION_PARKING"]
+    assert query["parent_location_categories"] == ["LOCATION_PARKING"]
     assert "ACTION_PARK" not in query["action_categories"]
 
 
@@ -386,6 +392,7 @@ def test_source_defined_compound_traffic_atom_survives_hard_filter(method):
     query = _query(
         parent=parent, facts=parent.facts,
         hazard_text="Turning across oncoming traffic.",
+        project=_project("motorway"),
     )
     binding = ScenarioBindingDecision(
         dimension="TRAFFIC_PATTERN",
@@ -471,23 +478,64 @@ def test_top_k_audit_flags_stronger_source_evidence_below_cutoff():
     assert result["source_strong_candidates_below_cutoff"] == 1
 
 
+def test_refinement_evidence_policy_rejects_lexical_only_but_accepts_structured():
+    decision = ScenarioBindingDecision(
+        dimension="EGO_DYNAMICS",
+        authority=ScenarioBindingAuthority.METHOD_TEMPLATE_INFERENCE,
+        refinable=True, source_refs=("PARENT.scenario",), basis="fixture",
+        parent_atom_id="FA001",
+    )
+    lexical = SimpleNamespace(
+        atom_id="FA005", speed_range_kph=None, template_relationship="NONE",
+        ranking_scores={"lexical_score": 4.0},
+    )
+    structured = SimpleNamespace(
+        atom_id="FA005", speed_range_kph=None, template_relationship="NONE",
+        ranking_scores={"structured_source_score": 1.0},
+    )
+    assert ScenarioRefinementEvidencePolicy.classify(lexical, decision)[0] == (
+        "REFINEMENT_UNSUPPORTED"
+    )
+    assert ScenarioRefinementEvidencePolicy.classify(structured, decision)[0] == (
+        "REFINEMENT_SUPPORTED"
+    )
+
+
+def test_refinement_evidence_policy_accepts_range_containment():
+    decision = ScenarioBindingDecision(
+        dimension="EGO_DYNAMICS",
+        authority=ScenarioBindingAuthority.RANGE_CONTAINMENT,
+        refinable=True, source_refs=("PROJECT.ODD",), basis="fixture",
+        parent_atom_id="FA001",
+    )
+    candidate = SimpleNamespace(
+        atom_id="FA005", speed_range_kph=(0.0, 15.0),
+        template_relationship="NONE", ranking_scores={"lexical_score": 0.0},
+    )
+    assert ScenarioRefinementEvidencePolicy.classify(candidate, decision) == (
+        "REFINEMENT_SUPPORTED", "RANGE_CONTAINMENT",
+    )
+
+
 def test_offline_provider_request_contains_governance_and_bounded_metadata(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _build(
         service, "Parking brake failure may contact a pedestrian.",
         parent=_parent(source_template=True),
     )
-    payload = BoundedScenarioSynthesisAgent._user_payload(synthesis_input)
+    payload = BoundedScenarioSynthesisAgent(None, service)._user_payload(
+        synthesis_input
+    )
     assert payload["dimension_applicability"]
+    assert payload["dimension_constraints"]
     assert payload["scenario_coverage_plan"]["desired_variant_count"] in {1, 2, 3}
     assert payload["fm_scenario_template"]["template_id"] == "FM_TEMPLATE_001"
-    candidate = next(
-        item for value in payload["candidate_sets"].values()
-        for item in value["candidates"]
-    )
-    assert candidate["candidate_origin"]
-    assert candidate["selection_reason"]
-    assert set(candidate["ranking_scores"]) == {
+    candidate = payload["logical_atom_candidates"][0]
+    assert candidate["filled_dimensions"]
+    evidence = next(iter(candidate["evidence_by_dimension"].values()))
+    assert evidence["candidate_origin"]
+    assert evidence["selection_reason"]
+    assert set(evidence["ranking_scores"]) == {
         "template_score", "mechanism_score", "action_score", "object_score",
         "traffic_relation_score", "odd_score", "causal_score", "lexical_score",
         "category_context_score", "structured_source_score",
@@ -495,10 +543,7 @@ def test_offline_provider_request_contains_governance_and_bounded_metadata(metho
         "source_evidence_tier", "final_rank_score",
     }
     assert "E_total" not in str(payload)
-    all_ids = {
-        item["atom_id"] for value in payload["candidate_sets"].values()
-        for item in value["candidates"]
-    }
+    all_ids = {item["atom_id"] for item in payload["logical_atom_candidates"]}
     assert len(all_ids) < len(service.by_id)
 
 

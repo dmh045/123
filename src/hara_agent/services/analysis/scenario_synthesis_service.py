@@ -7,10 +7,11 @@ Legacy FUSA used both behaviours; neither is method authority in V13.
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
+from itertools import product
 import json
 import re
 from typing import Any, Iterable
@@ -33,15 +34,19 @@ from .scenario_selection_quality import (
     normalize_object_category,
     ScenarioBindingPolicy, ScenarioCandidateRanker, ScenarioCoveragePlanner,
     ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
-    ScenarioSemanticCompatibilityClassifier, ScenarioShortlistPolicy,
+    ScenarioRefinementEvidencePolicy, ScenarioSemanticCompatibilityClassifier,
+    ScenarioShortlistPolicy,
     ScenarioVariantDiversityValidator,
 )
 
 
 class ScenarioSynthesisValidationError(ValueError):
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self, code: str, message: str, *, details: Iterable[str] = (),
+    ):
         super().__init__(message)
         self.code = code
+        self.details = tuple(details)
 
 
 class ConstrainedScenarioSynthesisService:
@@ -315,10 +320,46 @@ class ConstrainedScenarioSynthesisService:
             "active_option": active_option,
         }
 
+    def global_compound_legality(
+        self, *, atom: dict[str, Any], parent: ScenarioCandidate,
+        project_context: dict[str, Any], query: dict[str, Any],
+        applicability_by_dimension: dict[str, Any], exact_locks: dict[str, str],
+        fm_template: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Evaluate one logical atom across every dimension that it fills."""
+        atom_id = str(atom.get("atom_id", ""))
+        filled = tuple(dict.fromkeys(map(str, atom.get("filled_dimensions", []))))
+        if not filled or any(dimension not in self.dimensions for dimension in filled):
+            return False, "COMPOUND_DIMENSION_UNAVAILABLE"
+        if not self._speed_compatible(atom, self._speed_envelope(parent)):
+            return False, "ODD_SPEED_INCOMPATIBLE"
+        if not self._slope_compatible(atom, project_context):
+            return False, "ODD_SLOPE_INCOMPATIBLE"
+        if not self._weather_compatible(atom, project_context):
+            return False, "ODD_WEATHER_INCOMPATIBLE"
+        for dimension in filled:
+            applicability = applicability_by_dimension.get(dimension)
+            if (
+                applicability is None
+                or applicability.status is ScenarioDimensionApplicability.NOT_APPLICABLE
+            ):
+                return False, f"COMPOUND_DIMENSION_NOT_APPLICABLE:{dimension}"
+            if dimension in exact_locks and exact_locks[dimension] != atom_id:
+                return False, f"COMPOUND_EXACT_LOCK_CONFLICT:{dimension}"
+        if "WHERE" in filled:
+            compatibility, reason = self.semantic_classifier.classify(
+                dimension="WHERE", atom=atom, query=query,
+                fm_template=fm_template, parent_atom_id="",
+            )
+            if compatibility is SemanticCompatibility.CONTRADICTED:
+                return False, f"PROJECT_ODD_LOCATION_CONTRADICTION:{reason}"
+        return True, "GLOBALLY_LEGAL"
+
     def hard_filter_decision(
         self, *, dimension: str, atom: dict[str, Any], parent: ScenarioCandidate,
         project_context: dict[str, Any], query: dict[str, Any],
-        applicability: Any, decision: Any, exact_locks: dict[str, str],
+        applicability: Any, applicability_by_dimension: dict[str, Any] | None = None,
+        decision: Any, exact_locks: dict[str, str],
         fm_template: dict[str, Any],
     ) -> tuple[bool, str]:
         atom_id = str(atom.get("atom_id", ""))
@@ -326,20 +367,16 @@ class ConstrainedScenarioSynthesisService:
             return False, "DIMENSION_NOT_FILLED"
         if applicability.status is ScenarioDimensionApplicability.NOT_APPLICABLE:
             return False, "DIMENSION_NOT_APPLICABLE"
-        if not self._speed_compatible(atom, self._speed_envelope(parent)):
-            return False, "ODD_SPEED_INCOMPATIBLE"
-        if dimension in {"ROAD", "EGO_X_ROAD"} and not self._slope_compatible(
-            atom, project_context,
-        ):
-            return False, "ODD_SLOPE_INCOMPATIBLE"
-        if dimension == "ROAD" and not self._weather_compatible(atom, project_context):
-            return False, "ODD_WEATHER_INCOMPATIBLE"
-        if any(
-            other in exact_locks and exact_locks[other] != atom_id
-            for other in atom.get("filled_dimensions", [])
-            if other != dimension
-        ):
-            return False, "COMPOUND_EXACT_LOCK_CONFLICT"
+        applicability_by_dimension = applicability_by_dimension or {
+            value: applicability for value in atom.get("filled_dimensions", [])
+        }
+        globally_legal, global_reason = self.global_compound_legality(
+            atom=atom, parent=parent, project_context=project_context,
+            query=query, applicability_by_dimension=applicability_by_dimension,
+            exact_locks=exact_locks, fm_template=fm_template,
+        )
+        if not globally_legal:
+            return False, global_reason
 
         compatibility, reason = self.semantic_classifier.classify(
             dimension=dimension, atom=atom, query=query,
@@ -470,6 +507,34 @@ class ConstrainedScenarioSynthesisService:
             applicable = applicability[dimension]
             if dimension in exact_locks:
                 atom = self.by_id[exact_locks[dimension]]
+                legal, legal_reason = self.global_compound_legality(
+                    atom=atom, parent=parent, project_context=project_context,
+                    query=query, applicability_by_dimension=applicability,
+                    exact_locks=exact_locks, fm_template=fm_template,
+                )
+                if not legal:
+                    result.append(ScenarioAtomCandidateSet(
+                        dimension=dimension, catalog_size=len(catalog),
+                        hard_filtered_pool_size=0, candidates=(),
+                        applicability=applicable, binding_decision=decision,
+                        resolution_status_before=before, generation_status="METHOD_GAP",
+                        reason=f"Exact binding is globally incompatible: {legal_reason}",
+                        shortlist_budget=1, shortlist_policy="EXACT_FIXED",
+                        shortlist_diagnostics={
+                            "ranked_pool_size": 0, "selected_size": 0,
+                            "authoritative_below_cutoff": 0,
+                            "fm_template_below_cutoff": 0,
+                            "exact_structured_source_below_cutoff": 0,
+                            "high_evidence_family_below_cutoff": 0,
+                        },
+                        hard_filter_diagnostics={
+                            "illegal_rejected": 1, "contradicted_rejected": 0,
+                            "unknown_retained": 0, "supported_retained": 0,
+                            "refinement_unsupported_rejected": 0,
+                        },
+                    ))
+                    ranked_by_dimension[dimension] = ()
+                    continue
                 locked = self._candidate(
                     atom, origin=CandidateOrigin.DIRECT_PROJECT_BINDING,
                     refs=decision.source_refs,
@@ -508,6 +573,7 @@ class ConstrainedScenarioSynthesisService:
                     hard_filter_diagnostics={
                         "illegal_rejected": 0, "contradicted_rejected": 0,
                         "unknown_retained": 0, "supported_retained": 1,
+                        "refinement_unsupported_rejected": 0,
                     },
                 ))
                 ranked_by_dimension[dimension] = (locked,)
@@ -517,12 +583,14 @@ class ConstrainedScenarioSynthesisService:
             hard_counts = {
                 "illegal_rejected": 0, "contradicted_rejected": 0,
                 "unknown_retained": 0, "supported_retained": 0,
+                "refinement_unsupported_rejected": 0,
             }
             for atom in catalog:
                 passed, hard_reason = self.hard_filter_decision(
                     dimension=dimension, atom=atom, parent=parent,
                     project_context=project_context, query=query,
-                    applicability=applicable, decision=decision,
+                    applicability=applicable,
+                    applicability_by_dimension=applicability, decision=decision,
                     exact_locks=exact_locks, fm_template=fm_template,
                 )
                 if passed:
@@ -598,6 +666,21 @@ class ConstrainedScenarioSynthesisService:
                         + compatibility_reason
                     ),
                 )
+                if origin is CandidateOrigin.BINDING_REFINEMENT:
+                    refinement_status, refinement_reason = (
+                        ScenarioRefinementEvidencePolicy.classify(candidate, decision)
+                    )
+                    candidate = replace(
+                        candidate,
+                        selection_reason=(
+                            candidate.selection_reason
+                            + f"; refinement_evidence={refinement_status}:"
+                            + refinement_reason
+                        ),
+                    )
+                    if refinement_status == "REFINEMENT_UNSUPPORTED":
+                        hard_counts["refinement_unsupported_rejected"] += 1
+                        continue
                 ranked.append(candidate)
             ranked.sort(key=lambda item: self.ranker.rank_key(
                 item.atom_id, item.ranking_scores,
@@ -646,84 +729,38 @@ class ConstrainedScenarioSynthesisService:
                 hard_filter_diagnostics=hard_counts,
             ))
 
-        # Compound closure is one deterministic shortlist step.  A high-evidence
-        # compound is expanded into every filled dimension; a weak compound that
-        # cannot be represented everywhere is removed from every dimension.
-        for _ in range(len(self.dimensions)):
-            by_dimension = {item.dimension: item for item in result}
-            present = {
-                dimension: {candidate.atom_id for candidate in item.candidates}
-                for dimension, item in by_dimension.items()
-            }
-            additions: dict[str, set[str]] = defaultdict(set)
-            removals: set[str] = set()
-            for item in result:
-                for candidate in item.candidates:
-                    filled = tuple(
-                        dimension for dimension in candidate.dimensions
-                        if dimension in self.dimensions
-                    )
-                    if len(filled) <= 1:
-                        continue
-                    ranked_membership = {
-                        dimension: next((
-                            value for value in ranked_by_dimension.get(dimension, ())
-                            if value.atom_id == candidate.atom_id
-                        ), None)
-                        for dimension in filled
-                    }
-                    if any(value is None for value in ranked_membership.values()):
-                        removals.add(candidate.atom_id)
-                        continue
-                    high_evidence = any(
-                        float(value.ranking_scores.get("source_evidence_tier", 0)) >= 2
-                        or value.template_relationship != "NONE"
-                        for value in ranked_membership.values() if value is not None
-                    )
-                    missing = [
-                        dimension for dimension in filled
-                        if candidate.atom_id not in present.get(dimension, set())
-                    ]
-                    if missing and high_evidence:
-                        for dimension in missing:
-                            additions[dimension].add(candidate.atom_id)
-                    elif missing:
-                        removals.add(candidate.atom_id)
-            if not additions and not removals:
-                break
-            if removals:
-                ranked_by_dimension = {
-                    dimension: tuple(
-                        candidate for candidate in candidates
-                        if candidate.atom_id not in removals
-                    )
-                    for dimension, candidates in ranked_by_dimension.items()
-                }
-            updated = []
-            for item in result:
-                candidates = [
-                    candidate for candidate in item.candidates
-                    if candidate.atom_id not in removals
-                ]
-                for candidate in ranked_by_dimension.get(item.dimension, ()):
-                    if (
-                        candidate.atom_id in additions.get(item.dimension, set())
-                        and all(value.atom_id != candidate.atom_id for value in candidates)
-                    ):
-                        candidates.append(candidate)
-                order = {
-                    candidate.atom_id: index
-                    for index, candidate in enumerate(ranked_by_dimension.get(item.dimension, ()))
-                }
-                candidates.sort(key=lambda candidate: order.get(candidate.atom_id, len(order)))
-                updated.append(replace(item, candidates=tuple(candidates)))
-            result = updated
+        # Establish an atomic candidate space.  A logical compound is either
+        # available in every filled dimension or absent everywhere.
+        def globally_ranked(candidate: ScenarioDimensionCandidate) -> bool:
+            return all(
+                any(
+                    value.atom_id == candidate.atom_id
+                    for value in ranked_by_dimension.get(dimension, ())
+                )
+                for dimension in candidate.dimensions
+                if dimension in self.dimensions
+            )
 
-        # Refill any high-evidence family whose first representative was an
-        # invalid compound removed above, then close those valid compounds.
+        invalid_compounds = {
+            candidate.atom_id
+            for candidates in ranked_by_dimension.values()
+            for candidate in candidates
+            if len(candidate.dimensions) > 1 and not globally_ranked(candidate)
+        }
+        ranked_by_dimension = {
+            dimension: tuple(
+                candidate for candidate in candidates
+                if candidate.atom_id not in invalid_compounds
+            )
+            for dimension, candidates in ranked_by_dimension.items()
+        }
+
         refilled = []
         for item in result:
-            candidates = list(item.candidates)
+            candidates = [
+                candidate for candidate in item.candidates
+                if candidate.atom_id not in invalid_compounds
+            ]
             selected_families = {
                 candidate.semantic_family for candidate in candidates
                 if float(candidate.ranking_scores.get("source_evidence_tier", 0)) >= 2
@@ -737,39 +774,78 @@ class ConstrainedScenarioSynthesisService:
                     selected_families.add(candidate.semantic_family)
             refilled.append(replace(item, candidates=tuple(candidates)))
         result = refilled
-        by_dimension = {item.dimension: item for item in result}
-        additions: dict[str, set[str]] = defaultdict(set)
+
+        exposed_compounds = {
+            candidate.atom_id
+            for item in result for candidate in item.candidates
+            if len(candidate.dimensions) > 1
+        }
+        closed = []
         for item in result:
+            candidates = list(item.candidates)
+            present = {candidate.atom_id for candidate in candidates}
+            for candidate in ranked_by_dimension.get(item.dimension, ()):
+                if candidate.atom_id in exposed_compounds and candidate.atom_id not in present:
+                    candidates.append(candidate)
+            order = {
+                candidate.atom_id: index
+                for index, candidate in enumerate(ranked_by_dimension.get(item.dimension, ()))
+            }
+            candidates.sort(key=lambda candidate: order.get(candidate.atom_id, len(order)))
+            closed.append(replace(item, candidates=tuple(candidates)))
+        result = closed
+
+        # Closing paired dimensions can merge independently shortlisted
+        # representatives.  Re-apply the non-intensity family cap globally so
+        # compound expansion does not create generic intensity-only choices.
+        family_removals: set[str] = set()
+        for item in result:
+            if (
+                item.dimension != "EGO_DYNAMICS"
+                or self.shortlist_policy._intensity_driven(query)
+            ):
+                continue
+            family_counts: Counter[str] = Counter()
             for candidate in item.candidates:
-                filled = tuple(
-                    dimension for dimension in candidate.dimensions
-                    if dimension in self.dimensions
+                protected = (
+                    candidate.binding_authority
+                    != ScenarioBindingAuthority.ANALYTICAL_SELECTION.value
+                    or candidate.template_relationship != "NONE"
+                    or bool(candidate.ranking_scores.get("structured_source_score", 0))
+                    or bool(candidate.ranking_scores.get("physical_semantics_score", 0))
                 )
-                if len(filled) <= 1:
+                if family_counts[candidate.semantic_family] >= 2 and not protected:
+                    family_removals.add(candidate.atom_id)
                     continue
-                for dimension in filled:
-                    if (
-                        all(value.atom_id != candidate.atom_id for value in by_dimension[dimension].candidates)
-                        and any(
-                            value.atom_id == candidate.atom_id
-                            for value in ranked_by_dimension.get(dimension, ())
-                        )
-                    ):
-                        additions[dimension].add(candidate.atom_id)
-        if additions:
-            closed = []
-            for item in result:
-                candidates = list(item.candidates)
-                for candidate in ranked_by_dimension.get(item.dimension, ()):
-                    if candidate.atom_id in additions.get(item.dimension, set()):
-                        candidates.append(candidate)
-                order = {
-                    candidate.atom_id: index
-                    for index, candidate in enumerate(ranked_by_dimension.get(item.dimension, ()))
-                }
-                candidates.sort(key=lambda candidate: order.get(candidate.atom_id, len(order)))
-                closed.append(replace(item, candidates=tuple(candidates)))
-            result = closed
+                family_counts[candidate.semantic_family] += 1
+        if family_removals:
+            result = [
+                replace(
+                    item,
+                    candidates=tuple(
+                        candidate for candidate in item.candidates
+                        if candidate.atom_id not in family_removals
+                    ),
+                )
+                for item in result
+            ]
+
+        membership = {
+            item.dimension: {candidate.atom_id for candidate in item.candidates}
+            for item in result
+        }
+        partial = {
+            candidate.atom_id
+            for item in result for candidate in item.candidates
+            if len(candidate.dimensions) > 1 and any(
+                candidate.atom_id not in membership.get(dimension, set())
+                for dimension in candidate.dimensions
+            )
+        }
+        if partial:
+            raise RuntimeError(
+                "Compound candidate closure invariant failed: " + ",".join(sorted(partial))
+            )
 
         updated = []
         for item in result:
@@ -866,6 +942,237 @@ class ConstrainedScenarioSynthesisService:
             fm_scenario_template=fm_template,
         )
 
+    def logical_candidate_registry(
+        self, synthesis_input: ScenarioSynthesisInput,
+    ) -> dict[str, ScenarioDimensionCandidate]:
+        """Return one entry per fully closed Provider-selectable Method atom."""
+        candidate_sets = {
+            item.dimension: item for item in synthesis_input.dimension_candidate_sets
+        }
+        registry: dict[str, ScenarioDimensionCandidate] = {}
+        for candidate_set in synthesis_input.dimension_candidate_sets:
+            for candidate in candidate_set.candidates:
+                filled = tuple(
+                    dimension for dimension in candidate.dimensions
+                    if dimension in candidate_sets
+                )
+                if not filled or any(
+                    candidate.atom_id not in {
+                        item.atom_id for item in candidate_sets[dimension].candidates
+                    }
+                    for dimension in filled
+                ):
+                    continue
+                registry.setdefault(candidate.atom_id, candidate)
+        return dict(sorted(registry.items()))
+
+    def logical_selection_bundles(
+        self, synthesis_input: ScenarioSynthesisInput, *, limit: int = 96,
+    ) -> tuple[tuple[str, ...], ...]:
+        """Build a bounded set of conflict-free logical exact covers."""
+        registry = self.logical_candidate_registry(synthesis_input)
+        candidate_sets = {
+            item.dimension: item for item in synthesis_input.dimension_candidate_sets
+        }
+        candidate_scores: dict[str, float] = {}
+        for item in synthesis_input.dimension_candidate_sets:
+            for candidate in item.candidates:
+                score = (
+                    100.0 * float(candidate.ranking_scores.get("source_evidence_tier", 0))
+                    + float(candidate.ranking_scores.get("final_rank_score", 0))
+                )
+                candidate_scores[candidate.atom_id] = max(
+                    candidate_scores.get(candidate.atom_id, float("-inf")), score,
+                )
+
+        locked_ids = tuple(dict.fromkeys(
+            atom_id
+            for item in synthesis_input.dimension_candidate_sets
+            for atom_id in item.locked_atom_ids
+        ))
+        selected: list[str] = []
+        occupied: set[str] = set()
+        for atom_id in locked_ids:
+            candidate = registry.get(atom_id)
+            if candidate is None or occupied & set(candidate.dimensions):
+                return ()
+            selected.append(atom_id)
+            occupied.update(candidate.dimensions)
+
+        primary = tuple(synthesis_input.coverage_plan.primary_variation_dimensions)
+        required = tuple(
+            dimension for dimension in self.dimensions
+            if candidate_sets[dimension].applicability.status
+            is ScenarioDimensionApplicability.REQUIRED
+        )
+        optional_primary = tuple(
+            dimension for dimension in primary
+            if candidate_sets[dimension].applicability.status
+            is ScenarioDimensionApplicability.OPTIONAL
+        )
+        targets = tuple(dict.fromkeys((*primary, *required, *optional_primary)))
+        states: list[tuple[tuple[str, ...], frozenset[str], float]] = [(
+            tuple(selected), frozenset(occupied),
+            sum(candidate_scores.get(atom_id, 0.0) for atom_id in selected),
+        )]
+
+        def trim(
+            values: Iterable[tuple[tuple[str, ...], frozenset[str], float]],
+        ) -> list[tuple[tuple[str, ...], frozenset[str], float]]:
+            unique = {}
+            for atom_ids, dimensions, score in values:
+                key = tuple(sorted(atom_ids))
+                previous = unique.get(key)
+                if previous is None or score > previous[2]:
+                    unique[key] = (key, dimensions, score)
+            ordered = sorted(unique.values(), key=lambda item: (-item[2], item[0]))
+            return ordered[: max(limit * 4, 192)]
+
+        for dimension in targets:
+            next_states = []
+            optional = (
+                candidate_sets[dimension].applicability.status
+                is ScenarioDimensionApplicability.OPTIONAL
+            )
+            for atom_ids, dimensions, score in states:
+                if dimension in dimensions:
+                    next_states.append((atom_ids, dimensions, score))
+                    continue
+                if optional:
+                    next_states.append((atom_ids, dimensions, score))
+                for candidate in registry.values():
+                    filled = set(candidate.dimensions)
+                    if dimension not in filled or dimensions & filled:
+                        continue
+                    next_states.append((
+                        (*atom_ids, candidate.atom_id),
+                        dimensions | filled,
+                        score + candidate_scores.get(candidate.atom_id, 0.0),
+                    ))
+            states = trim(next_states)
+            if not states:
+                return ()
+
+        valid = []
+        fingerprints = set()
+        primary_signatures = set()
+        for atom_ids, dimensions, score in sorted(
+            states, key=lambda item: (-item[2], item[0]),
+        ):
+            if any(dimension not in dimensions for dimension in required):
+                continue
+            try:
+                expanded = self.expand_logical_atom_ids(synthesis_input, atom_ids)
+            except ScenarioSynthesisValidationError:
+                continue
+            if self._selection_reasons(synthesis_input, expanded):
+                continue
+            fingerprint = self._canonical_json({
+                dimension: [
+                    self.by_id[atom_id].get("v2")
+                    or self.by_id[atom_id].get("v2_proper") or atom_id
+                    for atom_id in expanded[dimension]
+                ]
+                for dimension in self.dimensions
+            })
+            if fingerprint in fingerprints:
+                continue
+            signature = tuple(expanded.get(dimension, ()) for dimension in primary)
+            if signature in primary_signatures and len(valid) < limit // 2:
+                continue
+            fingerprints.add(fingerprint)
+            primary_signatures.add(signature)
+            valid.append(tuple(sorted(atom_ids)))
+            if len(valid) >= limit:
+                break
+        return tuple(valid)
+
+    def logical_selection_assignments(
+        self, synthesis_input: ScenarioSynthesisInput, *, limit: int = 24,
+    ) -> tuple[tuple[tuple[str, ...], ...], ...]:
+        """Build bounded whole-sibling assignments that satisfy the Coverage Plan."""
+        desired = synthesis_input.coverage_plan.desired_variant_count
+        bundles = self.logical_selection_bundles(synthesis_input, limit=96)
+        if desired <= 0 or not bundles:
+            return ()
+        pool = bundles[:32]
+        expanded = {
+            bundle: self.expand_logical_atom_ids(synthesis_input, bundle)
+            for bundle in pool
+        }
+        fingerprints = {
+            bundle: self._canonical_json({
+                dimension: [
+                    self.by_id[atom_id].get("v2")
+                    or self.by_id[atom_id].get("v2_proper") or atom_id
+                    for atom_id in expanded[bundle].get(dimension, ())
+                ]
+                for dimension in self.dimensions
+            })
+            for bundle in pool
+        }
+        assignments = []
+        for assignment in product(pool, repeat=desired):
+            if len({fingerprints[bundle] for bundle in assignment}) != desired:
+                continue
+            if self.diversity_validator.reasons(
+                synthesis_input.coverage_plan,
+                (expanded[bundle] for bundle in assignment),
+            ):
+                continue
+            assignments.append(assignment)
+            if len(assignments) >= limit:
+                break
+        return tuple(assignments)
+
+    def expand_logical_atom_ids(
+        self, synthesis_input: ScenarioSynthesisInput,
+        atom_ids: Iterable[str],
+    ) -> dict[str, tuple[str, ...]]:
+        """Expand each logical selection atomically across Method dimensions."""
+        values = tuple(map(str, atom_ids))
+        if len(values) != len(set(values)):
+            duplicate = next(value for value in values if values.count(value) > 1)
+            raise ScenarioSynthesisValidationError(
+                f"DUPLICATE_LOGICAL_ATOM_ID:{duplicate}",
+                f"Logical atom {duplicate} was selected more than once",
+            )
+        registry = self.logical_candidate_registry(synthesis_input)
+        selected: dict[str, list[str]] = {dimension: [] for dimension in self.dimensions}
+        conflicts: list[str] = []
+        for atom_id in values:
+            candidate = registry.get(atom_id)
+            if candidate is None:
+                code = (
+                    f"INVENTED_LOGICAL_ATOM_ID:{atom_id}"
+                    if atom_id not in self.by_id
+                    else f"LOGICAL_ATOM_OUTSIDE_REGISTRY:{atom_id}"
+                )
+                raise ScenarioSynthesisValidationError(
+                    code, f"Logical atom {atom_id} is not Provider-selectable",
+                )
+            for dimension in candidate.dimensions:
+                if dimension not in selected:
+                    raise ScenarioSynthesisValidationError(
+                        f"UNKNOWN_DIMENSION:{dimension}",
+                        f"Logical atom {atom_id} fills an unknown dimension",
+                    )
+                if selected[dimension] and atom_id not in selected[dimension]:
+                    conflicts.append(
+                        f"COMPOUND_ATOM_CONFLICT:{dimension}:"
+                        f"{selected[dimension][0]},{atom_id}"
+                    )
+                selected[dimension].append(atom_id)
+        if conflicts:
+            reasons = sorted(set(conflicts))
+            raise ScenarioSynthesisValidationError(
+                self._primary_validation_reason(reasons), "; ".join(reasons),
+                details=reasons,
+            )
+        return {
+            dimension: tuple(atom_ids) for dimension, atom_ids in selected.items()
+        }
+
     def _selection_reasons(
         self, synthesis_input: ScenarioSynthesisInput,
         selected: dict[str, tuple[str, ...]], *, partial: bool = False,
@@ -921,11 +1228,10 @@ class ConstrainedScenarioSynthesisService:
                     (item for item in candidate_set.candidates if item.atom_id == selected[dimension][0]),
                     None,
                 )
-                ranking = candidate.ranking_scores if candidate is not None else {}
-                if not any(float(ranking.get(name, 0.0)) > 0 for name in (
-                    "template_score", "mechanism_score", "action_score", "object_score",
-                    "traffic_relation_score", "causal_score", "lexical_score",
-                )):
+                refinement_status, _ = ScenarioRefinementEvidencePolicy.classify(
+                    candidate, decision,
+                ) if candidate is not None else ("REFINEMENT_UNSUPPORTED", "MISSING_CANDIDATE")
+                if refinement_status == "REFINEMENT_UNSUPPORTED":
                     reasons.append(f"UNSUPPORTED_BINDING_REFINEMENT:{dimension}")
         selected_by_dimension = {
             dimension: set(atom_ids) for dimension, atom_ids in selected.items()
@@ -988,7 +1294,7 @@ class ConstrainedScenarioSynthesisService:
             "LOCKED_BINDING_CHANGED:", "REQUIRED_DIMENSION_EMPTY:",
             "NOT_APPLICABLE_DIMENSION_SELECTED:",
             "UNSUPPORTED_BINDING_REFINEMENT:",
-            "COMPOUND_ATOM_INCOMPLETE:", "COMPOUND_ATOM_CONFLICT:",
+            "COMPOUND_ATOM_CONFLICT:", "COMPOUND_ATOM_INCOMPLETE:",
             "ODD_SPEED_INCOMPATIBLE:", "METHOD_CONSTRAINT:",
         )
         return next(
@@ -1252,7 +1558,7 @@ class ConstrainedScenarioSynthesisService:
         fingerprints: set[str] = set()
         for index, raw in enumerate(variants):
             if not isinstance(raw, dict) or set(raw) != {
-                "coverage_label", "selected_atoms", "semantic_rationale", "context_refs",
+                "coverage_label", "selected_atom_ids", "semantic_rationale", "context_refs",
             }:
                 raise ScenarioSynthesisValidationError(
                     "SCHEMA_VARIANT_FIELDS", f"Variant {index} has invalid fields"
@@ -1268,18 +1574,15 @@ class ConstrainedScenarioSynthesisService:
                     "COVERAGE_LABEL_PLAN_MISMATCH",
                     f"Variant {index} must implement {expected_labels[index]}",
                 )
-            selected_raw = raw["selected_atoms"]
-            if not isinstance(selected_raw, dict):
+            selected_raw = raw["selected_atom_ids"]
+            if not isinstance(selected_raw, list) or any(
+                not isinstance(item, str) for item in selected_raw
+            ):
                 raise ScenarioSynthesisValidationError(
-                    "SCHEMA_SELECTED_ATOMS", "selected_atoms must be an object"
+                    "SCHEMA_SELECTED_ATOM_IDS",
+                    "selected_atom_ids must be an atom ID array",
                 )
-            selected: dict[str, tuple[str, ...]] = {}
-            for dimension, values in selected_raw.items():
-                if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
-                    raise ScenarioSynthesisValidationError(
-                        "SCHEMA_ATOM_LIST", f"{dimension} must be an atom ID array"
-                    )
-                selected[str(dimension)] = tuple(values)
+            selected = self.expand_logical_atom_ids(synthesis_input, selected_raw)
             rationale = raw["semantic_rationale"]
             refs = raw["context_refs"]
             if not isinstance(rationale, str) or not rationale.strip():
@@ -1305,7 +1608,8 @@ class ConstrainedScenarioSynthesisService:
             reasons = self._selection_reasons(synthesis_input, selected)
             if reasons:
                 raise ScenarioSynthesisValidationError(
-                    self._primary_validation_reason(reasons), "; ".join(reasons)
+                    self._primary_validation_reason(reasons), "; ".join(reasons),
+                    details=reasons,
                 )
             candidate_sets = {
                 item.dimension: {candidate.atom_id: candidate.canonical_atom_id
@@ -1326,6 +1630,7 @@ class ConstrainedScenarioSynthesisService:
                 coverage_label=coverage, selected_atoms=selected,
                 semantic_rationale=rationale.strip(), context_refs=tuple(refs),
                 validation_status=SynthesisValidationStatus.VALIDATED,
+                selection_authority="BOUNDED_PROVIDER_LOGICAL_ATOM_SELECTION",
             ))
         diversity_reasons = self.diversity_validator.reasons(
             synthesis_input.coverage_plan,
@@ -1333,7 +1638,8 @@ class ConstrainedScenarioSynthesisService:
         )
         if diversity_reasons:
             raise ScenarioSynthesisValidationError(
-                diversity_reasons[0], "; ".join(diversity_reasons)
+                diversity_reasons[0], "; ".join(diversity_reasons),
+                details=diversity_reasons,
             )
         return tuple(assessments)
 
@@ -1345,7 +1651,8 @@ class ConstrainedScenarioSynthesisService:
         reasons = self._selection_reasons(synthesis_input, assessment.selected_atoms)
         if reasons:
             raise ScenarioSynthesisValidationError(
-                self._primary_validation_reason(reasons), "; ".join(reasons)
+                self._primary_validation_reason(reasons), "; ".join(reasons),
+                details=reasons,
             )
         selected_candidates: dict[str, ScenarioDimensionCandidate] = {}
         candidate_sets = {item.dimension: item for item in synthesis_input.dimension_candidate_sets}

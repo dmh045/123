@@ -208,9 +208,9 @@ def _valid_payload(synthesis_input) -> dict:
     return {
         "variants": [{
             "coverage_label": intent["coverage_label"],
-            "selected_atoms": {
-                dimension: list(atom_ids) for dimension, atom_ids in selected.items()
-            },
+            "selected_atom_ids": sorted({
+                atom_id for atom_ids in selected.values() for atom_id in atom_ids
+            }),
             "semantic_rationale": "Uses the supplied parking, pedestrian and ODD context.",
             "context_refs": [
                 "PROJECT.ODD", "HE.hazardous_event", "PARENT.scenario",
@@ -268,39 +268,24 @@ def test_provider_output_rejects_invented_atom(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _input(method)
     payload = _valid_payload(synthesis_input)
-    payload["variants"][0]["selected_atoms"]["WHERE"] = ["INVENTED"]
+    payload["variants"][0]["selected_atom_ids"] = ["INVENTED"]
     with pytest.raises(ScenarioSynthesisValidationError) as caught:
         service.validate_provider_payload(synthesis_input, payload)
-    assert caught.value.code == "INVENTED_ATOM_ID:WHERE:INVENTED"
+    assert caught.value.code == "INVENTED_LOGICAL_ATOM_ID:INVENTED"
 
 
-def test_provider_output_rejects_wrong_dimension_and_outside_candidate(method):
+def test_provider_output_rejects_catalog_atom_outside_logical_registry(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _input(method)
-    wrong_id = next(
-        atom_id for atom_id, atom in service.by_id.items()
-        if "EGO_ACTION" not in atom.get("filled_dimensions", [])
-    )
-    wrong = _valid_payload(synthesis_input)
-    wrong["variants"][0]["selected_atoms"]["EGO_ACTION"] = [wrong_id]
-    with pytest.raises(ScenarioSynthesisValidationError) as caught:
-        service.validate_provider_payload(synthesis_input, wrong)
-    assert caught.value.code == f"WRONG_DIMENSION:EGO_ACTION:{wrong_id}"
-
-    action_set = next(
-        item for item in synthesis_input.dimension_candidate_sets
-        if item.dimension == "EGO_ACTION"
-    )
-    supplied = {item.atom_id for item in action_set.candidates}
+    supplied = set(service.logical_candidate_registry(synthesis_input))
     outside_id = next(
-        atom_id for atom_id, atom in service.by_id.items()
-        if "EGO_ACTION" in atom.get("filled_dimensions", []) and atom_id not in supplied
+        atom_id for atom_id in service.by_id if atom_id not in supplied
     )
     outside = _valid_payload(synthesis_input)
-    outside["variants"][0]["selected_atoms"]["EGO_ACTION"] = [outside_id]
+    outside["variants"][0]["selected_atom_ids"] = [outside_id]
     with pytest.raises(ScenarioSynthesisValidationError) as caught:
         service.validate_provider_payload(synthesis_input, outside)
-    assert caught.value.code == f"ATOM_OUTSIDE_CANDIDATE_SET:EGO_ACTION:{outside_id}"
+    assert caught.value.code == f"LOGICAL_ATOM_OUTSIDE_REGISTRY:{outside_id}"
 
 
 def test_provider_output_rejects_missing_required_field(method):
@@ -338,7 +323,7 @@ def test_bounded_provider_selection_allows_one_repair(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _input(method)
     invalid = deepcopy(_valid_payload(synthesis_input))
-    invalid["variants"][0]["selected_atoms"]["OBJECT"] = ["INVENTED"]
+    invalid["variants"][0]["selected_atom_ids"] = ["INVENTED"]
     agent = BoundedScenarioSynthesisAgent(
         _Client([invalid, _valid_payload(synthesis_input)]), service,
     )
@@ -347,13 +332,16 @@ def test_bounded_provider_selection_allows_one_repair(method):
     assert trace["status"] == "PASS"
     assert trace["repairs"] == 1
     assert len(trace["calls"]) == 2
+    assert trace["calls"][0]["raw_logical_selection"][0]["selected_atom_ids"] == [
+        "INVENTED"
+    ]
 
 
 def test_bounded_provider_selection_second_failure_stays_pending(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _input(method)
     invalid = deepcopy(_valid_payload(synthesis_input))
-    invalid["variants"][0]["selected_atoms"]["OBJECT"] = ["INVENTED"]
+    invalid["variants"][0]["selected_atom_ids"] = ["INVENTED"]
     agent = BoundedScenarioSynthesisAgent(_Client([invalid, invalid]), service)
     assessments, trace = agent.select(synthesis_input)
     assert assessments == ()
@@ -408,10 +396,10 @@ def _compound_input(method):
 def test_compound_atom_conflict_rejected(method):
     service, synthesis_input = _compound_input(method)
     payload = _valid_payload(synthesis_input)
-    payload["variants"][0]["selected_atoms"]["EGO_DYNAMICS"] = ["FA001"]
+    payload["variants"][0]["selected_atom_ids"].append("FA001")
     with pytest.raises(ScenarioSynthesisValidationError) as caught:
         service.validate_provider_payload(synthesis_input, payload)
-    assert caught.value.code.startswith("COMPOUND_ATOM_")
+    assert caught.value.code.startswith("COMPOUND_ATOM_CONFLICT:")
 
 
 def test_valid_compound_atom_fills_all_declared_dimensions(method):
@@ -421,6 +409,131 @@ def test_valid_compound_atom_fills_all_declared_dimensions(method):
     )[0]
     assert assessment.selected_atoms["EGO_ACTION"] == ("FA005",)
     assert assessment.selected_atoms["EGO_DYNAMICS"] == ("FA005",)
+
+
+def test_provider_schema_and_payload_expose_each_logical_atom_once(method):
+    service, synthesis_input = _compound_input(method)
+    agent = BoundedScenarioSynthesisAgent(None, service)
+    schema = agent._schema(synthesis_input)
+    variant = schema["properties"]["variants"]["items"]
+    assert "selected_atom_ids" in variant["properties"]
+    assert "selected_atoms" not in variant["properties"]
+    logical = agent._user_payload(synthesis_input)[
+        "logical_atom_candidates"
+    ]
+    assert [item["atom_id"] for item in logical].count("FA005") == 1
+    compound = next(item for item in logical if item["atom_id"] == "FA005")
+    assert compound["filled_dimensions"] == ["EGO_ACTION", "EGO_DYNAMICS"]
+    assert "FA001" in compound["conflicts_with_atom_ids"]
+
+
+def test_compound_repair_exposes_exact_forbidden_pair_and_preferred_atom(method):
+    service, synthesis_input = _compound_input(method)
+    agent = BoundedScenarioSynthesisAgent(None, service)
+    request = agent._request(
+        synthesis_input,
+        repair_error="COMPOUND_ATOM_CONFLICT:EGO_DYNAMICS:FA001,FA005",
+    )
+    payload = json.loads(request.user_prompt)
+    assert payload["repair_constraints"]["forbidden_together"] == [
+        "FA001", "FA005",
+    ]
+    assert "containing FA005" in payload["repair_constraints"]["correction"]
+    assert "without FA001" in payload["repair_constraints"]["correction"]
+
+
+def test_missing_dimension_repair_requires_complete_exact_cover_example(method):
+    service, synthesis_input = _compound_input(method)
+    agent = BoundedScenarioSynthesisAgent(None, service)
+    request = agent._request(
+        synthesis_input,
+        repair_error="REQUIRED_DIMENSION_EMPTY:EGO_DYNAMICS",
+    )
+    payload = json.loads(request.user_prompt)
+    correction = payload["repair_constraints"]["correction"]
+    assert "whole, unchanged" in correction
+    assert "coverage_valid_logical_atom_set_assignments" in correction
+
+
+def test_whole_logical_assignments_satisfy_coverage_diversity(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    synthesis_input = _input(method)
+    assignments = service.logical_selection_assignments(synthesis_input)
+    assert assignments
+    for assignment in assignments:
+        selections = [
+            service.expand_logical_atom_ids(synthesis_input, bundle)
+            for bundle in assignment
+        ]
+        assert not service.diversity_validator.reasons(
+            synthesis_input.coverage_plan, selections,
+        )
+    payload = BoundedScenarioSynthesisAgent(None, service)._user_payload(
+        synthesis_input
+    )
+    assert payload["coverage_valid_logical_atom_set_assignments"]
+
+
+def test_historical_smoke_variant_count_is_a_scoped_non_mutating_override(method):
+    runner = ScenarioSynthesisRunner(method=method, client=None)
+    synthesis_input = _input(method)
+    synthesis_input = replace(
+        synthesis_input,
+        coverage_plan=replace(
+            synthesis_input.coverage_plan,
+            desired_variant_count=3,
+            variant_intents=(
+                {"coverage_label": "typical"},
+                {"coverage_label": "boundary"},
+                {"coverage_label": "extreme"},
+            ),
+        ),
+    )
+    assert synthesis_input.coverage_plan.desired_variant_count == 3
+    identity = {
+        "malfunction_id": synthesis_input.malfunction_id,
+        "parent_scenario_id": synthesis_input.parent_scenario_id,
+        "hazardous_event_id": synthesis_input.hazardous_event_id,
+        "requested_variant_count": 2,
+    }
+    overridden = runner._apply_smoke_plan_overrides([synthesis_input], [identity])[0]
+    assert overridden.coverage_plan.desired_variant_count == 2
+    assert len(overridden.coverage_plan.variant_intents) == 2
+    assert synthesis_input.coverage_plan.desired_variant_count == 3
+
+
+def test_overlapping_logical_atoms_fail_as_compound_conflict(method):
+    service, synthesis_input = _compound_input(method)
+    with pytest.raises(ScenarioSynthesisValidationError) as caught:
+        service.expand_logical_atom_ids(synthesis_input, ["FA005", "FA001"])
+    assert caught.value.code.startswith("COMPOUND_ATOM_CONFLICT:")
+    assert caught.value.details
+
+
+def test_parking_odd_removes_expressway_compound_globally(method):
+    synthesis_input = _input(method)
+    for candidate_set in synthesis_input.dimension_candidate_sets:
+        assert "CN_peds_across_expressway" not in {
+            item.atom_id for item in candidate_set.candidates
+        }
+
+
+def test_parent_expressway_context_cannot_widen_parking_project_odd(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = replace(
+        _parent(), operating_scenario="expressway",
+        facts={**_parent().facts, "operating_scenario": "expressway"},
+    )
+    synthesis_input = service.build_input(
+        malfunction=_malfunction(), parent=parent, assessment=_assessment(),
+        project_context=_project(),
+    )
+    query = synthesis_input.structured_semantic_query
+    assert query["project_location_categories"] == ["LOCATION_PARKING"]
+    assert query["parent_location_categories"] == ["LOCATION_EXPRESSWAY"]
+    assert "CN_peds_across_expressway" not in service.logical_candidate_registry(
+        synthesis_input
+    )
 
 
 def test_candidate_order_does_not_depend_on_e_rank_metadata(method):
@@ -611,12 +724,15 @@ def test_child_speed_intersection_remains_a_range_without_automatic_point(method
         malfunction=malfunction, parent=parent, assessment=_assessment(),
         project_context=_project(),
     )
-    selected = {
-        key: tuple(value)
-        for key, value in _valid_payload(synthesis_input)["variants"][0]["selected_atoms"].items()
-    }
-    selected["EGO_ACTION"] = ("FA033",)
-    selected["EGO_DYNAMICS"] = ("FA033",)
+    raw_ids = _valid_payload(synthesis_input)["variants"][0]["selected_atom_ids"]
+    raw_ids = [
+        atom_id for atom_id in raw_ids
+        if not set(service.by_id[atom_id].get("filled_dimensions", []))
+        & {"EGO_ACTION", "EGO_DYNAMICS"}
+    ]
+    selected = service.expand_logical_atom_ids(
+        synthesis_input, [*raw_ids, "FA033"],
+    )
     assessment = ScenarioSynthesisAssessment(
         semantic_group_id=synthesis_input.semantic_group_id,
         coverage_label=CoverageLabel.TYPICAL,

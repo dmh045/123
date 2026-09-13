@@ -403,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     synthesis.add_argument("--output", required=True, type=Path)
     synthesis.add_argument("--smoke-count", type=int, choices=range(3, 31), default=5)
+    synthesis.add_argument(
+        "--smoke-identity-file", type=Path,
+        help="JSON artifact whose failures list supplies stable recovery-smoke identities",
+    )
     synthesis.add_argument("--full", action="store_true")
     synthesis.add_argument("--max-workers", type=int, default=4)
     causal_revalidation = subparsers.add_parser(
@@ -589,6 +593,20 @@ def main(argv: list[str] | None = None) -> int:
             report_template_path=args.report_style_template,
         )
         client = create_llm_client(LLMConfig.from_env())
+        smoke_identities = None
+        if args.smoke_identity_file is not None:
+            identity_payload = json.loads(
+                args.smoke_identity_file.read_text(encoding="utf-8")
+            )
+            failures = identity_payload.get("failures", [])
+            if not isinstance(failures, list) or not failures:
+                raise ValueError("Smoke identity file requires a non-empty failures list")
+            smoke_identities = [{
+                "malfunction_id": str(item.get("malfunction_id", "")),
+                "parent_scenario_id": str(item.get("parent_scenario_id", "")),
+                "hazardous_event_id": str(item.get("hazardous_event_id", "")),
+                "requested_variant_count": item.get("requested_variant_count"),
+            } for item in failures if isinstance(item, dict)]
         result = ScenarioSynthesisRunner(
             method=resolution.method, client=client,
             run_dir=args.run_dir, review_root=args.review_root,
@@ -596,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
             source_run_id=args.source_run_id,
             target_run_id=args.target_run_id,
             smoke_count=args.smoke_count,
+            smoke_identities=smoke_identities,
             run_full=args.full,
             max_workers=args.max_workers,
             output_path=args.output,

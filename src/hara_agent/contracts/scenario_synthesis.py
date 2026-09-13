@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 
 
-SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v2"
+SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v3"
 
 
 class CandidateOrigin(str, Enum):
