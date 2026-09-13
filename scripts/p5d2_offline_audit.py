@@ -93,7 +93,8 @@ def _sample(inputs) -> list[tuple[str, Any]]:
 def _structured_score(scores: dict[str, float]) -> float:
     return sum(float(scores.get(name, 0.0)) for name in (
         "template_score", "mechanism_score", "action_score", "object_score",
-        "traffic_relation_score", "causal_score", "semantic_similarity_score",
+        "traffic_relation_score", "causal_score", "category_context_score",
+        "structured_source_score",
     ))
 
 

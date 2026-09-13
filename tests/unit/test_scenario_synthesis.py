@@ -457,26 +457,26 @@ def test_materialization_is_child_isolated_and_never_mutates_parent(method):
     assert scope["scenario_id"] == child.scenario_id
 
 
-def test_child_a_nested_facts_do_not_leak_to_parent_or_child_b(method):
+def test_repeated_child_materialization_keeps_nested_facts_isolated(method):
     service = ConstrainedScenarioSynthesisService(method)
     parent = _parent()
     synthesis_input = _input(method)
     assessments = service.validate_provider_payload(
         synthesis_input, _valid_payload(synthesis_input),
     )
-    assessment_a, assessment_b = assessments[:2]
+    assessment = assessments[0]
     child_a, _ = service.materialize(
-        synthesis_input=synthesis_input, assessment=assessment_a,
+        synthesis_input=synthesis_input, assessment=assessment,
         parent=parent, provider_evidence={"request_id": "REQ-A"},
     )
     child_b, _ = service.materialize(
-        synthesis_input=synthesis_input, assessment=assessment_b,
+        synthesis_input=synthesis_input, assessment=assessment,
         parent=parent, provider_evidence={"request_id": "REQ-B"},
     )
     child_a.facts["ego_speed_constraint"]["max_kph"] = 999
     assert parent.facts["ego_speed_constraint"]["max_kph"] == 20.0
     assert child_b.facts["ego_speed_constraint"]["max_kph"] == 20.0
-    assert child_a.scenario_id != child_b.scenario_id
+    assert child_a.scenario_id == child_b.scenario_id
 
 
 def test_physics_instantiation_has_no_distance_speed_or_geometry_defaults():

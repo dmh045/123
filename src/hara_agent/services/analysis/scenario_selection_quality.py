@@ -24,7 +24,10 @@ from hara_agent.models import ScenarioCandidate
 
 
 _CATEGORY_MARKERS: dict[str, tuple[str, ...]] = {
-    "ACTION_PARK": ("parking", "park", "avp", "slow driving", "泊车", "停车场", "车库"),
+    "ACTION_PARK": (
+        "parking", "park", "slow driving", "parking maneuver", "parking-in",
+        "parking-out", "park-in", "park-out", "泊车", "泊入", "泊出",
+    ),
     "LOCATION_PARKING": ("parking", "car park", "garage", "parkhaus", "停车场", "车库"),
     "LOCATION_MOTORWAY": ("motorway", "autobahn", "高速公路"),
     "LOCATION_EXPRESSWAY": ("expressway", "快速路"),
@@ -32,15 +35,25 @@ _CATEGORY_MARKERS: dict[str, tuple[str, ...]] = {
     "LOCATION_RURAL": ("rural road", "country road", "landstraße", "乡村道路"),
     "ACTION_REVERSE": ("reverse", "reversing", "backing", "倒车", "后退"),
     "ACTION_HOLD": ("holding", "hold capability", "rollaway", "parking brake", "stands", "standing", "halten", "驻车", "溜车"),
-    "ACTION_STOP": ("stopping", "stop", "braking", "deceleration", "制动", "停车"),
+    "ACTION_STOP": ("stopping", "stop", "braking", "deceleration", "制动", "停止", "停滞"),
     "ACTION_ACCELERATE": ("acceleration", "accelerate", "propulsion", "加速", "驱动"),
     "ACTION_TURN": ("steering", "turn", "lateral", "转向", "横向"),
     "OBJECT_PEDESTRIAN": ("pedestrian", "person", "vru", "行人"),
     "OBJECT_CYCLIST": ("cyclist", "bicycle", "two-wheel", "骑行", "自行车"),
-    "OBJECT_VEHICLE": ("vehicle", "passenger_car", "rear vehicle", "front vehicle", "车辆", "后车"),
+    "OBJECT_VEHICLE": (
+        "passenger_car", "rear vehicle", "front vehicle", "other vehicle",
+        "another vehicle", "adjacent vehicle", "neighboring vehicle",
+        "后方车辆", "前方车辆", "其他车辆", "相邻车辆", "对向车辆",
+    ),
     "OBJECT_STATIC": ("static obstacle", "obstacle", "pillar", "cone", "静态障碍", "障碍物"),
-    "OBJECT_OCCUPANT": ("occupant", "passenger", "乘员"),
-    "TRAFFIC_FOLLOWING": ("following", "rear-end", "rear end", "rear vehicle", "追尾", "跟车", "后车"),
+    "OBJECT_OCCUPANT": (
+        "occupant", "vehicle occupant", "car occupant", "passenger inside",
+        "passengers in", "passenger of", "乘员",
+    ),
+    "TRAFFIC_FOLLOWING": (
+        "following", "rear-end", "rear end", "rear vehicle", "追尾", "跟车",
+        "后车追尾", "与后车", "后方来车",
+    ),
     "TRAFFIC_ONCOMING": ("oncoming", "head-on", "opposing traffic", "对向", "迎面"),
     "TRAFFIC_CROSSING": ("crossing traffic", "cross traffic", "intersection traffic", "交叉交通", "横穿车辆"),
     "TRAFFIC_CUT_IN": ("cut-in", "cutting-in", "cut in", "切入", "加塞"),
@@ -75,7 +88,7 @@ def _explicit_categories(text: str) -> set[str]:
     }
 
 
-def _normalize_object(value: Any) -> str:
+def normalize_object_category(value: Any) -> str:
     folded = str(value).strip().casefold()
     if any(token in folded for token in ("pedestrian", "person", "vru", "行人")):
         return "OBJECT_PEDESTRIAN"
@@ -88,6 +101,27 @@ def _normalize_object(value: Any) -> str:
     if any(token in folded for token in ("occupant", "passenger", "乘员")):
         return "OBJECT_OCCUPANT"
     return ""
+
+
+def _normalize_traffic_relation(value: Any) -> set[str]:
+    folded = str(value or "").strip().casefold()
+    if not folded:
+        return set()
+    direct = {
+        "following": "TRAFFIC_FOLLOWING",
+        "rear_following": "TRAFFIC_FOLLOWING",
+        "oncoming": "TRAFFIC_ONCOMING",
+        "opposing": "TRAFFIC_ONCOMING",
+        "head_on": "TRAFFIC_ONCOMING",
+        "crossing": "TRAFFIC_CROSSING",
+        "cross_traffic": "TRAFFIC_CROSSING",
+        "cut_in": "TRAFFIC_CUT_IN",
+        "cut-in": "TRAFFIC_CUT_IN",
+        "parking_traffic": "TRAFFIC_PARKING",
+    }
+    result = {direct[folded]} if folded in direct else set()
+    result.update(_explicit_categories(folded) & _TRAFFIC_CATEGORIES)
+    return result
 
 
 class ScenarioSemanticQueryBuilder:
@@ -121,37 +155,108 @@ class ScenarioSemanticQueryBuilder:
             },
         }
         text = " ".join(_json_text(value) for value in explicit_fields.values())
-        categories = _explicit_categories(text)
-        structured_objects = {
-            normalized for value in (facts.get("object_type"), facts.get("road_user_type"))
-            if (normalized := _normalize_object(value))
+        categories: set[str] = set()
+        structured_categories: set[str] = set()
+        evidence: dict[str, list[str]] = {}
+        traffic_evidence: list[dict[str, str]] = []
+
+        def include(
+            fields: dict[str, Any], allowed: frozenset[str], *,
+            inference_rule: str = "EXPLICIT_ROLE_SCOPED_MARKER",
+        ) -> None:
+            for ref, value in fields.items():
+                matched = _explicit_categories(_json_text(value)) & allowed
+                categories.update(matched)
+                for category in sorted(matched):
+                    evidence.setdefault(category, []).append(ref)
+                    if category in _TRAFFIC_CATEGORIES:
+                        traffic_evidence.append({
+                            "category": category,
+                            "source_field": ref,
+                            "source_value": str(value),
+                            "inference_rule": inference_rule,
+                        })
+
+        action_fields = {
+            key: explicit_fields[key] for key in (
+                "MF.description", "MF.functional_effect", "MF.vehicle_level_hazard",
+                "HE.hazardous_event", "CAUSAL.summary",
+            )
         }
-        if structured_objects:
-            categories.difference_update(_OBJECT_CATEGORIES)
-            categories.update(structured_objects)
+        action_fields["PARENT.facts.vehicle_state"] = facts.get("vehicle_state", "")
+        include(action_fields, _ACTION_CATEGORIES)
+        include({
+            key: explicit_fields[key] for key in (
+                "MF.vehicle_level_hazard", "HE.hazardous_event", "CAUSAL.summary",
+            )
+        }, _OBJECT_CATEGORIES)
+        include({
+            key: explicit_fields[key] for key in (
+                "MF.vehicle_level_hazard", "HE.hazardous_event", "CAUSAL.summary",
+            )
+        }, _TRAFFIC_CATEGORIES)
+        include({
+            key: explicit_fields[key] for key in (
+                "MF.description", "MF.functional_effect", "MF.vehicle_level_hazard",
+                "HE.hazardous_event", "CAUSAL.summary",
+            )
+        }, _ROAD_CATEGORIES)
+
+        for field in ("object_type", "road_user_type"):
+            if normalized := normalize_object_category(facts.get(field, "")):
+                categories.add(normalized)
+                structured_categories.add(normalized)
+                evidence.setdefault(normalized, []).append(f"PARENT.facts.{field}")
+
+        for field in ("traffic_relation", "interaction_relation", "relative_motion"):
+            for relation in _normalize_traffic_relation(facts.get(field, "")):
+                categories.add(relation)
+                structured_categories.add(relation)
+                ref = f"PARENT.facts.{field}"
+                evidence.setdefault(relation, []).append(ref)
+                traffic_evidence.append({
+                    "category": relation,
+                    "source_field": ref,
+                    "source_value": str(facts.get(field, "")),
+                    "inference_rule": "STRUCTURED_TRAFFIC_RELATION",
+                })
 
         option = fm_template.get("active_option", {})
         if isinstance(option, dict):
-            if normalized := _normalize_object(option.get("obj_type", "")):
-                categories.difference_update(_OBJECT_CATEGORIES)
+            if normalized := normalize_object_category(option.get("obj_type", "")):
                 categories.add(normalized)
-            categories.update(_explicit_categories(_json_text(option)))
-
-        collision = str(facts.get("collision_type", "")).casefold()
-        position = str(facts.get("object_position", "")).casefold()
-        object_vehicle = "OBJECT_VEHICLE" in categories
-        if object_vehicle and (collision == "rear" or position == "rear"):
-            categories.add("TRAFFIC_FOLLOWING")
-        if "ACTION_REVERSE" in categories and categories & _OBJECT_CATEGORIES:
-            categories.add("TRAFFIC_REVERSE")
-
-        evidence = {
-            category: tuple(
-                ref for ref, value in explicit_fields.items()
-                if category in _explicit_categories(_json_text(value))
+                structured_categories.add(normalized)
+                evidence.setdefault(normalized, []).append("FM_TEMPLATE.obj_type")
+            include(
+                {"FM_TEMPLATE.label": option.get("label", "")},
+                _ACTION_CATEGORIES,
             )
-            for category in sorted(categories)
-        }
+            collision = str(option.get("collision_type", "")).strip().casefold()
+            if collision in {"head_on", "oncoming", "crossing", "cross_traffic", "cut_in"}:
+                for relation in _normalize_traffic_relation(collision):
+                    categories.add(relation)
+                    structured_categories.add(relation)
+                    evidence.setdefault(relation, []).append("FM_TEMPLATE.collision_type")
+                    traffic_evidence.append({
+                        "category": relation,
+                        "source_field": "FM_TEMPLATE.collision_type",
+                        "source_value": collision,
+                        "inference_rule": "STRUCTURED_COLLISION_RELATION",
+                    })
+
+        collision = str(facts.get("collision_type", "")).strip().casefold()
+        if collision in {"head_on", "oncoming", "crossing", "cross_traffic", "cut_in"}:
+            for relation in _normalize_traffic_relation(collision):
+                categories.add(relation)
+                structured_categories.add(relation)
+                evidence.setdefault(relation, []).append("PARENT.facts.collision_type")
+                traffic_evidence.append({
+                    "category": relation,
+                    "source_field": "PARENT.facts.collision_type",
+                    "source_value": collision,
+                    "inference_rule": "STRUCTURED_COLLISION_RELATION",
+                })
+
         location_text = _json_text({
             "parent_operating_scenario": parent.operating_scenario,
             "odd_locations": project_context.get("odd_locations", []),
@@ -179,8 +284,10 @@ class ScenarioSemanticQueryBuilder:
                 if category.startswith("ROAD_")
             ),
             "explicit_category_evidence": {
-                key: list(value) for key, value in evidence.items()
+                key: list(dict.fromkeys(value)) for key, value in sorted(evidence.items())
             },
+            "traffic_relation_evidence": traffic_evidence,
+            "structured_source_categories": sorted(structured_categories),
             "query_tokens": sorted(set(_tokens(text))),
             "causal_tokens": sorted(set(_tokens(_json_text({
                 "hazard": explicit_fields["HE.hazardous_event"],
@@ -308,7 +415,22 @@ class ScenarioDimensionApplicabilityService:
             reason = "An exact authoritative parent binding must be preserved."
             trigger = (f"exact_parent_atom={binding.parent_atom_id}",)
         elif dimension == "TRAFFIC_PATTERN":
-            if traffic:
+            represented = query.get("traffic_relations_represented_elsewhere", {})
+            represented = represented if isinstance(represented, dict) else {}
+            represented_relations = {
+                relation for relation in traffic if represented.get(relation)
+            }
+            if traffic and represented_relations == set(traffic):
+                status = ScenarioDimensionApplicability.NOT_APPLICABLE
+                reason = (
+                    "Every explicit interaction is already represented by source-defined "
+                    "compound atoms in other Method dimensions."
+                )
+                trigger = tuple(
+                    f"REPRESENTED_ELSEWHERE:{relation}"
+                    for relation in sorted(represented_relations)
+                )
+            elif traffic:
                 status = ScenarioDimensionApplicability.REQUIRED
                 reason = "Explicit traffic-interaction semantics require a Method traffic relation."
                 trigger = traffic
@@ -334,6 +456,15 @@ class ScenarioDimensionApplicabilityService:
                 status = ScenarioDimensionApplicability.NOT_APPLICABLE
                 reason = "No explicit road-relative vehicle relation is present."
                 trigger = ("NO_ROAD_RELATION",)
+        elif dimension == "OBJECT":
+            if objects:
+                status = ScenarioDimensionApplicability.REQUIRED
+                reason = "Explicit structured or hazard-target evidence requires an object dimension."
+                trigger = objects
+            else:
+                status = ScenarioDimensionApplicability.NOT_APPLICABLE
+                reason = "No non-ego object or road-user evidence is present."
+                trigger = ("NO_NON_EGO_OBJECT",)
         else:
             status = ScenarioDimensionApplicability.REQUIRED
             reason = "This core Scenario dimension is required by the compiled synthesis contract."
@@ -481,15 +612,48 @@ class ScenarioCandidateRanker:
         return round(score, 6)
 
     @staticmethod
-    def atom_categories(atom: dict[str, Any]) -> set[str]:
-        categories = _explicit_categories(str(atom.get("label", "")))
+    def atom_category_sources(atom: dict[str, Any]) -> dict[str, str]:
+        sources = {
+            category: "label"
+            for category in _explicit_categories(str(atom.get("label", "")))
+        }
         semantics = atom.get("physical_semantics", {})
         semantics = semantics if isinstance(semantics, dict) else {}
         obj = semantics.get("object", {})
         obj = obj if isinstance(obj, dict) else {}
-        if normalized := _normalize_object(obj.get("type", "")):
-            categories.add(normalized)
-        return categories
+        if normalized := normalize_object_category(obj.get("type", "")):
+            for category in _OBJECT_CATEGORIES:
+                sources.pop(category, None)
+            sources[normalized] = "physical_semantics.object.type"
+        dynamics = semantics.get("ego_dynamics", {})
+        dynamics = dynamics if isinstance(dynamics, dict) else {}
+        if str(dynamics.get("direction", "")).strip().casefold() == "reverse":
+            for category in _ACTION_CATEGORIES:
+                sources.pop(category, None)
+            sources["ACTION_REVERSE"] = "physical_semantics.ego_dynamics.direction"
+        traffic_value = semantics.get("traffic_relation", "")
+        if traffic_value:
+            for category in _TRAFFIC_CATEGORIES:
+                sources.pop(category, None)
+            for category in _normalize_traffic_relation(traffic_value):
+                sources[category] = "physical_semantics.traffic_relation"
+        slope = semantics.get("slope", {})
+        if isinstance(slope, dict) and slope:
+            sources["ROAD_SLOPE"] = "physical_semantics.slope"
+        return sources
+
+    @classmethod
+    def atom_categories(cls, atom: dict[str, Any]) -> set[str]:
+        return set(cls.atom_category_sources(atom))
+
+    @staticmethod
+    def rank_key(atom_id: str, scores: dict[str, float]) -> tuple[float, float, str]:
+        """Rank authoritative evidence tiers before scalar/BM25 tie-breaking."""
+        return (
+            -float(scores.get("source_evidence_tier", 0.0)),
+            -float(scores.get("final_rank_score", 0.0)),
+            atom_id,
+        )
 
     def score(
         self, *, dimension: str, atom: dict[str, Any], query: dict[str, Any],
@@ -502,10 +666,16 @@ class ScenarioCandidateRanker:
         road = set(map(str, query.get("road_relations", [])))
         road.update(map(str, query.get("odd_road_categories", [])))
         locations = set(map(str, query.get("location_categories", [])))
-        action_score = float(bool(categories & actions))
-        object_score = float(bool(categories & objects))
+        filled_dimensions = set(map(str, atom.get("filled_dimensions", [])))
+        action_score = float(bool(
+            categories & actions
+            and ("EGO_ACTION" in filled_dimensions or "EGO_DYNAMICS" in filled_dimensions)
+        ))
+        object_score = float(bool(
+            categories & objects and "OBJECT" in filled_dimensions
+        ))
         traffic_score = float(bool(categories & traffic))
-        semantic_similarity_score = float(
+        category_context_score = float(
             bool(categories & locations) if dimension == "WHERE" else
             bool(categories & road) if dimension in {"ROAD", "EGO_X_ROAD"} else
             False
@@ -523,11 +693,35 @@ class ScenarioCandidateRanker:
         for option in options if isinstance(options, list) else []:
             if not isinstance(option, dict):
                 continue
-            expected = _normalize_object(option.get("obj_type", ""))
-            if expected and expected in categories:
+            expected = normalize_object_category(option.get("obj_type", ""))
+            if (
+                expected and expected in categories
+                and "OBJECT" in filled_dimensions
+                and dimension in {"OBJECT", "EGO_ACTION"}
+            ):
                 template_score = 1.0
                 break
         odd_score = 1.0 if odd_passed and dimension in {"WHERE", "ROAD", "EGO_X_ROAD", "EGO_DYNAMICS"} else 0.0
+        relevant_categories = (
+            locations if dimension == "WHERE" else
+            road if dimension in {"ROAD", "EGO_X_ROAD"} else
+            objects if dimension == "OBJECT" else
+            traffic if dimension == "TRAFFIC_PATTERN" else
+            actions | traffic if dimension == "EGO_ACTION" else
+            actions if dimension == "EGO_DYNAMICS" else
+            set()
+        )
+        structured_source_score = float(bool(
+            categories & relevant_categories
+            & set(map(str, query.get("structured_source_categories", [])))
+        ))
+        source_evidence_tier = float(
+            4 if template_score else
+            3 if structured_source_score else
+            2 if causal_score or mechanism_score else
+            1 if any((action_score, object_score, traffic_score, category_context_score)) else
+            0
+        )
         scores = {
             "template_score": template_score,
             "mechanism_score": mechanism_score,
@@ -537,17 +731,25 @@ class ScenarioCandidateRanker:
             "odd_score": odd_score,
             "causal_score": causal_score,
             "lexical_score": lexical_score,
-            "semantic_similarity_score": semantic_similarity_score,
+            "category_context_score": category_context_score,
+            "structured_source_score": structured_source_score,
+            "source_evidence_tier": source_evidence_tier,
         }
         scores["final_rank_score"] = round(
             5.0 * template_score + 4.0 * traffic_score + 3.0 * action_score
-            + 3.0 * object_score + 3.0 * semantic_similarity_score
+            + 3.0 * object_score + 3.0 * category_context_score
             + 2.0 * mechanism_score
             + odd_score + causal_score + lexical_score,
             6,
         )
-        evidence = ",".join(key for key, value in scores.items() if key != "final_rank_score" and value)
-        return scores, f"structured/BM25 rank evidence={evidence or 'hard_filter_only'}"
+        evidence = ",".join(
+            key for key, value in scores.items()
+            if key not in {"final_rank_score", "source_evidence_tier"} and value
+        )
+        return scores, (
+            f"source tier={int(source_evidence_tier)}; structured/BM25 rank "
+            f"evidence={evidence or 'hard_filter_only'}"
+        )
 
 
 class ScenarioVariantDiversityValidator:
@@ -587,6 +789,7 @@ class ScenarioVariantDiversityValidator:
 
 
 __all__ = [
+    "normalize_object_category",
     "ScenarioBindingPolicy", "ScenarioCandidateRanker", "ScenarioCoveragePlanner",
     "ScenarioDimensionApplicabilityService", "ScenarioSemanticQueryBuilder",
     "ScenarioVariantDiversityValidator",

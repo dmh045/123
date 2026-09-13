@@ -8,10 +8,17 @@ from types import SimpleNamespace
 import pytest
 
 from hara_agent.method_sources import YamlBaselineCompiler
-from hara_agent.contracts import ScenarioDimensionApplicability
+from hara_agent.contracts import (
+    ScenarioBindingAuthority, ScenarioBindingDecision,
+    ScenarioDimensionApplicability,
+)
 from hara_agent.models import ReviewStatus, ScenarioCandidate
 from hara_agent.services.analysis import ConstrainedScenarioSynthesisService
-from hara_agent.services.analysis.scenario_selection_quality import ScenarioCoveragePlanner
+from hara_agent.services.analysis.scenario_selection_quality import (
+    ScenarioCandidateRanker, ScenarioCoveragePlanner,
+    ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
+)
+from hara_agent.services.analysis.scenario_ranking_recall import top_k_recall_audit
 from hara_agent.services.semantic.scenario_synthesis_agent import (
     BoundedScenarioSynthesisAgent,
 )
@@ -156,7 +163,7 @@ def test_coverage_variant_count_uses_distinct_engineering_support(signature_coun
     }
 
 
-def test_rear_end_requires_traffic_and_ranks_following_compounds(method):
+def test_rear_end_uses_source_defined_following_compounds_without_duplicate_traffic_gap(method):
     service = ConstrainedScenarioSynthesisService(method)
     hazard = "Unexpected braking causes a rear-end collision with the following rear vehicle."
     synthesis_input = _build(
@@ -164,20 +171,20 @@ def test_rear_end_requires_traffic_and_ranks_following_compounds(method):
         parent=_parent(object_type="passenger_car", collision_type="rear"),
     )
     sets = _sets(synthesis_input)
-    assert sets["TRAFFIC_PATTERN"].applicability.status.value == "REQUIRED"
-    assert sets["TRAFFIC_PATTERN"].generation_status == "METHOD_GAP"
+    assert sets["TRAFFIC_PATTERN"].applicability.status.value == "NOT_APPLICABLE"
+    assert sets["TRAFFIC_PATTERN"].generation_status == "NOT_APPLICABLE"
+    assert sets["TRAFFIC_PATTERN"].candidates == ()
     assert sets["EGO_ACTION"].candidates[0].atom_id in {"PU015", "PU016"}
     assert sets["OBJECT"].candidates[0].atom_id in {"PU015", "PU016"}
-    selected = {
-        dimension: ((item.candidates[0].atom_id,) if item.candidates else ())
-        for dimension, item in sets.items()
+    represented = synthesis_input.structured_semantic_query[
+        "traffic_relations_represented_elsewhere"
+    ]
+    assert {item["atom_id"] for item in represented["TRAFFIC_FOLLOWING"]} == {
+        "PU015", "PU016",
     }
-    assert "REQUIRED_DIMENSION_EMPTY:TRAFFIC_PATTERN" in service._selection_reasons(
-        synthesis_input, selected,
-    )
 
 
-def test_oncoming_relation_prioritizes_source_compatible_method_atom(method):
+def test_oncoming_relation_prioritizes_source_compatible_action_atom(method):
     service = ConstrainedScenarioSynthesisService(method)
     hazard = "Turning across oncoming traffic can cause a head-on collision."
     synthesis_input = _build(
@@ -188,11 +195,12 @@ def test_oncoming_relation_prioritizes_source_compatible_method_atom(method):
         ),
         project=_project("motorway", "normal road surface"),
     )
-    traffic = _sets(synthesis_input)["TRAFFIC_PATTERN"]
-    assert traffic.applicability.status.value == "REQUIRED"
-    assert traffic.candidates
-    assert "oncoming" in traffic.candidates[0].label.casefold()
-    assert traffic.candidates[0].ranking_scores["traffic_relation_score"] == 1.0
+    sets = _sets(synthesis_input)
+    assert sets["TRAFFIC_PATTERN"].applicability.status.value == "NOT_APPLICABLE"
+    assert sets["EGO_ACTION"].candidates[0].atom_id == "FA042"
+    assert sets["EGO_ACTION"].candidates[0].ranking_scores[
+        "traffic_relation_score"
+    ] == 1.0
 
 
 def test_stationary_obstacle_does_not_force_traffic_relation(method):
@@ -281,6 +289,198 @@ def test_unrepresentable_crossing_relation_is_method_gap_not_catalog_fallback(me
     assert traffic.hard_filtered_pool_size == 0
 
 
+def _query(*, malfunction_text="", hazard_text="", parent=None, facts=None):
+    parent = parent or ScenarioCandidate(
+        "SCN-FIELD", "parking garage", "", "", operating_mode="active",
+        facts=dict(facts or {}),
+    )
+    return ScenarioSemanticQueryBuilder.build(
+        malfunction={
+            "description": malfunction_text, "functional_effect": "",
+            "vehicle_level_hazard": hazard_text,
+        },
+        parent=parent,
+        assessment={
+            "hazardous_event": hazard_text,
+            "causal_assessment": {"causal_chain": []},
+        },
+        project_context={"odd_locations": ["parking garage"]},
+        fm_template={},
+    )
+
+
+def test_parking_location_alone_does_not_prove_action_park():
+    query = _query(malfunction_text="control output unavailable")
+    assert query["location_categories"] == ["LOCATION_PARKING"]
+    assert "ACTION_PARK" not in query["action_categories"]
+
+
+def test_odd_slope_capability_does_not_prove_active_road_mechanism():
+    query = ScenarioSemanticQueryBuilder.build(
+        malfunction={
+            "description": "control output unavailable",
+            "functional_effect": "command is not applied",
+            "vehicle_level_hazard": "vehicle response is unavailable",
+        },
+        parent=ScenarioCandidate(
+            "SCN-FIELD", "parking garage", "", "", operating_mode="active",
+            facts={},
+        ),
+        assessment={
+            "hazardous_event": "vehicle response is unavailable",
+            "causal_assessment": {"causal_chain": []},
+        },
+        project_context={
+            "odd_locations": ["parking garage"],
+            "odd_road_surfaces": ["supports a 15% slope gradient"],
+        },
+        fm_template={},
+    )
+    assert query["road_relations"] == []
+    assert query["odd_road_categories"] == ["ROAD_SLOPE"]
+
+
+def test_ego_vehicle_mention_alone_does_not_prove_object_vehicle():
+    query = _query(hazard_text="The ego vehicle departs from its intended path.")
+    assert query["object_categories"] == []
+
+
+def test_passenger_car_object_does_not_prove_occupant():
+    query = _query(
+        hazard_text="Collision with a passenger car.",
+        facts={"object_type": "passenger_car"},
+    )
+    assert query["object_categories"] == ["OBJECT_VEHICLE"]
+
+
+@pytest.mark.parametrize("object_type", ["occupant", "static_obstacle"])
+def test_reverse_object_does_not_automatically_require_traffic(object_type):
+    query = _query(
+        hazard_text="The ego vehicle reverses unexpectedly.",
+        facts={"object_type": object_type},
+    )
+    assert query["action_categories"] == ["ACTION_REVERSE"]
+    assert query["traffic_relations"] == []
+
+
+@pytest.mark.parametrize(
+    ("relation", "category"),
+    [
+        ("following", "TRAFFIC_FOLLOWING"),
+        ("oncoming", "TRAFFIC_ONCOMING"),
+        ("crossing", "TRAFFIC_CROSSING"),
+    ],
+)
+def test_explicit_structured_relation_requires_traffic_when_not_represented_elsewhere(
+    relation, category,
+):
+    query = _query(facts={"traffic_relation": relation})
+    assert query["traffic_relations"] == [category]
+    binding = ScenarioBindingDecision(
+        dimension="TRAFFIC_PATTERN",
+        authority=ScenarioBindingAuthority.ANALYTICAL_SELECTION,
+        refinable=True, source_refs=("PARENT.TRAFFIC_PATTERN",), basis="fixture",
+    )
+    decision = ScenarioDimensionApplicabilityService.assess(
+        "TRAFFIC_PATTERN", query, binding,
+    )
+    assert decision.status is ScenarioDimensionApplicability.REQUIRED
+
+
+def test_source_defined_compound_traffic_atom_survives_hard_filter(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent(
+        object_type="passenger_car", operating_scenario="motorway",
+        description="turning on motorway",
+    )
+    query = _query(
+        parent=parent, facts=parent.facts,
+        hazard_text="Turning across oncoming traffic.",
+    )
+    binding = ScenarioBindingDecision(
+        dimension="TRAFFIC_PATTERN",
+        authority=ScenarioBindingAuthority.ANALYTICAL_SELECTION,
+        refinable=True, source_refs=("HE.hazardous_event",), basis="fixture",
+    )
+    applicability = ScenarioDimensionApplicabilityService.assess(
+        "TRAFFIC_PATTERN", query, binding,
+    )
+    atom = service.by_id["CN_oncoming_motorway"]
+    passed, reason = service.hard_filter_decision(
+        dimension="TRAFFIC_PATTERN", atom=atom, parent=parent,
+        project_context=_project("motorway"), query=query,
+        applicability=applicability, decision=binding, exact_locks={},
+        fm_template={},
+    )
+    assert (passed, reason) == (True, "PASS_TRAFFIC_RELATION_MATCH")
+
+
+def test_structured_physical_semantics_override_conflicting_label_marker():
+    sources = ScenarioCandidateRanker.atom_category_sources({
+        "label": "Pedestrian beside the path",
+        "physical_semantics": {"object": {"type": "vehicle"}},
+    })
+    assert "OBJECT_VEHICLE" in sources
+    assert "OBJECT_PEDESTRIAN" not in sources
+    assert sources["OBJECT_VEHICLE"] == "physical_semantics.object.type"
+
+
+def test_bm25_cannot_resurrect_hard_incompatible_candidate(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent(object_type="pedestrian")
+    synthesis_input = _build(service, "Pedestrian may be struck near the vehicle.", parent=parent)
+    candidate_set = _sets(synthesis_input)["OBJECT"]
+    atom = service.by_id["PU015"]
+    passed, reason = service.hard_filter_decision(
+        dimension="OBJECT", atom=atom, parent=parent,
+        project_context=_project(), query=synthesis_input.structured_semantic_query,
+        applicability=candidate_set.applicability,
+        decision=candidate_set.binding_decision, exact_locks={}, fm_template={},
+    )
+    assert passed is False
+    assert reason == "SEMANTIC_OBJECT_CATEGORY_MISMATCH"
+
+
+def test_fm_object_filter_uses_active_option_not_first_query_category(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent(object_type="passenger_car")
+    decision = ScenarioBindingDecision(
+        dimension="OBJECT",
+        authority=ScenarioBindingAuthority.ANALYTICAL_SELECTION,
+        refinable=True, source_refs=("METHOD.fm_scenario_template",),
+        basis="fixture",
+    )
+    applicability = SimpleNamespace(status=ScenarioDimensionApplicability.REQUIRED)
+    passed, reason = service.hard_filter_decision(
+        dimension="OBJECT", atom=service.by_id["PU015"], parent=parent,
+        project_context=_project(),
+        query={"object_categories": ["OBJECT_PEDESTRIAN", "OBJECT_VEHICLE"]},
+        applicability=applicability, decision=decision, exact_locks={},
+        fm_template={"active_option": {"obj_type": "passenger_car"}},
+    )
+    assert (passed, reason) == (True, "PASS_OBJECT_CATEGORY_MATCH")
+
+
+def test_top_k_audit_flags_stronger_source_evidence_below_cutoff():
+    result = top_k_recall_audit((
+        {
+            "atom_id": "WEAK", "final_rank_score": 9.0,
+            "independent_evidence_tier": 1, "independent_evidence": [
+                "FIELD_CORRECT_CATEGORY_MATCH"
+            ],
+        },
+        {
+            "atom_id": "STRONG", "final_rank_score": 8.0,
+            "independent_evidence_tier": 3, "independent_evidence": [
+                "EXACT_STRUCTURED_SOURCE_MATCH"
+            ],
+        },
+    ), cap=1)
+    assert result["top_k_recall_risk"] is True
+    assert result["at_risk_atom_ids"] == ["STRONG"]
+    assert result["source_strong_candidates_below_cutoff"] == 1
+
+
 def test_offline_provider_request_contains_governance_and_bounded_metadata(method):
     service = ConstrainedScenarioSynthesisService(method)
     synthesis_input = _build(
@@ -300,7 +500,8 @@ def test_offline_provider_request_contains_governance_and_bounded_metadata(metho
     assert set(candidate["ranking_scores"]) == {
         "template_score", "mechanism_score", "action_score", "object_score",
         "traffic_relation_score", "odd_score", "causal_score", "lexical_score",
-        "semantic_similarity_score", "final_rank_score",
+        "category_context_score", "structured_source_score",
+        "source_evidence_tier", "final_rank_score",
     }
     assert "E_total" not in str(payload)
     all_ids = {
@@ -325,9 +526,9 @@ def test_selector_quality_audit_reports_plan_metrics_without_provider(method):
     assert audit["provider_calls"] == 0
     assert audit["parent_groups"] == 2
     assert audit["child_count"] == 0
-    assert audit["traffic_pattern"]["required"] == 1
-    assert audit["traffic_pattern"]["required_but_missing"] == 1
-    assert audit["traffic_pattern"]["not_applicable"] == 1
+    assert audit["traffic_pattern"]["required"] == 0
+    assert audit["traffic_pattern"]["required_but_missing"] == 0
+    assert audit["traffic_pattern"]["not_applicable"] == 2
     assert audit["ranking"]["combination_beam_truncated_groups"] == 0
 
 

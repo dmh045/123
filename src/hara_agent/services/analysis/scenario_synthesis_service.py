@@ -29,6 +29,7 @@ from hara_agent.models import (
 from .scenario_constraint_service import ScenarioConstraintExecutor, ScenarioConstraintStatus
 from .scenario_method_service import ScenarioMethodService
 from .scenario_selection_quality import (
+    normalize_object_category,
     ScenarioBindingPolicy, ScenarioCandidateRanker, ScenarioCoveragePlanner,
     ScenarioDimensionApplicabilityService, ScenarioSemanticQueryBuilder,
     ScenarioVariantDiversityValidator,
@@ -302,52 +303,31 @@ class ConstrainedScenarioSynthesisService:
             "active_option": active_option,
         }
 
-    @staticmethod
-    def _context_text(
-        *, malfunction: dict[str, Any], parent: ScenarioCandidate,
-        assessment: dict[str, Any], project_context: dict[str, Any],
-    ) -> str:
-        return json.dumps({
-            "malfunction": malfunction,
-            "hazardous_event": assessment.get("hazardous_event", ""),
-            "causal_assessment": assessment.get("causal_assessment", {}),
-            "parent": {
-                "operating_scenario": parent.operating_scenario,
-                "operating_mode": parent.operating_mode,
-                "facts": {
-                    key: value for key, value in parent.facts.items()
-                    if key != "method_scenario_dimensions"
-                },
-                "analysis_instance": parent.analysis_instance,
-            },
-            "project_odd": project_context,
-        }, ensure_ascii=False, sort_keys=True)
-
-    def _hard_compatible(
+    def hard_filter_decision(
         self, *, dimension: str, atom: dict[str, Any], parent: ScenarioCandidate,
         project_context: dict[str, Any], query: dict[str, Any],
         applicability: Any, decision: Any, exact_locks: dict[str, str],
-        fm_template: dict[str, Any], context: str,
-    ) -> bool:
+        fm_template: dict[str, Any],
+    ) -> tuple[bool, str]:
         atom_id = str(atom.get("atom_id", ""))
         if dimension not in atom.get("filled_dimensions", []):
-            return False
+            return False, "DIMENSION_NOT_FILLED"
         if applicability.status is ScenarioDimensionApplicability.NOT_APPLICABLE:
-            return False
+            return False, "DIMENSION_NOT_APPLICABLE"
         if not self._speed_compatible(atom, self._speed_envelope(parent)):
-            return False
+            return False, "ODD_SPEED_INCOMPATIBLE"
         if dimension in {"ROAD", "EGO_X_ROAD"} and not self._slope_compatible(
             atom, project_context,
         ):
-            return False
+            return False, "ODD_SLOPE_INCOMPATIBLE"
         if dimension == "ROAD" and not self._weather_compatible(atom, project_context):
-            return False
+            return False, "ODD_WEATHER_INCOMPATIBLE"
         if any(
             other in exact_locks and exact_locks[other] != atom_id
             for other in atom.get("filled_dimensions", [])
             if other != dimension
         ):
-            return False
+            return False, "COMPOUND_EXACT_LOCK_CONFLICT"
 
         categories = self.ranker.atom_categories(atom)
         actions = set(map(str, query.get("action_categories", [])))
@@ -359,48 +339,100 @@ class ConstrainedScenarioSynthesisService:
         context_tokens = set(map(str, query.get("query_tokens", [])))
 
         if decision.parent_atom_id == atom_id:
-            return True
+            return True, "PASS_PARENT_BINDING"
         if dimension == "TRAFFIC_PATTERN":
-            return bool(categories & traffic)
+            return (
+                (True, "PASS_TRAFFIC_RELATION_MATCH")
+                if categories & traffic else
+                (False, "SEMANTIC_TRAFFIC_RELATION_MISMATCH")
+            )
         if dimension == "EGO_X_ROAD":
-            return bool(categories & road)
+            return (
+                (True, "PASS_ROAD_RELATION_MATCH")
+                if categories & road else
+                (False, "SEMANTIC_ROAD_RELATION_MISMATCH")
+            )
         if dimension == "OBJECT" and objects:
             if not categories & objects:
-                return False
+                return False, "SEMANTIC_OBJECT_CATEGORY_MISMATCH"
             active = fm_template.get("active_option", {})
             if isinstance(active, dict) and active:
-                expected = str(active.get("obj_type", "")).casefold()
-                expected_category = next((
-                    category for category in (
-                        "OBJECT_PEDESTRIAN", "OBJECT_CYCLIST", "OBJECT_VEHICLE",
-                        "OBJECT_STATIC", "OBJECT_OCCUPANT",
-                    )
-                    if category in set(query.get("object_categories", []))
-                ), "")
-                if expected and expected_category and expected_category not in categories:
-                    return False
-            return True
+                expected_category = normalize_object_category(
+                    active.get("obj_type", "")
+                )
+                if expected_category and expected_category not in categories:
+                    return False, "FM_TEMPLATE_OBJECT_MISMATCH"
+            return True, "PASS_OBJECT_CATEGORY_MATCH"
         if dimension == "EGO_ACTION" and (actions or traffic):
-            return bool(categories & (actions | traffic))
+            return (
+                (True, "PASS_ACTION_OR_INTERACTION_MATCH")
+                if categories & (actions | traffic) else
+                (False, "SEMANTIC_ACTION_CATEGORY_MISMATCH")
+            )
         if dimension == "EGO_DYNAMICS" and actions:
-            return bool(categories & actions)
+            return (
+                (True, "PASS_DYNAMICS_ACTION_MATCH")
+                if categories & actions else
+                (False, "SEMANTIC_DYNAMICS_ACTION_MISMATCH")
+            )
         if dimension == "WHERE":
-            return bool(categories & locations)
+            return (
+                (True, "PASS_LOCATION_CATEGORY_MATCH")
+                if categories & locations else
+                (False, "SEMANTIC_LOCATION_CATEGORY_MISMATCH")
+            )
         if dimension == "ROAD" and road:
-            return bool(categories & road)
+            return (
+                (True, "PASS_ROAD_CATEGORY_MATCH")
+                if categories & road else
+                (False, "SEMANTIC_ROAD_CATEGORY_MISMATCH")
+            )
         if dimension == "EGO_DYNAMICS" and decision.authority is ScenarioBindingAuthority.RANGE_CONTAINMENT:
-            return bool(self._speed_range(atom))
-        return bool(label_tokens & context_tokens) or dimension == "ROAD"
+            return (
+                (True, "PASS_SPEED_REFINEMENT")
+                if self._speed_range(atom) else
+                (False, "SEMANTIC_DYNAMICS_NO_SPEED_REFINEMENT")
+            )
+        if label_tokens & context_tokens:
+            return True, "PASS_LEXICAL_CONTEXT_MATCH"
+        if dimension == "ROAD":
+            return True, "PASS_ODD_ROAD_CATALOG"
+        return False, "SEMANTIC_LEXICAL_CONTEXT_MISMATCH"
+
+    def _traffic_representation_elsewhere(
+        self, query: dict[str, Any], parent: ScenarioCandidate,
+    ) -> dict[str, list[dict[str, Any]]]:
+        relations = set(map(str, query.get("traffic_relations", [])))
+        result: dict[str, list[dict[str, Any]]] = {}
+        if not relations:
+            return result
+        envelope = self._speed_envelope(parent)
+        for atom in self.catalog:
+            dimensions = tuple(map(str, atom.get("filled_dimensions", [])))
+            if "TRAFFIC_PATTERN" in dimensions or not dimensions:
+                continue
+            if not self._speed_compatible(atom, envelope):
+                continue
+            categories = self.ranker.atom_categories(atom)
+            for relation in sorted(relations & categories):
+                result.setdefault(relation, []).append({
+                    "atom_id": str(atom.get("atom_id", "")),
+                    "canonical_atom_id": str(
+                        atom.get("v2") or atom.get("v2_proper")
+                        or atom.get("atom_id", "")
+                    ),
+                    "label": str(atom.get("label", "")),
+                    "filled_dimensions": list(dimensions),
+                    "source_asset": str(atom.get("source_asset", "")),
+                    "source_rule": str(atom.get("source_rule", "")),
+                })
+        return result
 
     def candidate_sets(
         self, *, malfunction: dict[str, Any], parent: ScenarioCandidate,
         assessment: dict[str, Any], project_context: dict[str, Any],
         query: dict[str, Any], fm_template: dict[str, Any],
     ) -> tuple[ScenarioAtomCandidateSet, ...]:
-        context = self._context_text(
-            malfunction=malfunction, parent=parent, assessment=assessment,
-            project_context=project_context,
-        )
         envelope = self._speed_envelope(parent)
         decisions = {
             dimension: self.binding_policy.decide(parent, dimension, envelope)
@@ -443,7 +475,10 @@ class ConstrainedScenarioSynthesisService:
                         "action_score": 0.0, "object_score": 0.0,
                         "traffic_relation_score": 0.0, "odd_score": 0.0,
                         "causal_score": 0.0, "lexical_score": 0.0,
-                        "semantic_similarity_score": 0.0, "final_rank_score": 0.0,
+                        "category_context_score": 0.0,
+                        "structured_source_score": 0.0,
+                        "source_evidence_tier": 5.0,
+                        "final_rank_score": 0.0,
                     },
                 )
                 result.append(ScenarioAtomCandidateSet(
@@ -457,16 +492,16 @@ class ConstrainedScenarioSynthesisService:
                 ))
                 continue
 
-            hard_pool = [
-                atom for atom in catalog
-                if self._hard_compatible(
+            hard_pool = []
+            for atom in catalog:
+                passed, _ = self.hard_filter_decision(
                     dimension=dimension, atom=atom, parent=parent,
                     project_context=project_context, query=query,
                     applicability=applicable, decision=decision,
                     exact_locks=exact_locks, fm_template=fm_template,
-                    context=context,
                 )
-            ]
+                if passed:
+                    hard_pool.append(atom)
             corpus = [str(atom.get("label", "")) for atom in hard_pool]
             ranked = []
             for atom in hard_pool:
@@ -513,9 +548,8 @@ class ConstrainedScenarioSynthesisService:
                     ranking_scores=scores,
                 )
                 ranked.append(candidate)
-            ranked.sort(key=lambda item: (
-                -float(item.ranking_scores.get("final_rank_score", 0.0)),
-                item.atom_id,
+            ranked.sort(key=lambda item: self.ranker.rank_key(
+                item.atom_id, item.ranking_scores,
             ))
             candidates = tuple(ranked[:self.candidate_cap_per_dimension])
             if applicable.status is ScenarioDimensionApplicability.NOT_APPLICABLE:
@@ -581,6 +615,9 @@ class ConstrainedScenarioSynthesisService:
         query = ScenarioSemanticQueryBuilder.build(
             malfunction=malfunction, parent=parent, assessment=assessment,
             project_context=project_context, fm_template=fm_template,
+        )
+        query["traffic_relations_represented_elsewhere"] = (
+            self._traffic_representation_elsewhere(query, parent)
         )
         candidate_sets = self.candidate_sets(
             malfunction=malfunction, parent=parent, assessment=assessment,
