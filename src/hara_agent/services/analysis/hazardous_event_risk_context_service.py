@@ -76,6 +76,8 @@ class HazardousEventRiskContextService:
             return RiskContextFactAuthority.DIRECT_PROJECT_FACT
         if value in {"SCENARIO_INPUT", "DIRECT_SCENARIO_FACT"}:
             return RiskContextFactAuthority.DIRECT_SCENARIO_FACT
+        if value in {"METHOD_CONTRACT", "METHOD_DEFINED", "APPROVED_RULE"}:
+            return RiskContextFactAuthority.METHOD_RULE
         if value == "DERIVED":
             return RiskContextFactAuthority.DERIVED_PHYSICS
         if value == "METHOD_RULE":

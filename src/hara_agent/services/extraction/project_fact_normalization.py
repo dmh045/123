@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Sequence
 
@@ -91,54 +92,66 @@ class ProjectFactNormalizer:
         for unknown in sorted(set(by_type) - expected_types):
             self._fail(result, unknown, "INVALID_FACT_TYPE", "fact_type is not in the requested batch")
         block_map = {str(item.get("block_id", "")): item for item in source_blocks}
-        seen_atomic: set[tuple[Any, ...]] = set()
+        seen_atomic: dict[tuple[Any, ...], tuple[Any, ...]] = {}
         for spec in specs:
             candidates = by_type.get(spec.fact_type, [])
-            if len(candidates) != 1:
-                self._fail(result, spec.fact_type, "INVALID_COVERAGE", "exactly one FOUND/NOT_FOUND result is required")
+            if not candidates:
+                self._fail(result, spec.fact_type, "INVALID_COVERAGE", "at least one FOUND/NOT_FOUND result is required")
                 result.coverage.append({"fact_type": spec.fact_type, "status": "INVALID"})
                 continue
-            candidate = candidates[0]
-            status = str(candidate.get("status", "")).upper()
-            if status == NOT_FOUND:
+            statuses = [str(item.get("status", "")).upper() for item in candidates]
+            if NOT_FOUND in statuses:
+                if len(candidates) != 1:
+                    self._fail(
+                        result, spec.fact_type, "INVALID_COVERAGE",
+                        "NOT_FOUND must be the only result for a fact_type",
+                    )
+                    result.coverage.append({"fact_type": spec.fact_type, "status": "INVALID"})
+                    continue
                 result.coverage.append({
                     "fact_type": spec.fact_type,
                     "status": "NOT_FOUND_IN_EVIDENCE",
                     "source_truth_verified": False,
                 })
                 continue
-            if status != FOUND:
+            if any(status != FOUND for status in statuses):
                 self._fail(result, spec.fact_type, "INVALID_COVERAGE", "status must be FOUND or NOT_FOUND")
                 result.coverage.append({"fact_type": spec.fact_type, "status": "INVALID"})
                 continue
-            missing = [name for name in spec.required_fields if candidate.get(name) is None]
-            if missing:
-                self._fail(result, spec.fact_type, "MISSING_REQUIRED_FIELD", ",".join(missing))
-                result.coverage.append({"fact_type": spec.fact_type, "status": "ATOMICIZATION_FAILED"})
-                continue
-            try:
-                source = self._source_ref(
-                    candidate, block_map, source_id, spec,
-                    (candidate_block_ids_by_fact or {}).get(spec.fact_type),
-                )
-                fact = self._atomic_fact(spec, candidate, source)
-                key = self._identity(fact)
-                if key in seen_atomic:
-                    raise ValueError("DUPLICATE_FACT: duplicate normalized atomic fact")
-                seen_atomic.add(key)
-                if isinstance(fact, SpeedEnvelope):
-                    result.speed_envelopes.append(fact)
-                else:
-                    result.risk_facts.append(fact)
-                result.coverage.append({
-                    "fact_type": spec.fact_type,
-                    "status": FOUND,
-                    "identity_resolution": candidate.get("_identity_resolution", "EXPLICIT"),
-                })
-            except ValueError as error:
-                code, _, reason = str(error).partition(":")
-                self._fail(result, spec.fact_type, code, reason.strip() or code)
-                result.coverage.append({"fact_type": spec.fact_type, "status": "ATOMICIZATION_FAILED"})
+            normalized_count = 0
+            for candidate in candidates:
+                missing = [name for name in spec.required_fields if candidate.get(name) is None]
+                if missing:
+                    self._fail(result, spec.fact_type, "MISSING_REQUIRED_FIELD", ",".join(missing))
+                    continue
+                try:
+                    source = self._source_ref(
+                        candidate, block_map, source_id, spec,
+                        (candidate_block_ids_by_fact or {}).get(spec.fact_type),
+                    )
+                    fact = self._atomic_fact(spec, candidate, source)
+                    scope, payload = self._identity(fact)
+                    if scope in seen_atomic:
+                        code = (
+                            "DUPLICATE_FACT"
+                            if seen_atomic[scope] == payload else "CONFLICTING_FACT"
+                        )
+                        raise ValueError(f"{code}: repeated atomic fact scope")
+                    seen_atomic[scope] = payload
+                    if isinstance(fact, SpeedEnvelope):
+                        result.speed_envelopes.append(fact)
+                    else:
+                        result.risk_facts.append(fact)
+                    normalized_count += 1
+                except ValueError as error:
+                    code, _, reason = str(error).partition(":")
+                    self._fail(result, spec.fact_type, code, reason.strip() or code)
+            result.coverage.append({
+                "fact_type": spec.fact_type,
+                "status": FOUND if normalized_count == len(candidates) else "ATOMICIZATION_FAILED",
+                "normalized_count": normalized_count,
+                "identity_resolution": candidates[0].get("_identity_resolution", "EXPLICIT"),
+            })
         return result
 
     def _atomic_fact(self, spec, candidate, source):
@@ -236,8 +249,25 @@ class ProjectFactNormalizer:
             raise ValueError("UNKNOWN_SOURCE_REF: source_block_id is support-only for this spec")
         excerpt = str(candidate.get("source_excerpt", ""))
         source_text = str(block.get("text", ""))
-        if not any(alias.casefold() in source_text.casefold() for alias in spec.aliases):
+        has_exact_alias = any(
+            alias.casefold() in source_text.casefold() for alias in spec.aliases
+        )
+        if not has_exact_alias and not spec.structural_kind:
             raise ValueError("UNKNOWN_SOURCE_REF: source block contains no exact spec alias")
+        if spec.structural_kind:
+            expected_scope = {
+                "OPERATIONAL_SPEED_CANDIDATE": "OPERATIONAL_SPEED",
+                "CATEGORICAL_ALLOWED_SET_CANDIDATE": "DRIVER_CONFIGURATION",
+            }[spec.structural_kind]
+            if str(candidate.get("semantic_scope", "")) != expected_scope:
+                raise ValueError("INVALID_SEMANTIC_SCOPE: structural candidate was not semantically confirmed")
+            if not excerpt:
+                raise ValueError("UNKNOWN_SOURCE_REF: structural candidate requires an exact excerpt")
+            if (
+                spec.structural_kind == "OPERATIONAL_SPEED_CANDIDATE"
+                and ("±" in excerpt or re.search(r"(?<!\d)[-−]\s*\d", excerpt))
+            ):
+                raise ValueError("NOT_OPERATIONAL_SPEED: signed capability range is not an operating speed")
         if excerpt and excerpt not in source_text:
             raise ValueError("UNKNOWN_SOURCE_REF: excerpt is not an exact substring of the source block")
         return SourceRef(
@@ -248,8 +278,23 @@ class ProjectFactNormalizer:
     @staticmethod
     def _identity(fact):
         if isinstance(fact, SpeedEnvelope):
-            return ("speed", fact.operating_mode.casefold())
-        return ("risk", fact.parameter, tuple(sorted(fact.context.items())))
+            source_scope = tuple(
+                (item.location, item.excerpt) for item in fact.sources
+            )
+            scope = (
+                "speed", fact.operating_mode.casefold(),
+                " ".join(fact.condition.split()).casefold(), source_scope,
+            )
+            payload = (fact.speed_min_kph, fact.speed_max_kph, fact.unit)
+            return scope, payload
+        source_scope = tuple(
+            (item.location, item.excerpt) for item in fact.source_refs
+        )
+        scope = (
+            "risk", fact.parameter, tuple(sorted(fact.context.items())),
+            source_scope,
+        )
+        return scope, (fact.value, fact.unit)
 
     @staticmethod
     def _fail(result, fact_type, code, reason):

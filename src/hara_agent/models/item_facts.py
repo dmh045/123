@@ -121,9 +121,20 @@ class ItemDefinitionFacts:
         if self.speed_min_kph is not None:
             if self.speed_min_kph < 0 or self.speed_max_kph < self.speed_min_kph:
                 raise ValueError("ODD速度范围无效")
-        modes = [envelope.operating_mode.strip().casefold() for envelope in self.speed_envelopes]
-        if len(modes) != len(set(modes)):
-            raise ValueError("speed_envelopes must contain at most one envelope per operating mode")
+        speed_scopes: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+        for envelope in self.speed_envelopes:
+            scope = (
+                envelope.operating_mode.strip().casefold(),
+                " ".join(envelope.condition.split()).casefold(),
+                tuple((item.location, item.excerpt) for item in envelope.sources),
+            )
+            payload = (
+                envelope.speed_min_kph, envelope.speed_max_kph, envelope.unit,
+            )
+            if scope in speed_scopes:
+                code = "duplicate" if speed_scopes[scope] == payload else "conflicting"
+                raise ValueError(f"speed_envelopes contain a {code} scoped envelope")
+            speed_scopes[scope] = payload
         risk_ids = [item.fact_id for item in self.risk_facts]
         if len(risk_ids) != len(set(risk_ids)):
             raise ValueError("risk_facts must contain unique fact_id values")

@@ -24,12 +24,19 @@ class FactRetrievalSpec:
     context_hints: tuple[str, ...] = ()
     section_hints: tuple[str, ...] = ()
     required: bool = True
+    structural_kind: str = ""
+    exclusion_aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.fact_type.strip():
             raise ValueError("FactRetrievalSpec.fact_type must not be empty")
         if not self.aliases:
             raise ValueError("FactRetrievalSpec.aliases must not be empty")
+        if self.structural_kind not in {
+            "", "OPERATIONAL_SPEED_CANDIDATE",
+            "CATEGORICAL_ALLOWED_SET_CANDIDATE",
+        }:
+            raise ValueError("FactRetrievalSpec.structural_kind is unsupported")
 
 
 @dataclass(frozen=True)
@@ -100,8 +107,8 @@ class DeterministicEvidenceRetriever:
             )
         return rankings
 
-    @staticmethod
-    def _score(block: Any, spec: FactRetrievalSpec) -> tuple[int, list[str]]:
+    @classmethod
+    def _score(cls, block: Any, spec: FactRetrievalSpec) -> tuple[int, list[str]]:
         text = normalize_source_text(block_value(block, "text"))
         location = normalize_source_text(block_value(block, "location"))
         kind = normalize_source_text(block_value(block, "kind"))
@@ -109,10 +116,18 @@ class DeterministicEvidenceRetriever:
             alias for alias in spec.aliases
             if normalize_source_text(alias) in text
         ]
-        if not alias_hits:
+        if not alias_hits and any(
+            normalize_source_text(alias) in text
+            for alias in spec.exclusion_aliases
+        ):
             return 0, []
-        score = 12 + min(8, 2 * len(alias_hits))
-        reasons = [f"alias:{alias}" for alias in alias_hits]
+        if alias_hits:
+            score = 12 + min(8, 2 * len(alias_hits))
+            reasons = [f"alias:{alias}" for alias in alias_hits]
+        else:
+            score, reasons = cls._structural_score(text, location, kind, spec)
+            if score <= 0:
+                return 0, []
         context_hits = [
             hint for hint in spec.context_hints
             if normalize_source_text(hint) in text
@@ -138,6 +153,55 @@ class DeterministicEvidenceRetriever:
             score += 2
             reasons.append("structure:table_row")
         return score, reasons
+
+    @staticmethod
+    def _structural_score(
+        text: str,
+        location: str,
+        kind: str,
+        spec: FactRetrievalSpec,
+    ) -> tuple[int, list[str]]:
+        """Route shape-compatible candidates without deciding their meaning.
+
+        Structural retrieval expands recall only. The semantic extraction and
+        fail-closed normalizer remain responsible for accepting a project fact.
+        """
+
+        is_table_row = kind == "table_row" or "table[" in location
+        if spec.structural_kind == "OPERATIONAL_SPEED_CANDIDATE":
+            unit_hits = [
+                hint for hint in spec.unit_hints
+                if normalize_source_text(hint) in text
+            ]
+            numeric_constraint = re.search(
+                r"(?:[<>]=?|[\u2264\u2265]|\d+(?:\.\d+)?\s*[-~～至]\s*)"
+                r"\d+(?:\.\d+)?",
+                text,
+            )
+            if not unit_hits or numeric_constraint is None:
+                return 0, []
+            reasons = ["structure:numeric_speed_constraint"]
+            reasons.extend(f"unit:{hint}" for hint in unit_hits)
+            return (8 if is_table_row else 6), reasons
+        if spec.structural_kind == "CATEGORICAL_ALLOWED_SET_CANDIDATE":
+            # Short table rows with a multi-value cell are candidates for an
+            # allowed set. No domain wording or expected value is encoded here.
+            member_separators = ("/", "／")
+            if (
+                is_table_row
+                and any(item in text for item in member_separators)
+                and text.count("|") == 1
+                and len(text) <= 180
+            ):
+                return 8, ["structure:categorical_allowed_set"]
+            conditional = any(item in text for item in (" if ", "when", "当", "且"))
+            numeric_condition = bool(re.search(
+                r"(?:[<>]=?|[\u2264\u2265])\s*\d+(?:\.\d+)?", text,
+            ))
+            if not is_table_row and conditional and numeric_condition:
+                return 7, ["structure:conditional_context"]
+            return 0, []
+        return 0, []
 
 
 class CoverageFirstContextAssembler:

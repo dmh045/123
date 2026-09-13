@@ -17,7 +17,7 @@ from .item_supplement_agent import RoutedDocumentBlocks
 class TargetedProjectFactExtractionAgent:
     """One bounded schema-guided call for one Project Fact category."""
 
-    PROMPT_VERSION = "targeted-project-facts-v2-mode-transition-evidence"
+    PROMPT_VERSION = "targeted-project-facts-v3-structural-recall"
 
     def __init__(self, client: LLMClient, normalizer: ProjectFactNormalizer | None = None):
         self.client = client
@@ -45,6 +45,7 @@ class TargetedProjectFactExtractionAgent:
             "context_hints": list(item.context_hints),
             "required_fields": list(item.required_fields),
             "constraints": list(item.constraints),
+            "structural_kind": item.structural_kind,
             "retrieval_candidate_block_ids": sorted(diagnostics.get(item.fact_type, set())),
         } for item in specs]
         request = LLMRequest(
@@ -58,17 +59,30 @@ class TargetedProjectFactExtractionAgent:
                 "mode. Return FOUND for that atomic bound; do not require a section "
                 "whose title says speed envelope. Select only the relevant bound "
                 "when the same source block contains additional speed conditions. "
+                "A structural speed candidate is FOUND only when its excerpt states "
+                "an actual vehicle operating, entry, search, or control speed. "
+                "Controller capability, calibration, signed/plus-minus ranges, and "
+                "test tolerances are NOT_FOUND. Set semantic_scope to "
+                "OPERATIONAL_SPEED for every structurally routed speed result. A "
+                "speed spec may have multiple atomic FOUND results for distinct "
+                "contextual envelopes, but the structural catch-all must not repeat "
+                "a fact already mapped to a mode-specific spec. "
                 "For RISK_FACT, return exactly one scalar value, the exact Method "
                 "Contract unit (or an empty unit), and a string-to-string context object. "
+                "For a structurally routed categorical allowed set, emit one atomic "
+                "FOUND result per allowed member, add member-specific context, and "
+                "set semantic_scope to DRIVER_CONFIGURATION. Never collapse the set "
+                "into one string or claim an unscoped global Boolean. "
                 "Constraints are validation boundaries, never expected answers. "
                 "你是来源约束的原子项目事实抽取器。只可使用提供的带ID证据块，不得猜测、换算或补充常识。"
                 "每个FOUND结果只能表达一个原子事实；数值必须是JSON number，运算符只能是LT/LE/EQ/GE/GT/RANGE。"
                 "source_block_id必须逐字使用给定ID，source_excerpt若提供必须是该块原文的连续精确子串。"
                 "相邻表头或邻行仅用于理解上下文；source_block_id必须取当前spec的retrieval_candidate_block_ids之一，"
-                "且该块正文必须包含当前spec的任一alias；不得选择support-only块。"
+                "非结构候选的正文必须包含当前spec的任一alias；不得选择support-only块。"
             ),
             user_prompt=(
-                "严格返回JSON对象 {\"results\":[...]}。每个spec必须恰好返回一项，status只能是FOUND或NOT_FOUND。"
+                "严格返回JSON对象 {\"results\":[...]}。每个spec至少返回一项，status只能是FOUND或NOT_FOUND；"
+                "仅在存在多个独立原子事实时可为同一spec返回多个FOUND，NOT_FOUND必须单独一项。"
                 "FOUND需返回该spec的required_fields及fact_type/status；NOT_FOUND只返回fact_type/status。"
                 "parameter使用aliases中的第一个英文标识；operating_mode和condition使用context_hints中的第一个英文标识；"
                 "源文未明确control_mode或condition时返回空字符串，不要因此把明确的driver_location判为NOT_FOUND。"

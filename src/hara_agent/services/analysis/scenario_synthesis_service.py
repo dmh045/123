@@ -228,6 +228,7 @@ class ConstrainedScenarioSynthesisService:
             "source_rule": (
                 f"{getattr(source, 'sheet', '')}!{getattr(source, 'range', '')}"
             ).strip("!"),
+            "source_excerpt": str(getattr(source, "raw_text", "")),
         }
 
     def _fm_template_evidence(
@@ -995,6 +996,240 @@ class ConstrainedScenarioSynthesisService:
             reasons[0],
         )
 
+    @staticmethod
+    def _same_physical_value(left: Any, right: Any) -> bool:
+        if (
+            isinstance(left, (int, float)) and not isinstance(left, bool)
+            and isinstance(right, (int, float)) and not isinstance(right, bool)
+        ):
+            return float(left) == float(right)
+        return str(left).strip().casefold() == str(right).strip().casefold()
+
+    def _selected_template_option(
+        self,
+        synthesis_input: ScenarioSynthesisInput,
+        selected_candidates: dict[str, ScenarioDimensionCandidate],
+    ) -> tuple[dict[str, Any] | None, str, list[str]]:
+        """Resolve exact or uniquely constrained FM option; never choose first."""
+
+        template = synthesis_input.fm_scenario_template
+        if not isinstance(template, dict) or not template:
+            return None, "NO_APPLICABLE_FM_TEMPLATE", []
+        active = template.get("active_option")
+        if isinstance(active, dict) and active.get("source_option_id"):
+            return active, "EXACT_ACTIVE_OPTION", [str(active["source_option_id"])]
+        options = [
+            item for item in template.get("source_governed_constraints", [])
+            if isinstance(item, dict) and item.get("source_option_id")
+        ]
+        object_categories: set[str] = set()
+        object_positions: set[str] = set()
+        collision_values: set[str] = set()
+        for candidate in selected_candidates.values():
+            if "OBJECT" not in candidate.dimensions:
+                continue
+            source_atom = self.by_id.get(candidate.canonical_atom_id, {})
+            object_categories.update(
+                item for item in self.ranker.atom_categories(source_atom)
+                if item.startswith("OBJECT_")
+            )
+            semantics = candidate.method_semantics
+            semantics = semantics if isinstance(semantics, dict) else {}
+            obj = semantics.get("object", {})
+            obj = obj if isinstance(obj, dict) else {}
+            if category := normalize_object_category(obj.get("type", "")):
+                object_categories.add(category)
+            if position := str(obj.get("position", "")).strip().casefold():
+                object_positions.add(position)
+            if collision := str(semantics.get("collision_type", "")).strip():
+                resolution = self.scenario_method.risk_vocabulary.resolve(
+                    field="collision_type", raw_value=collision,
+                )
+                if resolution.mapped:
+                    collision_values.add(resolution.canonical_value)
+        if not (object_categories or object_positions or collision_values):
+            return None, "AMBIGUOUS_FM_TEMPLATE_OPTION", [
+                str(item["source_option_id"]) for item in options
+            ]
+        matches = []
+        for option in options:
+            category = normalize_object_category(option.get("obj_type", ""))
+            position = str(option.get("obj_position", "")).strip().casefold()
+            collision = self.scenario_method.risk_vocabulary.resolve(
+                field="collision_type", raw_value=option.get("collision_type", ""),
+            )
+            if object_categories and category not in object_categories:
+                continue
+            if object_positions and position not in object_positions:
+                continue
+            if collision_values and collision.canonical_value not in collision_values:
+                continue
+            matches.append(option)
+        if len(matches) == 1:
+            return matches[0], "UNIQUE_STRUCTURED_OPTION_MATCH", [
+                str(matches[0]["source_option_id"])
+            ]
+        return None, "AMBIGUOUS_FM_TEMPLATE_OPTION", [
+            str(item["source_option_id"]) for item in matches
+        ]
+
+    def _project_method_physical_facts(
+        self, *, synthesis_input: ScenarioSynthesisInput,
+        selected_candidates: dict[str, ScenarioDimensionCandidate],
+        facts: dict[str, Any], provenance: dict[str, Any],
+        scope: dict[str, str],
+    ) -> dict[str, Any]:
+        option, resolution, matching_ids = self._selected_template_option(
+            synthesis_input, selected_candidates,
+        )
+        diagnostics: dict[str, Any] = {
+            "option_resolution": resolution,
+            "matching_option_ids": matching_ids,
+            "projected_fields": [],
+            "matching_existing_fields": [],
+            "conflicts": [],
+            "unmapped_values": [],
+        }
+
+        def set_fact(
+            field: str, value: Any, *, source: SourceRef,
+            origin: str, fact_provenance: str,
+            selection_basis: str, extra: dict[str, Any] | None = None,
+        ) -> bool:
+            current = facts.get(field)
+            if current not in (None, "") and not self._same_physical_value(current, value):
+                diagnostics["conflicts"].append({
+                    "field": field, "existing_value": current,
+                    "method_value": value,
+                })
+                return False
+            if current not in (None, ""):
+                diagnostics["matching_existing_fields"].append(field)
+            facts[field] = value
+            provenance[field] = {
+                "provenance": fact_provenance,
+                "origin": origin,
+                "approval": ReviewStatus.FINALIZED.value,
+                "source_refs": [{
+                    "source_type": source.source_type,
+                    "source_id": source.source_id,
+                    "location": source.location,
+                    "excerpt": source.excerpt,
+                }],
+                "applicable_scope": scope,
+                "validation_status": "VALIDATED",
+                "selection_basis": selection_basis,
+                **(extra or {}),
+            }
+            diagnostics["projected_fields"].append(field)
+            return True
+
+        option_source: SourceRef | None = None
+        if option is not None:
+            source_payload = option.get("source", {})
+            source_payload = source_payload if isinstance(source_payload, dict) else {}
+            option_source = SourceRef(
+                "method_contract", synthesis_input.method_contract_hash,
+                str(source_payload.get("source_rule", "")),
+                str(source_payload.get("source_excerpt", option.get("label", ""))),
+            )
+            option_id = str(option.get("source_option_id", ""))
+            template_id = str(
+                synthesis_input.fm_scenario_template.get("template_id", "")
+            )
+            values = {
+                "object_type": option.get("obj_type"),
+                "object_position": option.get("obj_position"),
+                "relative_distance_m": option.get("obj_distance_m"),
+                "object_speed_kph": option.get("obj_v_kph"),
+            }
+            mappings: dict[str, Any] = {}
+            for field, raw_field, target_field in (
+                ("road_user_type", "obj_type", "road_user_type"),
+                ("collision_type", "collision_type", "collision_type"),
+            ):
+                mapped = self.scenario_method.risk_vocabulary.resolve(
+                    field=field, raw_value=option.get(raw_field, ""),
+                )
+                if mapped.mapped:
+                    values[target_field] = mapped.canonical_value
+                    mappings[target_field] = mapped.to_dict()
+                else:
+                    diagnostics["unmapped_values"].append({
+                        "field": target_field, "raw_value": option.get(raw_field),
+                    })
+            for field, value in values.items():
+                if value is None or value == "":
+                    diagnostics["unmapped_values"].append({
+                        "field": field, "raw_value": value,
+                    })
+                    continue
+                set_fact(
+                    field, value, source=option_source,
+                    origin="METHOD_DEFINED",
+                    fact_provenance=FactProvenance.METHOD_CONTRACT.value,
+                    selection_basis=resolution,
+                    extra={
+                        "source_template_id": template_id,
+                        "source_option_id": option_id,
+                        "method_contract_hash": synthesis_input.method_contract_hash,
+                        **(
+                            {"risk_vocabulary_mapping": mappings[field]}
+                            if field in mappings else {}
+                        ),
+                    },
+                )
+            speed = option.get("obj_v_kph")
+            if (
+                isinstance(speed, (int, float)) and not isinstance(speed, bool)
+                and float(speed) == 0.0 and option_source is not None
+            ):
+                set_fact(
+                    "object_longitudinal_direction", "STATIONARY",
+                    source=option_source, origin=FactProvenance.DERIVED.value,
+                    fact_provenance=FactProvenance.DERIVED.value,
+                    selection_basis="OBJECT_SPEED_EXACT_ZERO",
+                    extra={
+                        "source_template_id": template_id,
+                        "source_option_id": option_id,
+                        "method_contract_hash": synthesis_input.method_contract_hash,
+                        "inputs": ["object_speed_kph"],
+                    },
+                )
+
+        directions: list[tuple[str, ScenarioDimensionCandidate]] = []
+        for candidate in selected_candidates.values():
+            semantics = candidate.method_semantics
+            semantics = semantics if isinstance(semantics, dict) else {}
+            dynamics = semantics.get("ego_dynamics", {})
+            dynamics = dynamics if isinstance(dynamics, dict) else {}
+            direction = str(dynamics.get("direction", "")).strip().upper()
+            if direction in {"FORWARD", "REVERSE"}:
+                directions.append((direction, candidate))
+        unique_directions = {item[0] for item in directions}
+        if len(unique_directions) == 1:
+            direction, candidate = directions[0]
+            atom_source = SourceRef(
+                "method_contract", synthesis_input.method_contract_hash,
+                candidate.source_rule, candidate.label,
+            )
+            set_fact(
+                "ego_longitudinal_direction", direction,
+                source=atom_source, origin="METHOD_DEFINED",
+                fact_provenance=FactProvenance.METHOD_CONTRACT.value,
+                selection_basis="SELECTED_ATOM_PHYSICAL_SEMANTICS",
+                extra={
+                    "source_atom_ids": sorted({item[1].atom_id for item in directions}),
+                    "method_contract_hash": synthesis_input.method_contract_hash,
+                },
+            )
+        elif len(unique_directions) > 1:
+            diagnostics["conflicts"].append({
+                "field": "ego_longitudinal_direction",
+                "method_values": sorted(unique_directions),
+            })
+        return diagnostics
+
     def validate_provider_payload(
         self, synthesis_input: ScenarioSynthesisInput, payload: dict[str, Any],
     ) -> tuple[ScenarioSynthesisAssessment, ...]:
@@ -1271,6 +1506,68 @@ class ConstrainedScenarioSynthesisService:
             "applicable_scope": scope,
             "selection_authority": assessment.selection_authority,
         }
+        physical_projection = self._project_method_physical_facts(
+            synthesis_input=synthesis_input,
+            selected_candidates=selected_candidates,
+            facts=facts, provenance=provenance, scope=scope,
+        )
+        speed_binding = bindings.get("EGO_DYNAMICS", {})
+        speed_intersection = (
+            speed_binding.get("speed_intersection_kph")
+            if isinstance(speed_binding, dict) else None
+        )
+        if (
+            isinstance(speed_intersection, list)
+            and len(speed_intersection) == 2
+            and any(value is not None for value in speed_intersection)
+        ):
+            parent_constraint = facts.get("ego_speed_constraint", {})
+            parent_constraint = (
+                deepcopy(parent_constraint) if isinstance(parent_constraint, dict) else {}
+            )
+            parent_constraint["min_kph"] = speed_intersection[0]
+            parent_constraint["max_kph"] = speed_intersection[1]
+            facts["ego_speed_constraint"] = parent_constraint
+            speed_candidate = next((
+                candidate for candidate in selected_candidates.values()
+                if "EGO_DYNAMICS" in candidate.dimensions
+                and candidate.speed_range_kph is not None
+            ), None)
+            speed_source = SourceRef(
+                "method_contract", synthesis_input.method_contract_hash,
+                speed_candidate.source_rule if speed_candidate else method_source.location,
+                speed_candidate.label if speed_candidate else method_source.excerpt,
+            )
+            parent_metadata = parent.fact_provenance.get("ego_speed_constraint", {})
+            parent_metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
+            parent_sources = deepcopy(parent_metadata.get("source_refs", []))
+            if not parent_sources:
+                parent_sources = [{
+                    "source_type": "parent_scenario",
+                    "source_id": parent.scenario_id,
+                    "location": "facts.ego_speed_constraint",
+                    "excerpt": self._canonical_json(parent.facts.get("ego_speed_constraint", {})),
+                }]
+            provenance["ego_speed_constraint"] = {
+                "provenance": FactProvenance.DERIVED.value,
+                "origin": "METHOD_DEFINED",
+                "approval": ReviewStatus.FINALIZED.value,
+                "source_refs": [*parent_sources, {
+                    "source_type": speed_source.source_type,
+                    "source_id": speed_source.source_id,
+                    "location": speed_source.location,
+                    "excerpt": speed_source.excerpt,
+                }],
+                "applicable_scope": scope,
+                "validation_status": "VALIDATED",
+                "selection_basis": "PROJECT_AND_METHOD_SPEED_RANGE_INTERSECTION",
+                "source_atom_ids": [speed_candidate.atom_id] if speed_candidate else [],
+                "project_speed_envelope_kph": speed_binding.get("project_speed_envelope_kph"),
+                "child_speed_range_kph": speed_binding.get("child_speed_range_kph"),
+                "speed_intersection_kph": list(speed_intersection),
+                "method_contract_hash": synthesis_input.method_contract_hash,
+            }
+            physical_projection["projected_fields"].append("ego_speed_constraint")
         validations = (
             {"check": "candidate_membership", "status": "PASS"},
             {"check": "binding_refinement_policy", "status": "PASS"},
@@ -1280,6 +1577,13 @@ class ConstrainedScenarioSynthesisService:
             {"check": "method_constraints", "status": "PASS"},
             {"check": "coverage_plan", "status": "PASS"},
             {"check": "sibling_non_trivial_diversity", "status": "PASS"},
+            {
+                "check": "method_physical_projection",
+                "status": (
+                    "PASS" if not physical_projection["conflicts"]
+                    else "CONFLICT_RETAINED_PARENT"
+                ),
+            },
             {"check": "e_biased_ranking", "status": "NOT_USED"},
         )
         instantiation = AnalyticalScenarioInstantiation(
@@ -1313,6 +1617,7 @@ class ConstrainedScenarioSynthesisService:
             "method_facts_used": list(instantiation.method_facts_used),
             "provider_evidence": provider_evidence,
             "deterministic_validations": list(validations),
+            "method_physical_projection": physical_projection,
             "base_analysis_instance": deepcopy(parent.analysis_instance),
             "synthesis_version": synthesis_input.contract_version,
             "validation_status": "VALIDATED",

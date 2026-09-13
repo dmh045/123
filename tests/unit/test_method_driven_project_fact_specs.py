@@ -30,7 +30,9 @@ def test_batches_are_compiled_from_modes_and_method_contract_only():
     )
 
     speed = batches["mode_speed_envelopes"]
-    assert [item.context_hints for item in speed] == [("Garage",), ("Highway",)]
+    assert [item.context_hints for item in speed] == [("Garage",), ("Highway",), ()]
+    assert speed[-1].structural_kind == "OPERATIONAL_SPEED_CANDIDATE"
+    assert speed[-1].exclusion_aliases == ("Garage", "Highway")
     risk = batches["method_risk_facts"]
     assert [item.fact_type for item in risk] == ["OCCURRENCE_FREQUENCY"]
     assert all("parking" not in repr(item).casefold() for item in (*speed, *risk))
@@ -91,3 +93,37 @@ def test_method_decisions_and_executor_outputs_are_not_requested_from_item_defin
     ))
 
     assert "method_risk_facts" not in batches
+
+
+def test_driver_allowed_set_is_preserved_as_two_scoped_atomic_facts():
+    spec = build_project_fact_spec_batches((), (
+        _required(FactType.DRIVER_IN_VEHICLE, FactOrigin.PROJECT_FACT),
+    ))["method_risk_facts"][0]
+    assert spec.structural_kind == "CATEGORICAL_ALLOWED_SET_CANDIDATE"
+    block = {
+        "block_id": "D1", "location": "table[14].row[13]",
+        "text": "位姿状态 | 在驾驶位/不在驾驶位",
+    }
+    raw = [
+        {
+            "fact_type": spec.fact_type, "status": "FOUND", "value": "true",
+            "unit": "", "context": {"allowed_driver_position": "in_driver_seat"},
+            "semantic_scope": "DRIVER_CONFIGURATION", "source_block_id": "D1",
+            "source_excerpt": "在驾驶位",
+        },
+        {
+            "fact_type": spec.fact_type, "status": "FOUND", "value": "false",
+            "unit": "", "context": {"allowed_driver_position": "outside_driver_seat"},
+            "semantic_scope": "DRIVER_CONFIGURATION", "source_block_id": "D1",
+            "source_excerpt": "不在驾驶位",
+        },
+    ]
+
+    result = ProjectFactNormalizer().normalize(
+        (spec,), raw, (block,), "ItemDef.docx", {spec.fact_type: {"D1"}},
+    )
+
+    assert not result.failures
+    assert [(item.value, item.context["allowed_driver_position"]) for item in result.risk_facts] == [
+        ("true", "in_driver_seat"), ("false", "outside_driver_seat"),
+    ]

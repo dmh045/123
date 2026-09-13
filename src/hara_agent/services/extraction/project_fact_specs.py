@@ -22,6 +22,8 @@ class RequiredProjectFactSpec:
     context_hints: tuple[str, ...]
     required_fields: tuple[str, ...]
     constraints: tuple[str, ...] = ()
+    structural_kind: str = ""
+    exclusion_aliases: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.fact_type or not self.aliases or not self.required_fields:
@@ -36,6 +38,8 @@ class RequiredProjectFactSpec:
             aliases=self.aliases,
             unit_hints=self.unit_hints,
             context_hints=self.context_hints,
+            structural_kind=self.structural_kind,
+            exclusion_aliases=self.exclusion_aliases,
         )
 
 
@@ -45,7 +49,11 @@ def build_project_fact_spec_batches(
 ) -> dict[str, tuple[RequiredProjectFactSpec, ...]]:
     """Build bounded extraction work without product/domain constants in Python."""
 
-    speed_specs = tuple(_speed_spec(mode) for mode in _unique_modes(operating_modes))
+    modes = _unique_modes(operating_modes)
+    speed_specs = (
+        *tuple(_speed_spec(mode) for mode in modes),
+        _contextual_speed_spec(modes),
+    )
     non_source_extraction_facts = {
         # These are governance/engineering outputs, not Item Definition facts.
         FactType.EXPOSURE,
@@ -83,20 +91,53 @@ def _speed_spec(mode: str) -> RequiredProjectFactSpec:
     )
 
 
+def _contextual_speed_spec(modes: Sequence[str]) -> RequiredProjectFactSpec:
+    """Recall source speed constraints whose context is not a mode label.
+
+    Generic structural retrieval deliberately contains no product-language
+    synonym table and no expected numeric values.
+    """
+
+    return RequiredProjectFactSpec(
+        fact_type="speed.operational_context",
+        output_type=ProjectFactOutputType.SPEED_ENVELOPE,
+        aliases=("operational speed", "vehicle speed constraint"),
+        unit_hints=("km/h", "kph", "kmh"),
+        context_hints=(),
+        required_fields=(
+            "status", "operator", "value", "unit", "operating_mode",
+            "condition", "semantic_scope", "source_block_id",
+            "source_excerpt",
+        ),
+        structural_kind="OPERATIONAL_SPEED_CANDIDATE",
+        exclusion_aliases=tuple(modes),
+    )
+
+
 def _method_risk_spec(spec: RequiredFactSpec) -> RequiredProjectFactSpec:
     canonical = spec.fact_type.value
     spaced = canonical.replace("_", " ").casefold()
     aliases = [canonical, spaced]
     if spec.fact_type is FactType.EXPOSURE:
         aliases.extend(("exposure method", "T/F"))
+    structural_kind = (
+        "CATEGORICAL_ALLOWED_SET_CANDIDATE"
+        if spec.fact_type is FactType.DRIVER_IN_VEHICLE else ""
+    )
+    required_fields = (
+        "status", "value", "unit", "context", "source_block_id",
+    )
+    if structural_kind:
+        required_fields += ("semantic_scope", "source_excerpt")
     return RequiredProjectFactSpec(
         fact_type=canonical,
         output_type=ProjectFactOutputType.RISK_FACT,
         aliases=tuple(dict.fromkeys(aliases)),
         unit_hints=(spec.unit,) if spec.unit.strip() else (),
         context_hints=(),
-        required_fields=("status", "value", "unit", "context", "source_block_id"),
+        required_fields=required_fields,
         constraints=spec.constraints,
+        structural_kind=structural_kind,
     )
 
 

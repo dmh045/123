@@ -402,7 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("references/HARA_Template_AI_20260327.xlsx"),
     )
     synthesis.add_argument("--output", required=True, type=Path)
-    synthesis.add_argument("--smoke-count", type=int, choices=range(3, 6), default=5)
+    synthesis.add_argument("--smoke-count", type=int, choices=range(3, 31), default=5)
     synthesis.add_argument("--full", action="store_true")
     synthesis.add_argument("--max-workers", type=int, default=4)
     causal_revalidation = subparsers.add_parser(

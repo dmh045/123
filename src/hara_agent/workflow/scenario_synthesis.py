@@ -227,38 +227,92 @@ class ScenarioSynthesisRunner:
         return matches[0] if len(matches) == 1 else ""
 
     def _smoke_groups(self, inputs: list[Any], count: int) -> list[Any]:
-        chosen = []
-        features: set[str] = set()
-        desired = ("parking", "vehicle", "vru", "Z", "F")
-        for feature in desired:
-            for item in inputs:
-                if item in chosen or not self._provider_ready(item):
-                    continue
-                parent_facts = item.parent_scenario.get("facts", {})
-                text = json.dumps({
-                    "malfunction": item.malfunction,
-                    "parent": parent_facts,
-                    "project": item.project_context,
-                }, ensure_ascii=False).casefold()
-                domain = self._domain(item.malfunction)
-                match = (
-                    feature == "parking" and any(token in text for token in ("停车", "泊车", "parking", "garage"))
-                    or feature == "vehicle" and any(token in text for token in ("passenger_car", "vehicle", "rear_end"))
-                    or feature == "vru" and any(token in text for token in ("行人", "pedestrian", "cyclist", "两轮"))
-                    or feature in {"Z", "F"} and domain == feature
-                )
-                if match:
-                    chosen.append(item)
-                    features.add(feature)
-                    break
-            if len(chosen) >= count:
+        ready = sorted(
+            (item for item in inputs if self._provider_ready(item)),
+            key=lambda item: item.semantic_group_id,
+        )
+        target_strata = (
+            "vehicle_interaction", "vru", "reversing", "parking_in_out",
+            "slope_road_relation", "strong_fm_template", "no_fm_template",
+            "coverage_2", "coverage_3", "primary_ego_action",
+            "primary_ego_dynamics", "primary_object", "domain_z", "domain_f",
+        )
+        chosen: list[Any] = []
+        counts: Counter[str] = Counter()
+        chosen_malfunctions: set[str] = set()
+        while len(chosen) < count:
+            candidates = [item for item in ready if item not in chosen]
+            if not candidates:
                 break
-        for item in inputs:
-            if len(chosen) >= count:
-                break
-            if item not in chosen and self._provider_ready(item):
-                chosen.append(item)
-        return chosen[:count]
+            best = min(candidates, key=lambda item: (
+                -sum(
+                    1.0 / (1 + counts[feature])
+                    for feature in self._smoke_features(item)
+                    if feature in target_strata
+                ),
+                -(item.malfunction_id not in chosen_malfunctions),
+                item.semantic_group_id,
+            ))
+            chosen.append(best)
+            counts.update(self._smoke_features(best))
+            chosen_malfunctions.add(best.malfunction_id)
+        return chosen
+
+    def _smoke_features(self, item: Any) -> set[str]:
+        query = item.structured_semantic_query
+        objects = set(map(str, query.get("object_categories", [])))
+        actions = set(map(str, query.get("action_categories", [])))
+        road = set(map(str, query.get("road_relations", [])))
+        road.update(map(str, query.get("odd_road_categories", [])))
+        text = json.dumps({
+            "malfunction": item.malfunction,
+            "parent": item.parent_scenario.get("facts", {}),
+        }, ensure_ascii=False).casefold()
+        primary = set(item.coverage_plan.primary_variation_dimensions)
+        domain = self._domain(item.malfunction)
+        result = set()
+        if "OBJECT_VEHICLE" in objects:
+            result.add("vehicle_interaction")
+        if objects & {"OBJECT_PEDESTRIAN", "OBJECT_CYCLIST"}:
+            result.add("vru")
+        if "ACTION_REVERSE" in actions:
+            result.add("reversing")
+        if "ACTION_PARK" in actions or any(
+            token in text for token in ("停车", "泊车", "parking", "park-in", "park-out")
+        ):
+            result.add("parking_in_out")
+        if "ROAD_SLOPE" in road:
+            result.add("slope_road_relation")
+        result.add(
+            "strong_fm_template" if item.fm_scenario_template else "no_fm_template"
+        )
+        result.add(f"coverage_{item.coverage_plan.desired_variant_count}")
+        for dimension, stratum in (
+            ("EGO_ACTION", "primary_ego_action"),
+            ("EGO_DYNAMICS", "primary_ego_dynamics"),
+            ("OBJECT", "primary_object"),
+        ):
+            if dimension in primary:
+                result.add(stratum)
+        if domain in {"Z", "F"}:
+            result.add(f"domain_{domain.casefold()}")
+        return result
+
+    def _smoke_strata(self, inputs: list[Any]) -> dict[str, Any]:
+        target = {
+            "vehicle_interaction", "vru", "reversing", "parking_in_out",
+            "slope_road_relation", "strong_fm_template", "no_fm_template",
+            "coverage_2", "coverage_3", "primary_ego_action",
+            "primary_ego_dynamics", "primary_object", "domain_z", "domain_f",
+        }
+        by_group = {
+            item.semantic_group_id: sorted(self._smoke_features(item)) for item in inputs
+        }
+        covered = set().union(*(set(value) for value in by_group.values())) if by_group else set()
+        return {
+            "target": sorted(target), "covered": sorted(covered & target),
+            "unavailable": sorted(target - covered), "by_group": by_group,
+        }
 
     @staticmethod
     def _trace_call_count(trace: dict[str, Any]) -> int:
@@ -597,6 +651,14 @@ class ScenarioSynthesisRunner:
                 "requested": smoke_count, "executed": len(smoke_inputs),
                 "passed": smoke_passed, "failures": smoke_failures,
                 "semantic_group_ids": [item.semantic_group_id for item in smoke_inputs],
+                "strata": self._smoke_strata(smoke_inputs),
+                "selection_records": [{
+                    "semantic_group_id": item.semantic_group_id,
+                    "variants": [
+                        assessment.to_dict()
+                        for assessment in selections[item.semantic_group_id][0]
+                    ],
+                } for item in smoke_inputs if item.semantic_group_id in selections],
             },
             "full_synthesis_started": full_started,
             "full_synthesis_groups": len(provider_ready) if full_started else 0,
@@ -613,8 +675,11 @@ class ScenarioSynthesisRunner:
         children: list[ScenarioCandidate] = []
         instantiations = []
         child_contexts: dict[str, tuple[Any, dict[str, Any]]] = {}
-        if full_started:
-            for synthesis_input in inputs:
+        materialization_inputs = (
+            inputs if full_started else smoke_inputs if smoke_passed else []
+        )
+        if materialization_inputs:
+            for synthesis_input in materialization_inputs:
                 selection = selections.get(synthesis_input.semantic_group_id)
                 if selection is None:
                     continue
@@ -743,6 +808,16 @@ class ScenarioSynthesisRunner:
             },
         }
         _write_json(review_dir / "analytical_physics_inputs.json", physics_payload)
+        if smoke_passed and not full_started:
+            _write_json(review_dir / "supported_smoke_children.json", {
+                "artifact_version": "supported-r4-smoke-children-v1",
+                "run_id": target_run_id,
+                "full_synthesis_started": False,
+                "children": [item.to_dict() for item in children],
+                "instantiations": instantiations,
+                "causal_delta": causal_payload,
+                "physics": physics_payload,
+            })
         assumption_pack = self.physics.assumption_pack(
             physics_records, {item.scenario_id: item for item in children}, malfunctions,
         )
@@ -873,7 +948,11 @@ class ScenarioSynthesisRunner:
                 group_id: value[0] for group_id, value in selections.items()
             },
             children=children,
-            mode=("REALIZED_SELECTION" if full_started else "OFFLINE_CANDIDATE_PLAN"),
+            mode=(
+                "REALIZED_SELECTION" if full_started else
+                "REALIZED_SUPPORTED_SMOKE" if smoke_passed else
+                "OFFLINE_CANDIDATE_PLAN"
+            ),
         )
         _write_json(review_dir / "scenario_selector_quality_audit.json", selector_quality)
         _write_text(

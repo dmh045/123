@@ -37,11 +37,24 @@ def _context_identity(context: dict[str, str]) -> str:
 
 def project_evidence_records(facts: ItemDefinitionFacts) -> tuple[EvidenceRecord, ...]:
     records: list[EvidenceRecord] = []
+    speed_mode_counts: dict[str, int] = {}
+    for envelope in facts.speed_envelopes:
+        mode = _token(envelope.operating_mode)
+        speed_mode_counts[mode] = speed_mode_counts.get(mode, 0) + 1
     for envelope in sorted(
         facts.speed_envelopes,
-        key=lambda item: _token(item.operating_mode),
+        key=lambda item: (
+            _token(item.operating_mode), item.condition,
+            tuple((source.location, source.excerpt) for source in item.sources),
+        ),
     ):
         mode = _token(envelope.operating_mode)
+        scope_material = json.dumps({
+            "condition": envelope.condition,
+            "sources": [asdict(source) for source in envelope.sources],
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        scope = hashlib.sha256(scope_material.encode("utf-8")).hexdigest()[:12]
+        identity = mode if speed_mode_counts[mode] == 1 else f"{mode}.scope-{scope}"
         for bound, value in (
             ("min_kph", envelope.speed_min_kph),
             ("max_kph", envelope.speed_max_kph),
@@ -49,7 +62,7 @@ def project_evidence_records(facts: ItemDefinitionFacts) -> tuple[EvidenceRecord
             if value is None:
                 continue
             records.append(EvidenceRecord(
-                f"PROJECT.speed.{mode}.{bound}",
+                f"PROJECT.speed.{identity}.{bound}",
                 float(value), EvidenceKind.DIRECT_FACT, envelope.provenance,
                 envelope.status, tuple(envelope.sources),
                 {

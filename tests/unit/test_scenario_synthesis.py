@@ -9,7 +9,10 @@ from pathlib import Path
 import pytest
 
 from hara_agent.infrastructure.llm.protocol import LLMResponse
-from hara_agent.contracts import CandidateOrigin
+from hara_agent.contracts import (
+    CandidateOrigin, CoverageLabel, ScenarioSynthesisAssessment,
+    SynthesisValidationStatus,
+)
 from hara_agent.method_sources import YamlBaselineCompiler
 from hara_agent.models import (
     MalfunctionCandidate, ReviewStatus, ScenarioCandidate,
@@ -457,6 +460,182 @@ def test_materialization_is_child_isolated_and_never_mutates_parent(method):
     scope = child.fact_provenance["scenario_atom_ids"]["applicable_scope"]
     assert scope["malfunction_id"] == "MF-1"
     assert scope["scenario_id"] == child.scenario_id
+
+
+def test_materialization_promotes_exact_fm_option_physics_with_method_authority(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = _parent()
+    synthesis_input = replace(_input(method), fm_scenario_template={
+        "template_id": "FM_TEMPLATE_TEST",
+        "source_governed_constraints": [],
+        "active_option": {
+            "source_option_id": "FM_TEMPLATE_TEST:OPTION:1",
+            "label": "front pedestrian",
+            "obj_type": "pedestrian", "obj_position": "front",
+            "obj_distance_m": 0.3, "obj_v_kph": 0.0,
+            "collision_type": "front",
+            "source": {
+                "source_asset": "raw/fm_scenario_templates.yaml",
+                "source_rule": "yaml!templates[test].required_scenarios[0]",
+                "source_hash": "abc",
+                "source_excerpt": "obj_type: pedestrian; obj_v_kph: 0.0",
+            },
+        },
+    })
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+
+    child, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=parent, provider_evidence={"request_id": "REQ-PHYSICS"},
+    )
+
+    assert child.facts["relative_distance_m"] == 0.3
+    assert child.facts["object_speed_kph"] == 0.0
+    assert child.facts["road_user_type"] == "PEDESTRIAN"
+    assert child.facts["collision_type"] == "FRONTAL"
+    assert child.facts["object_longitudinal_direction"] == "STATIONARY"
+    assert "ego_speed_kph" not in child.facts
+    for field in (
+        "relative_distance_m", "object_speed_kph", "road_user_type", "collision_type",
+    ):
+        assert child.fact_provenance[field]["origin"] == "METHOD_DEFINED"
+        assert child.fact_provenance[field]["approval"] == "FINALIZED"
+        assert child.fact_provenance[field]["source_refs"][0]["location"].startswith("yaml!")
+    projection = child.analysis_instance["method_physical_projection"]
+    assert projection["option_resolution"] == "EXACT_ACTIVE_OPTION"
+    assert not projection["conflicts"]
+
+
+def test_template_projection_keeps_unknown_motion_unknown_and_retains_conflicts(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = replace(
+        _parent(), facts={**_parent().facts, "object_speed_kph": 7.0},
+    )
+    synthesis_input = replace(_input(method), fm_scenario_template={
+        "template_id": "FM_TEMPLATE_TEST",
+        "source_governed_constraints": [],
+        "active_option": {
+            "source_option_id": "FM_TEMPLATE_TEST:OPTION:1",
+            "label": "moving pedestrian", "obj_type": "pedestrian",
+            "obj_position": "front", "obj_distance_m": 1.0,
+            "obj_v_kph": 5.0, "collision_type": "side",
+            "source": {
+                "source_rule": "yaml!templates[test].required_scenarios[0]",
+                "source_excerpt": "obj_v_kph: 5.0; collision_type: side",
+            },
+        },
+    })
+    assessment = service.validate_provider_payload(
+        synthesis_input, _valid_payload(synthesis_input),
+    )[0]
+
+    child, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=parent, provider_evidence={"request_id": "REQ-CONFLICT"},
+    )
+
+    assert child.facts["object_speed_kph"] == 7.0
+    assert "object_longitudinal_direction" not in child.facts
+    assert child.facts["collision_type"] == "SIDE"
+    conflicts = child.analysis_instance["method_physical_projection"]["conflicts"]
+    assert conflicts == [{
+        "field": "object_speed_kph", "existing_value": 7.0, "method_value": 5.0,
+    }]
+
+
+def test_template_option_matching_requires_one_unique_structured_match(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    base_input = _input(method)
+    object_set = next(
+        item for item in base_input.dimension_candidate_sets if item.dimension == "OBJECT"
+    )
+    candidate = replace(
+        object_set.candidates[0],
+        method_semantics={"object": {"type": "pedestrian", "position": "front"}},
+    )
+    template = {
+        "template_id": "FM_TEMPLATE_TEST", "active_option": {},
+        "source_governed_constraints": [
+            {
+                "source_option_id": "OPT-PED", "obj_type": "pedestrian",
+                "obj_position": "front", "collision_type": "front",
+            },
+            {
+                "source_option_id": "OPT-CAR", "obj_type": "passenger_car",
+                "obj_position": "front", "collision_type": "front",
+            },
+        ],
+    }
+    synthesis_input = replace(base_input, fm_scenario_template=template)
+
+    option, resolution, matches = service._selected_template_option(
+        synthesis_input, {candidate.atom_id: candidate},
+    )
+
+    assert option["source_option_id"] == "OPT-PED"
+    assert resolution == "UNIQUE_STRUCTURED_OPTION_MATCH"
+    assert matches == ["OPT-PED"]
+
+    ambiguous = replace(synthesis_input, fm_scenario_template={
+        **template,
+        "source_governed_constraints": [
+            *template["source_governed_constraints"],
+            {
+                "source_option_id": "OPT-PED-2", "obj_type": "pedestrian",
+                "obj_position": "front", "collision_type": "rear",
+            },
+        ],
+    })
+    option, resolution, matches = service._selected_template_option(
+        ambiguous, {candidate.atom_id: candidate},
+    )
+    assert option is None
+    assert resolution == "AMBIGUOUS_FM_TEMPLATE_OPTION"
+    assert matches == ["OPT-PED", "OPT-PED-2"]
+
+
+def test_child_speed_intersection_remains_a_range_without_automatic_point(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    parent = replace(
+        _parent(), facts={"ego_speed_constraint": {"min_kph": 0.0, "max_kph": 20.0}},
+    )
+    malfunction = {
+        **_malfunction(),
+        "description": "reversing reverse backing vehicle collision",
+        "functional_effect": "vehicle reverses unexpectedly",
+        "vehicle_level_hazard": "reverse collision",
+    }
+    synthesis_input = service.build_input(
+        malfunction=malfunction, parent=parent, assessment=_assessment(),
+        project_context=_project(),
+    )
+    selected = {
+        key: tuple(value)
+        for key, value in _valid_payload(synthesis_input)["variants"][0]["selected_atoms"].items()
+    }
+    selected["EGO_ACTION"] = ("FA033",)
+    selected["EGO_DYNAMICS"] = ("FA033",)
+    assessment = ScenarioSynthesisAssessment(
+        semantic_group_id=synthesis_input.semantic_group_id,
+        coverage_label=CoverageLabel.TYPICAL,
+        selected_atoms=selected,
+        semantic_rationale="Select explicit reverse <=10 km/h Method atom.",
+        context_refs=("PARENT.scenario", "METHOD.scenario_atom_catalog"),
+        validation_status=SynthesisValidationStatus.VALIDATED,
+    )
+
+    child, _ = service.materialize(
+        synthesis_input=synthesis_input, assessment=assessment,
+        parent=parent, provider_evidence={"request_id": "REQ-RANGE"},
+    )
+
+    assert child.facts["ego_speed_constraint"] == {"min_kph": 0.0, "max_kph": 10.0}
+    assert "ego_speed_kph" not in child.facts
+    metadata = child.fact_provenance["ego_speed_constraint"]
+    assert metadata["speed_intersection_kph"] == [0.0, 10.0]
+    assert len(metadata["source_refs"]) == 2
 
 
 def test_repeated_child_materialization_keeps_nested_facts_isolated(method):

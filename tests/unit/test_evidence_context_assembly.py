@@ -73,3 +73,56 @@ def test_duplicate_high_scores_do_not_consume_budget_before_other_fact():
     assert "A-1" in result.block_ids
     assert "B-1" in result.block_ids
     assert result.selected_characters <= 150
+
+
+def test_structural_speed_retrieval_adds_recall_without_expected_terms_or_values():
+    blocks = [
+        block("S-1", "车速 | 搜索车位0-30kph，控车范围0-7kph", "table[14].row[15]"),
+        block("S-2", "Active | vehicle speed <=20km/h", "table[9].row[4]"),
+        block("S-3", "no numeric speed here", "paragraph[1]", "paragraph"),
+    ]
+    spec = FactRetrievalSpec(
+        "speed.context", ("operational speed",), ("km/h", "kph"),
+        structural_kind="OPERATIONAL_SPEED_CANDIDATE",
+        exclusion_aliases=("Active",),
+    )
+
+    ranking = DeterministicEvidenceRetriever().rank(blocks, (spec,))[spec.fact_type]
+
+    assert [item.block_id for item in ranking] == ["S-1"]
+    assert "structure:numeric_speed_constraint" in ranking[0].reasons
+
+
+def test_categorical_allowed_set_retrieval_requires_table_member_separator():
+    blocks = [
+        block("D-1", "位姿状态 | 在驾驶位/不在驾驶位", "table[14].row[13]"),
+        block("D-2", "普通表格 | 单一值", "table[14].row[14]"),
+        block("D-3", "状态信号 | CDC | IPB/EPS/VDC", "table[7].row[18]"),
+    ]
+    spec = FactRetrievalSpec(
+        "driver", ("DRIVER_IN_VEHICLE",),
+        structural_kind="CATEGORICAL_ALLOWED_SET_CANDIDATE",
+    )
+
+    ranking = DeterministicEvidenceRetriever().rank(blocks, (spec,))[spec.fact_type]
+
+    assert [item.block_id for item in ranking] == ["D-1"]
+
+
+def test_driver_context_candidate_can_be_routed_by_conditional_shape_only():
+    blocks = [
+        block(
+            "D-1", "方式1、人驾且车辆进入区域，当车速≤20km/h时显示路径",
+            "paragraph[104]", "paragraph",
+        ),
+        block("D-2", "普通说明段落", "paragraph[105]", "paragraph"),
+    ]
+    spec = FactRetrievalSpec(
+        "driver", ("DRIVER_IN_VEHICLE",),
+        structural_kind="CATEGORICAL_ALLOWED_SET_CANDIDATE",
+    )
+
+    ranking = DeterministicEvidenceRetriever().rank(blocks, (spec,))[spec.fact_type]
+
+    assert [item.block_id for item in ranking] == ["D-1"]
+    assert ranking[0].reasons == ("structure:conditional_context",)

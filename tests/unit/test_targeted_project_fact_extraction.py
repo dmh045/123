@@ -87,5 +87,5 @@ def test_speed_prompt_accepts_mode_transition_as_direct_evidence():
 
     assert "activation, entry, transition" in client.request.system_prompt
     assert TargetedProjectFactExtractionAgent.PROMPT_VERSION.endswith(
-        "mode-transition-evidence"
+        "structural-recall"
     )

@@ -41,8 +41,8 @@ def test_finalized_speed_envelope_requires_source_and_valid_bounds():
         SpeedEnvelope("parking", 7, 5)
 
 
-def test_duplicate_operating_modes_fail_closed():
-    with pytest.raises(ValueError, match="at most one"):
+def test_conflicting_same_scope_operating_modes_fail_closed():
+    with pytest.raises(ValueError, match="conflicting scoped"):
         ItemDefinitionFacts(
             system_description="AVP",
             item_boundary="boundary",
@@ -52,6 +52,28 @@ def test_duplicate_operating_modes_fail_closed():
             ],
             sources=[source("item")],
         )
+
+
+def test_same_mode_can_preserve_distinct_contextual_envelopes():
+    facts = ItemDefinitionFacts(
+        system_description="AVP", item_boundary="boundary",
+        speed_envelopes=[
+            SpeedEnvelope(
+                "Active", 0, 24, condition="parking-space search",
+                sources=[source("table[12].row[2]")],
+            ),
+            SpeedEnvelope(
+                "active", 0, 7, condition="vehicle control",
+                sources=[source("table[14].row[15]")],
+            ),
+        ],
+        sources=[source("item")],
+    )
+
+    assert len(facts.speed_envelopes) == 2
+    assert [item.condition for item in facts.speed_envelopes] == [
+        "parking-space search", "vehicle control",
+    ]
 
 
 def test_speed_envelope_survives_checkpoint_style_round_trip():
