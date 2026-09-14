@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 
 
-SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v3"
+SCENARIO_SYNTHESIS_CONTRACT_VERSION = "scenario-synthesis-v4"
 
 
 class CandidateOrigin(str, Enum):
@@ -219,6 +219,7 @@ class ScenarioSynthesisInput:
     structured_semantic_query: dict[str, Any]
     coverage_plan: ScenarioCoveragePlan
     fm_scenario_template: dict[str, Any] = field(default_factory=dict)
+    contextual_speed: dict[str, Any] = field(default_factory=dict)
     contract_version: str = SCENARIO_SYNTHESIS_CONTRACT_VERSION
 
     def __post_init__(self) -> None:

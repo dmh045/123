@@ -331,6 +331,8 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild.add_argument("--output", type=Path, default=Path("output/HARA_P2C_Content_Cleanup.xlsx"))
     rebuild.add_argument("--causal-trace", type=Path)
     rebuild.add_argument("--audit-output-dir", type=Path)
+    rebuild.add_argument("--synthesis-candidates", type=Path)
+    rebuild.add_argument("--speed-context-audit", type=Path)
     scenario_output_audit = subparsers.add_parser(
         "scenario-output-quality-audit",
         help="Audit accepted synthesized child scenarios offline without a Provider",
@@ -726,6 +728,8 @@ def main(argv: list[str] | None = None) -> int:
             review_root=args.review_root,
             causal_trace_path=args.causal_trace,
             audit_output_dir=args.audit_output_dir,
+            synthesis_candidates_path=args.synthesis_candidates,
+            speed_context_audit_path=args.speed_context_audit,
         )
         print(json.dumps({
             "run_id": args.review_run_id,

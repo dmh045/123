@@ -87,5 +87,9 @@ def test_speed_prompt_accepts_mode_transition_as_direct_evidence():
 
     assert "activation, entry, transition" in client.request.system_prompt
     assert TargetedProjectFactExtractionAgent.PROMPT_VERSION.endswith(
-        "structural-recall"
+        "atomic-speed-shape"
+    )
+    assert "Never return a range string/list" in client.request.system_prompt
+    assert "stationary branch and a moving upper-bound branch" in (
+        client.request.system_prompt
     )

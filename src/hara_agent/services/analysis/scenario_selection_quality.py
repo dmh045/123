@@ -133,12 +133,73 @@ def _normalize_traffic_relation(value: Any) -> set[str]:
 class ScenarioSemanticQueryBuilder:
     """Build compact structured features without making engineering inferences."""
 
+    _SPEED_RANGE = re.compile(
+        r"(?:(?P<minimum>\d+(?:\.\d+)?)\s*(?:-|–|~|至|到)\s*)?"
+        r"(?P<maximum>\d+(?:\.\d+)?)\s*(?:km/h|kph|kmh)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _function_speed_constraints(
+        cls, function: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Extract only explicit speed bounds from typed Function fields.
+
+        The result carries source-field identity and numbers; it does not infer
+        an operating phase from product wording.
+        """
+        records: list[dict[str, Any]] = []
+        for field in ("odd_constraints", "preconditions"):
+            values = function.get(field, [])
+            if not isinstance(values, list):
+                continue
+            for index, value in enumerate(values):
+                text = str(value)
+                for match in cls._SPEED_RANGE.finditer(text):
+                    minimum = match.group("minimum")
+                    records.append({
+                        "min_kph": float(minimum) if minimum is not None else 0.0,
+                        "max_kph": float(match.group("maximum")),
+                        "source_field": f"FUNCTION.{field}[{index}]",
+                        "source_value": text,
+                    })
+        return records
+
+    @staticmethod
+    def _declared_operational_contexts(
+        *, function: dict[str, Any], parent: ScenarioCandidate,
+    ) -> list[dict[str, str]]:
+        """Collect explicit context labels without interpreting free text."""
+        facts = parent.facts if isinstance(parent.facts, dict) else {}
+        instance = (
+            parent.analysis_instance
+            if isinstance(parent.analysis_instance, dict) else {}
+        )
+        sources = (
+            ("FUNCTION.operational_context", function.get("operational_context")),
+            ("FUNCTION.operating_mode", function.get("operating_mode")),
+            ("PARENT.facts.operational_context", facts.get("operational_context")),
+            ("PARENT.analysis_instance.operational_context", instance.get("operational_context")),
+        )
+        result: list[dict[str, str]] = []
+        for source_field, raw in sources:
+            values = raw if isinstance(raw, list) else [raw]
+            for value in values:
+                normalized = "_".join(str(value or "").strip().upper().split())
+                if normalized:
+                    result.append({
+                        "context": normalized,
+                        "source_field": source_field,
+                    })
+        return result
+
     @staticmethod
     def build(
         *, malfunction: dict[str, Any], parent: ScenarioCandidate,
         assessment: dict[str, Any], project_context: dict[str, Any],
-        fm_template: dict[str, Any],
+        fm_template: dict[str, Any], function: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        function = function if isinstance(function, dict) else {}
         causal = assessment.get("causal_assessment", {})
         causal = causal if isinstance(causal, dict) else {}
         facts = parent.facts if isinstance(parent.facts, dict) else {}
@@ -314,6 +375,14 @@ class ScenarioSemanticQueryBuilder:
                 "causal": explicit_fields["CAUSAL.summary"],
             })))),
             "source_refs": list(explicit_fields),
+            "declared_operational_contexts": (
+                ScenarioSemanticQueryBuilder._declared_operational_contexts(
+                    function=function, parent=parent,
+                )
+            ),
+            "function_speed_constraints": (
+                ScenarioSemanticQueryBuilder._function_speed_constraints(function)
+            ),
             "project_odd_present": bool(project_context),
         }
 
@@ -477,7 +546,14 @@ class ScenarioDimensionApplicabilityService:
                 reason = "No explicit road-relative vehicle relation is present."
                 trigger = ("NO_ROAD_RELATION",)
         elif dimension == "OBJECT":
-            if objects:
+            if set(objects) == {"OBJECT_STATIC"} and not traffic:
+                status = ScenarioDimensionApplicability.NOT_APPLICABLE
+                reason = (
+                    "The source-grounded static physical object remains in scenario facts; "
+                    "no independent Method Exposure object atom is required."
+                )
+                trigger = ("OBJECT_STATIC", "STATIC_PHYSICAL_FACT_PRESERVED")
+            elif objects:
                 status = ScenarioDimensionApplicability.REQUIRED
                 reason = "Explicit structured or hazard-target evidence requires an object dimension."
                 trigger = objects

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import re
 from typing import Any
 
 
@@ -17,6 +18,61 @@ class EngineeringReportTextMapper:
     """
 
     _PENDING_VALUE = "Pending"
+    _CATEGORY_TEXT = {
+        "LOCATION_PARKING": "停车场内",
+        "LOCATION_MOTORWAY": "高速公路",
+        "LOCATION_EXPRESSWAY": "城市快速路",
+        "LOCATION_CITY": "城市道路",
+        "LOCATION_RURAL": "乡村道路",
+        "ACTION_PARK": "执行泊车",
+        "ACTION_REVERSE": "执行低速倒车",
+        "ACTION_STOP": "执行停车或制动",
+        "ACTION_HOLD": "执行驻车保持",
+        "ACTION_ACCELERATE": "执行加速",
+        "ACTION_TURN": "执行转向",
+        "OBJECT_PEDESTRIAN": "行人",
+        "OBJECT_CYCLIST": "骑行者",
+        "OBJECT_VEHICLE": "其他车辆",
+        "OBJECT_STATIC": "静态障碍物",
+        "OBJECT_OCCUPANT": "车辆乘员",
+        "TRAFFIC_FOLLOWING": "后方跟随车辆",
+        "TRAFFIC_ONCOMING": "对向交通参与者",
+        "TRAFFIC_CROSSING": "横穿交通参与者",
+        "TRAFFIC_CUT_IN": "切入车辆",
+        "TRAFFIC_REVERSE": "倒车路径内交通参与者",
+        "TRAFFIC_PARKING": "停车场内交通参与者",
+        "ROAD_SLOPE": "坡道路段",
+        "ROAD_LOW_FRICTION": "低附着路面",
+    }
+    _MODE_TEXT = {
+        "active": "激活",
+        "standby": "待机",
+        "override": "驾驶员接管",
+        "abort": "中止",
+        "finish": "完成",
+        "error": "故障",
+        "off": "关闭",
+    }
+    _VARIANT_TEXT = {
+        "typical": "代表场景",
+        "representative": "代表场景",
+        "boundary": "边界场景",
+        "extreme": "高要求场景",
+        "demanding": "高要求场景",
+    }
+    _CONTEXT_TEXT = {
+        "ENTRY": "进入功能阶段",
+        "CRUISE": "巡航阶段",
+        "MAXIMUM_SPEED_DURING_PARKING": "泊车阶段",
+        "PARKING": "泊车阶段",
+        "CONTROL": "车辆控制阶段",
+    }
+    _POSITION_TEXT = {
+        "front": "前方",
+        "rear": "后方",
+        "left": "左侧",
+        "right": "右侧",
+    }
     _EXPOSURE_DIMENSION_LABELS = {
         "WHERE": "场所",
         "ROAD": "道路条件",
@@ -31,20 +87,55 @@ class EngineeringReportTextMapper:
     def _has_reason(value: Any, token: str) -> bool:
         return token in str(value or "").upper()
 
-    @staticmethod
-    def _display_mode(mode: Any) -> str:
-        value = str(mode or "").strip()
-        return value.capitalize() if value else ""
+    @classmethod
+    def _display_mode(cls, mode: Any) -> str:
+        return cls._MODE_TEXT.get(str(mode or "").strip().casefold(), "")
 
     @staticmethod
-    def _speed_text(constraint: Any) -> str:
+    def _number(value: Any) -> str:
+        number = float(value)
+        return f"{number:g}"
+
+    @classmethod
+    def speed_text(cls, scenario: Any) -> str:
+        facts = getattr(scenario, "facts", {}) or {}
+        context = facts.get("speed_context_resolution", {})
+        if isinstance(context, Mapping) and str(context.get("status", "")).upper() == "SOURCE_CONFLICT":
+            expressions = [
+                str(item) for item in context.get("source_expressions", [])
+                if str(item).strip()
+            ]
+            if expressions:
+                return f"车速约束：来源存在冲突（{' / '.join(expressions)}），待确认"
+
+        point = facts.get("ego_speed_kph")
+        provenance = getattr(scenario, "fact_provenance", {}) or {}
+        point_provenance = provenance.get("ego_speed_kph", {})
+        if (
+            isinstance(point, (int, float)) and not isinstance(point, bool)
+            and isinstance(point_provenance, Mapping)
+            and str(point_provenance.get("approval", "")).upper() == "FINALIZED"
+        ):
+            return f"分析车速：{cls._number(point)} km/h"
+
+        constraint = facts.get("ego_speed_constraint")
         if not isinstance(constraint, Mapping):
             return ""
-        minimum = constraint.get("speed_min_kph")
-        maximum = constraint.get("speed_max_kph")
-        if minimum is None or maximum is None:
+        minimum = constraint.get("min_kph", constraint.get("speed_min_kph"))
+        maximum = constraint.get("max_kph", constraint.get("speed_max_kph"))
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (minimum, maximum)):
             return ""
-        return f"车辆速度为 {minimum:g}–{maximum:g} km/h"
+        minimum_value = float(minimum)
+        maximum_value = float(maximum)
+        if minimum_value == maximum_value:
+            return f"适用车速范围：{cls._number(maximum_value)} km/h"
+        display_kind = str(context.get("display_kind", "")) if isinstance(context, Mapping) else ""
+        if minimum_value == 0 and display_kind == "UPPER_BOUND":
+            return f"适用车速范围：不高于{cls._number(maximum_value)} km/h"
+        return (
+            f"适用车速范围：{cls._number(minimum_value)}–"
+            f"{cls._number(maximum_value)} km/h"
+        )
 
     @staticmethod
     def _dimensions(scenario: Any) -> Mapping[str, Any]:
@@ -53,76 +144,179 @@ class EngineeringReportTextMapper:
         return value if isinstance(value, Mapping) else {}
 
     @staticmethod
-    def _resolved_value(dimensions: Mapping[str, Any], name: str) -> str:
-        binding = dimensions.get(name, {})
-        if not isinstance(binding, Mapping):
-            return ""
-        if str(binding.get("resolution_status", "")).upper() != "RESOLVED":
-            return ""
-        value = str(binding.get("method_value", "") or "").strip()
-        return value.split("|", 1)[-1].strip() if "|" in value else value
+    def _categories(scenario: Any) -> set[str]:
+        instance = getattr(scenario, "analysis_instance", {}) or {}
+        query = instance.get("structured_semantic_query", {})
+        query = query if isinstance(query, Mapping) else {}
+        categories = {
+            str(item)
+            for field in (
+                "action_categories", "object_categories", "traffic_relations",
+                "road_relations", "location_categories",
+            )
+            for item in query.get(field, [])
+        }
+        facts = getattr(scenario, "facts", {}) or {}
+        object_value = str(
+            facts.get("object_type", facts.get("road_user_type", "")) or ""
+        ).casefold()
+        if any(token in object_value for token in ("pedestrian", "person", "行人")):
+            categories.add("OBJECT_PEDESTRIAN")
+        elif any(token in object_value for token in ("cycl", "bicycle", "骑行", "自行车")):
+            categories.add("OBJECT_CYCLIST")
+        elif any(token in object_value for token in ("vehicle", "car", "truck", "车辆", "汽车")):
+            categories.add("OBJECT_VEHICLE")
+        elif any(token in object_value for token in ("obstacle", "pillar", "cone", "障碍", "柱")):
+            categories.add("OBJECT_STATIC")
+        return categories
 
     @staticmethod
-    def _dimension_detail(dimensions: Mapping[str, Any], name: str) -> str:
-        if name not in dimensions:
-            return ""
-        binding = dimensions.get(name, {})
-        if not isinstance(binding, Mapping):
-            return ""
-        if str(binding.get("resolution_status", "")).upper() == "RESOLVED":
-            value = str(binding.get("method_value", "") or "").strip()
-            if "|" in value:
-                value = value.split("|", 1)[-1].strip()
-            return f"{name}={value}" if value else f"{name}=已解析"
-        labels = {
-            "WHERE": "场所未解析",
-            "ROAD": "道路条件未解析",
-            "EGO_ACTION": "自车动作未解析",
-            "EGO_X_ROAD": "自车与道路关系未解析",
-            "TRAFFIC_PATTERN": "交通关系/交通模式未解析",
-            "EGO_DYNAMICS": "自车动态未解析",
-            "OBJECT": "对象/交通参与者未解析",
-        }
-        return f"{name}={labels.get(name, '未解析')}"
+    def _chinese_source(value: Any) -> str:
+        text = str(value or "").strip().rstrip("。；;")
+        return text if re.search(r"[\u3400-\u9fff]", text) else ""
 
-    def scenario(self, scenario: Any) -> tuple[str, str]:
-        """Project supplied child facts without deriving new scenario semantics."""
+    @classmethod
+    def _first_category(cls, categories: set[str], names: tuple[str, ...]) -> str:
+        return next((cls._CATEGORY_TEXT[name] for name in names if name in categories), "")
+
+    @classmethod
+    def variant_text(cls, scenario: Any) -> str:
+        context = getattr(scenario, "context_resolution", {}) or {}
+        synthesis = context.get("scenario_synthesis", {})
+        raw = str(synthesis.get("coverage_label", "") if isinstance(synthesis, Mapping) else "")
+        planned = (
+            isinstance(synthesis, Mapping)
+            and synthesis.get("coverage_status") == "PLANNED_NOT_INSTANTIATED"
+        )
+        if not raw and not planned:
+            raw = str(getattr(scenario, "atomic_variant", "") or "").rsplit(":", 1)[-1]
+        if raw.casefold() in cls._VARIANT_TEXT:
+            return cls._VARIANT_TEXT[raw.casefold()]
+        intents = synthesis.get("coverage_intents", []) if isinstance(synthesis, Mapping) else []
+        labels = list(dict.fromkeys(
+            cls._VARIANT_TEXT.get(str(item).casefold(), "")
+            for item in intents
+            if cls._VARIANT_TEXT.get(str(item).casefold(), "")
+        ))
+        return f"计划覆盖：{' / '.join(labels)}" if labels else "受控分析场景"
+
+    @staticmethod
+    def coverage_variant_count(scenario: Any) -> int:
+        context = getattr(scenario, "context_resolution", {}) or {}
+        synthesis = context.get("scenario_synthesis", {})
+        value = synthesis.get("desired_variant_count", 1) if isinstance(synthesis, Mapping) else 1
+        return int(value) if isinstance(value, int) and value > 0 else 1
+
+    @classmethod
+    def _context_text(cls, scenario: Any) -> str:
         facts = getattr(scenario, "facts", {}) or {}
-        dimensions = self._dimensions(scenario)
-        where = self._resolved_value(dimensions, "WHERE")
-        action = self._resolved_value(dimensions, "EGO_ACTION")
-        dynamics = self._resolved_value(dimensions, "EGO_DYNAMICS")
-        object_value = self._resolved_value(dimensions, "OBJECT")
-        base = where or str(
-            getattr(scenario, "operating_scenario", "") or ""
-        ).strip().rstrip("。；;")
-        mode = self._display_mode(getattr(scenario, "operating_mode", "") or facts.get("operating_mode", ""))
-        parts = [
-            part for part in (
-                f"场所：{base}" if base else "",
-                f"AVP 处于 {mode} 状态" if mode else "",
-                f"自车动作：{action}" if action else "",
-                f"自车动态：{dynamics}" if dynamics else "",
-                f"对象：{object_value}" if object_value else "",
-                self._speed_text(facts.get("ego_speed_constraint")),
-            ) if part
-        ]
-        operational = "；".join(parts) + "。" if parts else "运行场景未提供。"
+        speed = facts.get("speed_context_resolution", {})
+        selected = str(speed.get("selected_context", "")) if isinstance(speed, Mapping) else ""
+        return cls._CONTEXT_TEXT.get(selected, "")
 
-        details = [
-            value for value in (
-                self._dimension_detail(dimensions, name)
-                for name in (
-                    "WHERE", "ROAD", "EGO_ACTION", "EGO_X_ROAD",
-                    "TRAFFIC_PATTERN", "EGO_DYNAMICS", "OBJECT",
-                )
-            ) if value
-        ]
-        if facts.get("weather_conditions"):
-            details.append(f"天气条件：{facts['weather_conditions']}")
-        if facts.get("road_surface_conditions") and not self._resolved_value(dimensions, "ROAD"):
-            details.append(f"路面条件：{facts['road_surface_conditions']}")
-        return operational, "；".join(details) + "。" if details else "未提供额外场景上下文。"
+    @classmethod
+    def _object_position(cls, scenario: Any) -> str:
+        facts = getattr(scenario, "facts", {}) or {}
+        return cls._POSITION_TEXT.get(
+            str(facts.get("object_position", "")).strip().casefold(), ""
+        )
+
+    def object_interaction_summary(self, scenario: Any) -> str:
+        """Render only structured object and interaction facts."""
+        categories = self._categories(scenario)
+        object_value = self._first_category(categories, (
+            "OBJECT_PEDESTRIAN", "OBJECT_CYCLIST", "OBJECT_VEHICLE",
+            "OBJECT_STATIC", "OBJECT_OCCUPANT",
+        ))
+        traffic = self._first_category(categories, (
+            "TRAFFIC_FOLLOWING", "TRAFFIC_ONCOMING", "TRAFFIC_CROSSING",
+            "TRAFFIC_CUT_IN", "TRAFFIC_REVERSE", "TRAFFIC_PARKING",
+        ))
+        values = []
+        if object_value:
+            values.append(f"对象：{object_value}")
+        position = self._object_position(scenario)
+        if position:
+            values.append(f"位置：{position}")
+        if traffic:
+            values.append(f"交互：{traffic}")
+        return "；".join(values)
+
+    def scenario(self, scenario: Any, *, variant_count: int = 1) -> tuple[str, str]:
+        """Render validated structured facts without exposing Method vocabulary."""
+        facts = getattr(scenario, "facts", {}) or {}
+        categories = self._categories(scenario)
+        location = self._chinese_source(
+            getattr(scenario, "operating_scenario", "")
+        ) or self._first_category(categories, (
+            "LOCATION_PARKING", "LOCATION_CITY", "LOCATION_EXPRESSWAY",
+            "LOCATION_MOTORWAY", "LOCATION_RURAL",
+        ))
+        if not location:
+            raw_location = str(getattr(scenario, "operating_scenario", "") or "").casefold()
+            location = "停车场内" if any(token in raw_location for token in ("parking", "garage", "parkhaus")) else "项目运行区域内"
+        mode = self._display_mode(
+            getattr(scenario, "operating_mode", "") or facts.get("operating_mode", "")
+        )
+        action = self._first_category(categories, (
+            "ACTION_PARK", "ACTION_REVERSE", "ACTION_STOP", "ACTION_HOLD",
+            "ACTION_ACCELERATE", "ACTION_TURN",
+        ))
+        traffic = self._first_category(categories, (
+            "TRAFFIC_FOLLOWING", "TRAFFIC_ONCOMING", "TRAFFIC_CROSSING",
+            "TRAFFIC_CUT_IN", "TRAFFIC_REVERSE", "TRAFFIC_PARKING",
+        ))
+        object_value = self._first_category(categories, (
+            "OBJECT_PEDESTRIAN", "OBJECT_CYCLIST", "OBJECT_VEHICLE",
+            "OBJECT_STATIC", "OBJECT_OCCUPANT",
+        ))
+        speed = self.speed_text(scenario)
+        context_text = self._context_text(scenario)
+        position = self._object_position(scenario)
+
+        clauses = [location]
+        if mode:
+            clauses.append(f"AVP处于{mode}状态")
+        if context_text:
+            clauses.append(context_text)
+        if action:
+            clauses.append(f"车辆{action}")
+        if traffic:
+            clauses.append(f"周边存在{traffic}")
+        elif object_value:
+            clauses.append(f"周边{position}存在{object_value}" if position else f"周边存在{object_value}")
+        if speed:
+            clauses.append(speed.replace("：", "为", 1))
+        operational = "，".join(clauses) + "。"
+
+        details = []
+        road = self._first_category(categories, ("ROAD_LOW_FRICTION", "ROAD_SLOPE"))
+        if road:
+            details.append(f"道路条件：{road}")
+        if object_value:
+            details.append(f"交通对象：{object_value}")
+        if position:
+            details.append(f"对象位置：{position}")
+        if traffic:
+            details.append(f"交通关系：{traffic}")
+        if speed:
+            details.append(speed)
+        details.append(f"分析变体：{self.variant_text(scenario)}")
+        if variant_count > 1:
+            details.append(
+                f"本逻辑组计划覆盖{variant_count}个分析变体；当前为综合前审阅投影"
+            )
+        return operational, "；".join(details) + "。"
+
+    @classmethod
+    def hazardous_event(cls, value: Any) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"(?<![A-Za-z])EPB(?![A-Za-z])", "电子驻车制动", text, flags=re.IGNORECASE)
+        text = re.sub(r"(?<![A-Za-z])System\s+OK(?![A-Za-z])", "系统正常", text, flags=re.IGNORECASE)
+        for raw, display in cls._MODE_TEXT.items():
+            text = re.sub(rf"(?<![A-Za-z]){re.escape(raw)}(?![A-Za-z])", display, text, flags=re.IGNORECASE)
+        clauses = [item.strip() for item in re.split(r"[；;]", text) if item.strip()]
+        return "；".join(dict.fromkeys(clauses)).rstrip("。") + "。" if clauses else "待危险事件确认。"
 
     def pending_value(self, evidence: Any) -> str:
         return "Not applicable" if _status(evidence) == "NOT_APPLICABLE" else self._PENDING_VALUE
@@ -131,7 +325,7 @@ class EngineeringReportTextMapper:
         if str(value or "").strip():
             return str(value)
         if _status(severity) != "FINALIZED":
-            return "Pending（上游风险评定未完成）"
+            return "待S评定完成后确定"
         return self._PENDING_VALUE
 
     def severity_rationale(self, evidence: Any, trace: Mapping[str, Any]) -> str:
@@ -173,39 +367,44 @@ class EngineeringReportTextMapper:
             coupling = coupling if isinstance(coupling, Mapping) else {}
             branch = str(coupling.get("policy_branch", "") or "")
             branch_text = {
-                "all_e4": "有效 atom 均为 E4，按 FUSA v1 all-E4 规则",
-                "e3_e4_mix": "有效 atom 包含 E3 与 E4，按 FUSA v1 混合高等级规则",
-                "min_when_unequal": "有效 atom 等级不相同，按 FUSA v1 取较低等级",
-                "same_independent_minus_one": "同等级 atom 为 independent，按 FUSA v1 降一级",
-                "same_coupled_no_change": "同等级 atom 为 coupled，按 FUSA v1 不降级",
+                "all_e4": "有效方法要素均为 E4，按 FUSA v1 全 E4 规则",
+                "e3_e4_mix": "有效方法要素包含 E3 与 E4，按 FUSA v1 混合高等级规则",
+                "min_when_unequal": "有效方法要素等级不相同，按 FUSA v1 取较低等级",
+                "same_independent_minus_one": "同等级方法要素相互独立，按 FUSA v1 降一级",
+                "same_coupled_no_change": "同等级方法要素存在耦合，按 FUSA v1 不降级",
             }.get(branch, "按已记录的 FUSA v1 聚合规则")
             domain_text = (
                 f"请求 {requested} 域，实际使用 {actual} 域"
                 if requested and actual else "已记录 Exposure 域"
             )
             fallback = "；请求域无可用值，已回退到实际域" if trace.get("scenario_level_fallback") else ""
-            atom_text = "、".join(atoms) if atoms else "无 atom（S0 短路）"
+            atom_text = "、".join(atoms) if atoms else "无方法要素（S0 短路）"
             final_value = str(trace.get("result", getattr(evidence, "value", "")) or "")
             return f"{domain_text}；{atom_text}；{branch_text}{fallback}，最终 {final_value}。"
         readiness = trace.get("input_readiness", {})
         readiness = readiness if isinstance(readiness, Mapping) else {}
         readiness_status = str(readiness.get("status", ""))
         relevant = readiness.get("unresolved_relevant_dimensions", [])
-        relevant_text = "、".join(str(item) for item in relevant) if isinstance(relevant, list) else ""
+        relevant_text = "、".join(
+            self._EXPOSURE_DIMENSION_LABELS.get(
+                str(item).strip().upper(), "其他场景维度"
+            )
+            for item in relevant
+        ) if isinstance(relevant, list) else ""
         if readiness_status == "PENDING_RELEVANT_DIMENSION":
             return (
-                f"当前 atom 集不足以确定 E；{relevant_text or '仍有'} Exposure 相关场景维度未解析，"
-                "其允许的 source-defined atom 可改变当前结果，E 暂不评定。"
+                f"当前方法要素集合不足以确定 E；{relevant_text or '仍有'}相关场景维度未解析，"
+                "其源定义方法要素可能改变当前结果，E 暂不评定。"
             )
         if readiness_status == "PENDING_ATOM_BINDING":
-            return "已解析场景维度的 atom 绑定不完整或未纳入当前 atom 集，E 暂不评定。"
+            return "已解析场景维度的方法要素绑定不完整或未纳入当前集合，E 暂不评定。"
         if readiness_status == "PENDING_AMBIGUOUS_ATOM_SET":
-            return "Exposure 相关场景维度存在多个未消解的 atom 候选，E 暂不评定。"
+            return "暴露度相关场景维度存在多个未消解的方法要素候选，E 暂不评定。"
         if readiness_status == "SOURCE_CONFLICT":
-            return "Exposure 的 MethodContract 来源或组件域存在冲突，E 暂不评定。"
+            return "暴露度的方法契约来源或组件域存在冲突，E 暂不评定。"
         reason = trace.get("missing_method_semantics", "") or getattr(evidence, "review_reason", "")
         if self._has_reason(reason, "EXPOSURE_DIMENSION_COVERAGE"):
-            return "Exposure 场景维度覆盖规则未定义，E 暂不评定。"
+            return "暴露度场景维度覆盖规则未定义，E 暂不评定。"
         return "缺少 E 评定所需方法语义或项目事实，E 暂不评定。"
 
     def controllability_rationale(self, evidence: Any, trace: Mapping[str, Any]) -> str:
@@ -213,7 +412,7 @@ class EngineeringReportTextMapper:
             return "已按当前方法完成 C 评定。"
         reason = trace.get("decision_status", "") or getattr(evidence, "review_reason", "")
         if self._has_reason(reason, "METHOD_BRANCH_UNRESOLVED") or self._has_reason(reason, "UNKNOWN_BRANCH_POLICY_UNSPECIFIED"):
-            return "UNKNOWN 分支策略未定义，C 暂不评定。"
+            return "未知分支策略未定义，C 暂不评定。"
         return "缺少 C 评定所需控制上下文或方法分支，C 暂不评定。"
 
     def asil_rationale(self, evidence: Any, trace: Mapping[str, Any]) -> str:

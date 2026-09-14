@@ -27,9 +27,13 @@ def _context_identity(context: dict[str, str]) -> str:
     if not context:
         return "context.default"
     material = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    readable = ".".join(
-        f"{_token(key)}.{_token(value)}" for key, value in sorted(context.items()) if value
-    )
+    try:
+        readable = ".".join(
+            f"{_token(key)}.{_token(value)}"
+            for key, value in sorted(context.items()) if value
+        )
+    except ValueError:
+        readable = ""
     if readable and len(readable) <= 80:
         return "context." + readable
     return "context.sha256-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]

@@ -17,7 +17,7 @@ from .item_supplement_agent import RoutedDocumentBlocks
 class TargetedProjectFactExtractionAgent:
     """One bounded schema-guided call for one Project Fact category."""
 
-    PROMPT_VERSION = "targeted-project-facts-v3-structural-recall"
+    PROMPT_VERSION = "targeted-project-facts-v4-atomic-speed-shape"
 
     def __init__(self, client: LLMClient, normalizer: ProjectFactNormalizer | None = None):
         self.client = client
@@ -66,7 +66,16 @@ class TargetedProjectFactExtractionAgent:
                 "OPERATIONAL_SPEED for every structurally routed speed result. A "
                 "speed spec may have multiple atomic FOUND results for distinct "
                 "contextual envelopes, but the structural catch-all must not repeat "
-                "a fact already mapped to a mode-specific spec. "
+                "a fact already mapped to a mode-specific spec. Every FOUND speed "
+                "result must use JSON numbers: LE/LT/EQ has one numeric value and "
+                "omits value_max; RANGE has one numeric value and one numeric "
+                "value_max in the same result. Never return a range string/list or "
+                "separate lower and upper results. For a structural speed spec with "
+                "empty context_hints, operating_mode and condition must be concise, "
+                "non-empty identifiers grounded only in the explicit source context. "
+                "When one source expresses a stationary branch and a moving upper-"
+                "bound branch for the same transition, return only the moving upper "
+                "bound as the operating envelope; do not emit duplicate scopes. "
                 "For RISK_FACT, return exactly one scalar value, the exact Method "
                 "Contract unit (or an empty unit), and a string-to-string context object. "
                 "For a structurally routed categorical allowed set, emit one atomic "
@@ -81,6 +90,10 @@ class TargetedProjectFactExtractionAgent:
                 "非结构候选的正文必须包含当前spec的任一alias；不得选择support-only块。"
             ),
             user_prompt=(
+                "For mode-specific speed specs, copy the first context_hint into "
+                "operating_mode and condition. For a structural speed spec whose "
+                "context_hints are empty, derive both non-empty identifiers only "
+                "from the explicit source context. "
                 "严格返回JSON对象 {\"results\":[...]}。每个spec至少返回一项，status只能是FOUND或NOT_FOUND；"
                 "仅在存在多个独立原子事实时可为同一spec返回多个FOUND，NOT_FOUND必须单独一项。"
                 "FOUND需返回该spec的required_fields及fact_type/status；NOT_FOUND只返回fact_type/status。"

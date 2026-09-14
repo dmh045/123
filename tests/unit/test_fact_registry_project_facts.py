@@ -44,3 +44,22 @@ def test_registry_snapshot_is_deterministic():
     first = build_project_evidence_registry(facts).snapshot()
     second = build_project_evidence_registry(facts).snapshot()
     assert first == second
+
+
+def test_registry_hashes_non_ascii_risk_context_identity():
+    source = SourceRef("item_definition", "ItemDef.docx", "row[2]", "driver in vehicle")
+    facts = ItemDefinitionFacts(
+        system_description="system", item_boundary="vehicle",
+        risk_facts=[RiskFact(
+            "RF-DRIVER", "DRIVER_IN_VEHICLE", "present",
+            context={"driver location": "驾驶位"}, source_refs=[source],
+        )],
+        sources=[source],
+    )
+
+    records = build_project_evidence_registry(facts).records
+
+    assert len(records) == 1
+    assert records[0].evidence_ref.startswith(
+        "PROJECT.risk.driver_in_vehicle.context.sha256-"
+    )

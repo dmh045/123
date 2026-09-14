@@ -92,6 +92,248 @@ class ConstrainedScenarioSynthesisService:
         )
 
     @staticmethod
+    def _speed_scope(value: Any) -> str:
+        """Normalize an already structured scope; never classify prose."""
+        normalized = re.sub(
+            r"[^A-Z0-9]+", "_", str(value or "").strip().upper(),
+        ).strip("_")
+        for suffix in ("_SPEED_RANGE", "_SPEED", "_VEHICLE_SPEED"):
+            if normalized.endswith(suffix):
+                normalized = normalized[:-len(suffix)]
+                break
+        return normalized
+
+    @classmethod
+    def _envelope_scopes(cls, envelope: dict[str, Any]) -> set[str]:
+        return {
+            scope for scope in (
+                cls._speed_scope(envelope.get("operating_mode")),
+                cls._speed_scope(envelope.get("condition")),
+            ) if scope
+        }
+
+    @staticmethod
+    def _speed_source_refs(envelope: dict[str, Any]) -> list[dict[str, str]]:
+        result = []
+        for source in envelope.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+            result.append({
+                "source_type": str(source.get("source_type", "")),
+                "source_id": str(source.get("source_id", "")),
+                "location": str(source.get("location", "")),
+                "excerpt": str(source.get("excerpt", "")),
+            })
+        return result
+
+    @classmethod
+    def _speed_display_kind(cls, envelope: dict[str, Any]) -> str:
+        source_text = " ".join(
+            item.get("excerpt", "") for item in cls._speed_source_refs(envelope)
+        )
+        if re.search(r"\d+(?:\.\d+)?\s*(?:-|–|~|至|到)\s*\d", source_text):
+            return "RANGE"
+        if any(token in source_text for token in ("≤", "<=", "不高于", "最高", "最大")):
+            return "UPPER_BOUND"
+        minimum = envelope.get("speed_min_kph")
+        return "UPPER_BOUND" if minimum in (None, 0, 0.0) else "RANGE"
+
+    @classmethod
+    def _speed_expression(cls, envelope: dict[str, Any]) -> str:
+        minimum = envelope.get("speed_min_kph")
+        maximum = envelope.get("speed_max_kph")
+        if cls._speed_display_kind(envelope) == "UPPER_BOUND" and maximum is not None:
+            return f"不高于{float(maximum):g} km/h"
+        if minimum is not None and maximum is not None:
+            return f"{float(minimum):g}–{float(maximum):g} km/h"
+        if maximum is not None:
+            return f"不高于{float(maximum):g} km/h"
+        return f"不低于{float(minimum):g} km/h"
+
+    @classmethod
+    def _contextual_speed(
+        cls, *, parent: ScenarioCandidate, project_context: dict[str, Any],
+        query: dict[str, Any],
+    ) -> dict[str, Any]:
+        envelopes = [
+            item for item in project_context.get("speed_envelopes", [])
+            if isinstance(item, dict)
+            and str(item.get("status", "")).upper() == "FINALIZED"
+        ]
+        if not envelopes:
+            return {
+                "status": "NO_FINALIZED_CONTEXT",
+                "classification": "NO_CONTEXTUAL_SOURCE",
+            }
+
+        def envelope_range(item: dict[str, Any]) -> tuple[Any, Any]:
+            return item.get("speed_min_kph"), item.get("speed_max_kph")
+
+        scoped: list[dict[str, Any]] = []
+        selected_context = ""
+        match_basis = ""
+        constraints = [
+            item for item in query.get("function_speed_constraints", [])
+            if isinstance(item, dict)
+        ]
+        for constraint in constraints:
+            matching = [
+                envelope for envelope in envelopes
+                if envelope_range(envelope) == (
+                    constraint.get("min_kph"), constraint.get("max_kph")
+                )
+            ]
+            specific = [
+                envelope for envelope in matching
+                if cls._envelope_scopes(envelope) - {"ACTIVE", "GLOBAL", "PROJECT"}
+            ]
+            if specific:
+                matching = specific
+            if matching:
+                scoped.extend(matching)
+                match_basis = str(constraint.get("source_field", "FUNCTION_SPEED_CONSTRAINT"))
+        scoped = list({id(item): item for item in scoped}.values())
+
+        declared = [
+            item for item in query.get("declared_operational_contexts", [])
+            if isinstance(item, dict) and str(item.get("context", ""))
+        ]
+        specific_contexts = [
+            cls._speed_scope(item["context"]) for item in declared
+            if cls._speed_scope(item["context"]) not in {"ACTIVE", "GLOBAL", "PROJECT"}
+        ]
+        if not scoped and specific_contexts:
+            for context in specific_contexts:
+                matches = [
+                    envelope for envelope in envelopes
+                    if context in cls._envelope_scopes(envelope)
+                ]
+                if matches:
+                    scoped.extend(matches)
+                    selected_context = context
+            if scoped:
+                match_basis = "EXPLICIT_STRUCTURED_OPERATIONAL_CONTEXT"
+
+        actions = set(map(str, query.get("action_categories", [])))
+        compatible_contexts: tuple[str, ...] = ()
+        if "ACTION_PARK" in actions:
+            compatible_contexts = ("PARKING",)
+        elif "ACTION_REVERSE" in actions:
+            compatible_contexts = ("PARKING",)
+        elif actions & {"ACTION_STOP", "ACTION_HOLD", "ACTION_ACCELERATE", "ACTION_TURN"}:
+            compatible_contexts = ("CONTROL",)
+        if not scoped and compatible_contexts:
+            for context in compatible_contexts:
+                matches = [
+                    envelope for envelope in envelopes
+                    if context in cls._envelope_scopes(envelope)
+                ]
+                if matches:
+                    scoped.extend(matches)
+                    selected_context = context
+            if scoped:
+                match_basis = "STRUCTURED_ACTION_CONTEXT_COMPATIBILITY"
+
+        if not scoped:
+            parent_scope = cls._speed_scope(parent.operating_mode)
+            scoped = [
+                envelope for envelope in envelopes
+                if parent_scope in cls._envelope_scopes(envelope)
+                and cls._envelope_scopes(envelope) <= {
+                    parent_scope, "GLOBAL", "PROJECT",
+                }
+            ]
+            selected_context = parent_scope
+            if scoped:
+                match_basis = "PARENT_STATE_LEVEL_ENVELOPE"
+        if not scoped:
+            parent_minimum, parent_maximum = cls._speed_envelope(parent)
+            return {
+                "status": "PARENT_FALLBACK",
+                "classification": "PARENT_BROAD_RANGE_FALLBACK",
+                "requested_contexts": specific_contexts,
+                "min_kph": parent_minimum,
+                "max_kph": parent_maximum,
+            }
+
+        scoped = list({id(item): item for item in scoped}.values())
+        selected_scopes = sorted(set().union(*(
+            cls._envelope_scopes(item) for item in scoped
+        )))
+        if not selected_context:
+            selected_context = next(
+                (item for item in selected_scopes if item not in {"ACTIVE", "GLOBAL", "PROJECT"}),
+                selected_scopes[0] if selected_scopes else "",
+            )
+
+        ranges = {
+            (item.get("speed_min_kph"), item.get("speed_max_kph"))
+            for item in scoped
+        }
+        source_refs = [
+            source for envelope in scoped for source in cls._speed_source_refs(envelope)
+        ]
+        expressions = list(dict.fromkeys(cls._speed_expression(item) for item in scoped))
+        if len(ranges) != 1:
+            return {
+                "status": "SOURCE_CONFLICT",
+                "classification": "SOURCE_CONFLICT",
+                "selected_context": selected_context,
+                "selected_scopes": selected_scopes,
+                "match_basis": match_basis,
+                "source_expressions": expressions,
+                "source_refs": source_refs,
+            }
+        minimum, maximum = next(iter(ranges))
+        parent_minimum, parent_maximum = cls._speed_envelope(parent)
+        lowers = [float(value) for value in (minimum, parent_minimum) if value is not None]
+        uppers = [float(value) for value in (maximum, parent_maximum) if value is not None]
+        resolved_minimum = max(lowers) if lowers else None
+        resolved_maximum = min(uppers) if uppers else None
+        if (
+            resolved_minimum is not None and resolved_maximum is not None
+            and resolved_minimum > resolved_maximum
+        ):
+            return {
+                "status": "SOURCE_CONFLICT",
+                "classification": "SOURCE_CONFLICT",
+                "selected_context": selected_context,
+                "selected_scopes": selected_scopes,
+                "match_basis": match_basis,
+                "source_expressions": expressions,
+                "source_refs": source_refs,
+                "reason": "PARENT_AND_CONTEXT_SPEED_RANGES_DO_NOT_INTERSECT",
+            }
+        display_kinds = {cls._speed_display_kind(item) for item in scoped}
+        broad_state_fallback = not set(selected_scopes) - {
+            "ACTIVE", "GLOBAL", "PROJECT",
+        }
+        return {
+            "status": "RESOLVED",
+            "classification": (
+                "PARENT_BROAD_RANGE_FALLBACK"
+                if broad_state_fallback else "CONTEXTUAL_SPEED_CONSUMED"
+            ),
+            "selected_context": selected_context,
+            "selected_scopes": selected_scopes,
+            "match_basis": match_basis,
+            "min_kph": resolved_minimum,
+            "max_kph": resolved_maximum,
+            "display_kind": next(iter(display_kinds)) if len(display_kinds) == 1 else "RANGE",
+            "source_expressions": expressions,
+            "source_refs": source_refs,
+        }
+
+    @classmethod
+    def _effective_speed_envelope(
+        cls, parent: ScenarioCandidate, query: dict[str, Any],
+    ) -> tuple[float | None, float | None]:
+        contextual = query.get("contextual_speed", {})
+        if isinstance(contextual, dict) and contextual.get("status") == "RESOLVED":
+            return contextual.get("min_kph"), contextual.get("max_kph")
+        return cls._speed_envelope(parent)
+
+    @staticmethod
     def _speed_range(atom: dict[str, Any]) -> tuple[float | None, float | None] | None:
         raw = atom.get("speed_range_kph")
         if not isinstance(raw, (list, tuple)) or len(raw) != 2:
@@ -331,7 +573,7 @@ class ConstrainedScenarioSynthesisService:
         filled = tuple(dict.fromkeys(map(str, atom.get("filled_dimensions", []))))
         if not filled or any(dimension not in self.dimensions for dimension in filled):
             return False, "COMPOUND_DIMENSION_UNAVAILABLE"
-        if not self._speed_compatible(atom, self._speed_envelope(parent)):
+        if not self._speed_compatible(atom, self._effective_speed_envelope(parent, query)):
             return False, "ODD_SPEED_INCOMPATIBLE"
         if not self._slope_compatible(atom, project_context):
             return False, "ODD_SLOPE_INCOMPATIBLE"
@@ -400,7 +642,7 @@ class ConstrainedScenarioSynthesisService:
         result: dict[str, list[dict[str, Any]]] = {}
         if not relations:
             return result
-        envelope = self._speed_envelope(parent)
+        envelope = self._effective_speed_envelope(parent, query)
         for atom in self.catalog:
             dimensions = tuple(map(str, atom.get("filled_dimensions", [])))
             if "TRAFFIC_PATTERN" in dimensions or not dimensions:
@@ -466,7 +708,7 @@ class ConstrainedScenarioSynthesisService:
         assessment: dict[str, Any], project_context: dict[str, Any],
         query: dict[str, Any], fm_template: dict[str, Any],
     ) -> tuple[ScenarioAtomCandidateSet, ...]:
-        envelope = self._speed_envelope(parent)
+        envelope = self._effective_speed_envelope(parent, query)
         decisions = {
             dimension: self.binding_policy.decide(parent, dimension, envelope)
             for dimension in self.dimensions
@@ -869,12 +1111,18 @@ class ConstrainedScenarioSynthesisService:
     def build_input(
         self, *, malfunction: dict[str, Any], parent: ScenarioCandidate,
         assessment: dict[str, Any], project_context: dict[str, Any],
+        function: dict[str, Any] | None = None,
     ) -> ScenarioSynthesisInput:
         fm_template = self._fm_template_evidence(malfunction, parent)
         query = ScenarioSemanticQueryBuilder.build(
             malfunction=malfunction, parent=parent, assessment=assessment,
             project_context=project_context, fm_template=fm_template,
+            function=function,
         )
+        contextual_speed = self._contextual_speed(
+            parent=parent, project_context=project_context, query=query,
+        )
+        query["contextual_speed"] = contextual_speed
         query["traffic_relations_represented_elsewhere"] = (
             self._traffic_representation_elsewhere(query, parent)
         )
@@ -922,6 +1170,7 @@ class ConstrainedScenarioSynthesisService:
             },
             "coverage_plan": coverage_plan.to_dict(),
             "fm_template_id": fm_template.get("template_id", ""),
+            "contextual_speed": contextual_speed,
         }
         group_id = "SYNTH-" + hashlib.sha256(
             self._canonical_json(signature).encode("utf-8")
@@ -940,6 +1189,7 @@ class ConstrainedScenarioSynthesisService:
             structured_semantic_query=query,
             coverage_plan=coverage_plan,
             fm_scenario_template=fm_template,
+            contextual_speed=contextual_speed,
         )
 
     def logical_candidate_registry(
@@ -1259,13 +1509,19 @@ class ConstrainedScenarioSynthesisService:
             )
             if conflicts:
                 reasons.append(f"COMPOUND_ATOM_CONFLICT:{atom_id}:{','.join(conflicts)}")
-        parent = synthesis_input.parent_scenario
-        parent_facts = parent.get("facts", {}) if isinstance(parent, dict) else {}
-        envelope_raw = parent_facts.get("ego_speed_constraint", {})
-        envelope = (
-            envelope_raw.get("min_kph", envelope_raw.get("speed_min_kph")),
-            envelope_raw.get("max_kph", envelope_raw.get("speed_max_kph")),
-        ) if isinstance(envelope_raw, dict) else (None, None)
+        contextual_speed = synthesis_input.contextual_speed
+        if contextual_speed.get("status") == "RESOLVED":
+            envelope = (
+                contextual_speed.get("min_kph"), contextual_speed.get("max_kph"),
+            )
+        else:
+            parent = synthesis_input.parent_scenario
+            parent_facts = parent.get("facts", {}) if isinstance(parent, dict) else {}
+            envelope_raw = parent_facts.get("ego_speed_constraint", {})
+            envelope = (
+                envelope_raw.get("min_kph", envelope_raw.get("speed_min_kph")),
+                envelope_raw.get("max_kph", envelope_raw.get("speed_max_kph")),
+            ) if isinstance(envelope_raw, dict) else (None, None)
         for atom_id in selected_union:
             atom = self.by_id.get(atom_id)
             if atom is not None and not self._speed_compatible(atom, envelope):
@@ -1776,6 +2032,15 @@ class ConstrainedScenarioSynthesisService:
         )
         facts = deepcopy(parent.facts)
         facts["method_scenario_dimensions"] = bindings
+        contextual_speed = deepcopy(synthesis_input.contextual_speed)
+        if contextual_speed:
+            facts["speed_context_resolution"] = contextual_speed
+        if contextual_speed.get("status") == "RESOLVED":
+            facts["ego_speed_constraint"] = {
+                "min_kph": contextual_speed.get("min_kph"),
+                "max_kph": contextual_speed.get("max_kph"),
+                "unit": "km/h",
+            }
         facts["scenario_atom_ids"] = list(dict.fromkeys(
             selected_candidates[atom_id].canonical_atom_id
             for dimension in self.dimensions
@@ -1800,6 +2065,16 @@ class ConstrainedScenarioSynthesisService:
             "hazardous_event_id": synthesis_input.hazardous_event_id,
         }
         provenance = deepcopy(parent.fact_provenance)
+        if contextual_speed.get("status") == "RESOLVED":
+            provenance["ego_speed_constraint"] = {
+                "provenance": FactProvenance.PROJECT_INPUT.value,
+                "origin": "PROJECT_DEFINED",
+                "approval": ReviewStatus.FINALIZED.value,
+                "source_refs": deepcopy(contextual_speed.get("source_refs", [])),
+                "applicable_scope": scope,
+                "selection_basis": "EXPLICIT_OPERATIONAL_CONTEXT_SPEED_ENVELOPE",
+                "selected_context": contextual_speed.get("selected_context", ""),
+            }
         provenance["scenario_atom_ids"] = {
             "provenance": FactProvenance.DERIVED.value,
             "origin": "METHOD_DEFINED",
@@ -1845,7 +2120,7 @@ class ConstrainedScenarioSynthesisService:
                 speed_candidate.source_rule if speed_candidate else method_source.location,
                 speed_candidate.label if speed_candidate else method_source.excerpt,
             )
-            parent_metadata = parent.fact_provenance.get("ego_speed_constraint", {})
+            parent_metadata = provenance.get("ego_speed_constraint", {})
             parent_metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
             parent_sources = deepcopy(parent_metadata.get("source_refs", []))
             if not parent_sources:
@@ -1893,6 +2168,11 @@ class ConstrainedScenarioSynthesisService:
             },
             {"check": "e_biased_ranking", "status": "NOT_USED"},
         )
+        contextual_fact_refs = tuple(
+            "PROJECT.SpeedEnvelope@" + str(item.get("location", ""))
+            for item in contextual_speed.get("source_refs", [])
+            if isinstance(item, dict) and str(item.get("location", ""))
+        )
         instantiation = AnalyticalScenarioInstantiation(
             scenario_id=child_id,
             parent_scenario_id=synthesis_input.parent_scenario_id,
@@ -1902,7 +2182,9 @@ class ConstrainedScenarioSynthesisService:
             dimension_bindings=bindings,
             deterministic_validations=validations,
             provider_evidence=dict(provider_evidence),
-            project_facts_used=("PROJECT.ODD", "PARENT.scenario"),
+            project_facts_used=tuple(dict.fromkeys((
+                "PROJECT.ODD", "PARENT.scenario", *contextual_fact_refs,
+            ))),
             method_facts_used=tuple(sorted({
                 f"{item.source_asset}:{item.source_rule}"
                 for item in selected_candidates.values()
@@ -1914,6 +2196,10 @@ class ConstrainedScenarioSynthesisService:
             "malfunction_id": synthesis_input.malfunction_id,
             "hazardous_event_id": synthesis_input.hazardous_event_id,
             "semantic_group_id": synthesis_input.semantic_group_id,
+            "structured_semantic_query": deepcopy(
+                synthesis_input.structured_semantic_query
+            ),
+            "contextual_speed": contextual_speed,
             "coverage_plan": synthesis_input.coverage_plan.to_dict(),
             "fm_scenario_template_id": synthesis_input.fm_scenario_template.get(
                 "template_id", ""

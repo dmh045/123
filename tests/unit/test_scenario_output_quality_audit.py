@@ -234,10 +234,13 @@ def test_offline_rebuild_preserves_checkpoint_and_causal_trace(tmp_path):
 
     from openpyxl import load_workbook
 
-    workbook = load_workbook(output, read_only=True, data_only=False)
+    workbook = load_workbook(output, read_only=False, data_only=False)
     try:
-        assert "Other road users" in workbook["04_HARA"]["G6"].value
-        assert "EGO_ACTION=Parking in/out" in workbook["04_HARA"]["H6"].value
+        assert "停车场" in workbook["04_HARA"]["G6"].value
+        assert "Other road users" not in workbook["04_HARA"]["G6"].value
+        assert "EGO_ACTION=" not in workbook["04_HARA"]["H6"].value
+        assert workbook["04A_Scenario Detail"].column_dimensions["K"].width > 30
+        assert workbook["99_Audit"].column_dimensions["K"].width > 20
         assert workbook["99_Audit"]["G5"].value == "METHOD_VALID — CAUSAL_REVALIDATED"
     finally:
         workbook.close()

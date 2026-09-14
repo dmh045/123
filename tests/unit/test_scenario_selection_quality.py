@@ -106,12 +106,16 @@ def _project(location: str = "parking garage", road: str = "normal road surface"
     }
 
 
-def _build(service, hazard: str, *, parent=None, project=None, description=None):
+def _build(
+    service, hazard: str, *, parent=None, project=None, description=None,
+    function=None,
+):
     parent = parent or _parent()
     return service.build_input(
         malfunction=_malfunction(hazard, description=description or "parking control failure"),
         parent=parent, assessment=_assessment(hazard),
         project_context=project or _project(),
+        function=function or {},
     )
 
 
@@ -200,10 +204,156 @@ def test_stationary_obstacle_does_not_force_traffic_relation(method):
         parent=_parent(object_type="static_obstacle"),
     )
     sets = _sets(synthesis_input)
-    assert sets["OBJECT"].applicability.status.value == "REQUIRED"
-    assert sets["OBJECT"].generation_status == "METHOD_GAP"
+    assert sets["OBJECT"].applicability.status.value == "NOT_APPLICABLE"
+    assert sets["OBJECT"].generation_status == "NOT_APPLICABLE"
+    assert sets["OBJECT"].candidates == ()
     assert sets["TRAFFIC_PATTERN"].applicability.status.value == "NOT_APPLICABLE"
     assert sets["TRAFFIC_PATTERN"].candidates == ()
+
+
+def _speed_envelope(mode, minimum, maximum, excerpt, *, condition=""):
+    return {
+        "operating_mode": mode,
+        "speed_min_kph": minimum,
+        "speed_max_kph": maximum,
+        "condition": condition,
+        "unit": "km/h",
+        "status": "FINALIZED",
+        "sources": [{
+            "source_type": "item_definition", "source_id": "ItemDef.docx",
+            "location": f"speed.{mode}", "excerpt": excerpt,
+        }],
+    }
+
+
+def test_contextual_parking_and_control_speed_envelopes_are_handed_to_selection(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    project = _project()
+    project["speed_envelopes"] = [
+        _speed_envelope("Active", 0.0, 20.0, "Active speed 0-20km/h"),
+        _speed_envelope("parking", 0.0, 5.0, "泊车时最高车速≤5km/h"),
+        _speed_envelope("control", 0.0, 7.0, "车辆控制速度范围0-7km/h"),
+    ]
+    parking = _build(
+        service, "Vehicle may collide during parking.", project=project,
+        description="parking maneuver failure",
+        function={"odd_constraints": ["泊车时最高车速≤5km/h"]},
+    )
+    control = _build(
+        service, "Unintended acceleration during vehicle control.", project=project,
+        description="unintended acceleration",
+        function={"operational_context": "control"},
+    )
+
+    assert parking.contextual_speed == {
+        **parking.contextual_speed,
+        "status": "RESOLVED", "selected_context": "PARKING",
+        "min_kph": 0.0, "max_kph": 5.0, "display_kind": "UPPER_BOUND",
+    }
+    assert parking.contextual_speed["match_basis"] == "FUNCTION.odd_constraints[0]"
+    parking_dynamics = _sets(parking)["EGO_DYNAMICS"]
+    assert parking_dynamics.binding_decision.project_speed_envelope_kph == (0.0, 5.0)
+    assert control.contextual_speed["status"] == "RESOLVED"
+    assert control.contextual_speed["selected_context"] == "CONTROL"
+    assert (control.contextual_speed["min_kph"], control.contextual_speed["max_kph"]) == (0.0, 7.0)
+    assert control.contextual_speed["display_kind"] == "RANGE"
+    control_dynamics = _sets(control)["EGO_DYNAMICS"]
+    assert control_dynamics.binding_decision.project_speed_envelope_kph == (0.0, 7.0)
+
+
+@pytest.mark.parametrize(
+    ("context", "description", "hazard", "maximum", "display_kind"),
+    (
+        ("cruise", "cruise function failure", "Vehicle departs its path while cruising.", 15.0, "UPPER_BOUND"),
+        ("entry", "entry activation failure", "Vehicle cannot enter the function safely.", 20.0, "UPPER_BOUND"),
+        ("transition", "state transition failure", "Unsafe state transition occurs.", 12.0, "UPPER_BOUND"),
+    ),
+)
+def test_other_contextual_speed_classes_are_consumable(
+    method, context, description, hazard, maximum, display_kind,
+):
+    service = ConstrainedScenarioSynthesisService(method)
+    project = _project()
+    project["speed_envelopes"] = [
+        _speed_envelope("Active", 0.0, 20.0, "Active speed 0-20km/h"),
+        _speed_envelope(
+            context, 0.0, maximum,
+            f"{context} maximum speed ≤{maximum:g}km/h",
+        ),
+    ]
+
+    synthesis_input = _build(
+        service, hazard, project=project, description=description,
+        function={"operational_context": context},
+    )
+
+    assert synthesis_input.contextual_speed["status"] == "RESOLVED"
+    assert synthesis_input.contextual_speed["selected_context"] == context.upper()
+    assert synthesis_input.contextual_speed["max_kph"] == maximum
+    assert synthesis_input.contextual_speed["display_kind"] == display_kind
+
+
+def test_conflicting_search_speed_sources_are_preserved_as_conflict(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    project = _project()
+    project["speed_envelopes"] = [
+        _speed_envelope("Active", 0.0, 20.0, "Active speed 0-20km/h"),
+        _speed_envelope("search", 0.0, 24.0, "搜索阶段最高车速≤24km/h"),
+        _speed_envelope("search", 0.0, 30.0, "搜索阶段速度范围0-30km/h"),
+    ]
+    synthesis_input = _build(
+        service, "Vehicle searches for a parking space.", project=project,
+        description="parking-space search failure",
+        function={"operational_context": "search"},
+    )
+
+    assert synthesis_input.contextual_speed["status"] == "SOURCE_CONFLICT"
+    assert synthesis_input.contextual_speed["selected_context"] == "SEARCH"
+    assert synthesis_input.contextual_speed["source_expressions"] == [
+        "不高于24 km/h", "0–30 km/h",
+    ]
+
+
+def test_parent_active_range_is_only_used_after_specific_contexts(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    project = _project()
+    project["speed_envelopes"] = [
+        _speed_envelope("Active", 0.0, 20.0, "Active speed 0-20km/h"),
+        _speed_envelope("parking", 0.0, 5.0, "泊车时最高车速≤5km/h"),
+    ]
+
+    synthesis_input = _build(
+        service, "Vehicle may collide during parking.", project=project,
+        function={"operational_context": "parking"},
+    )
+
+    assert synthesis_input.contextual_speed["selected_context"] == "PARKING"
+    assert synthesis_input.contextual_speed["max_kph"] == 5.0
+    assert synthesis_input.contextual_speed["source_expressions"] == ["不高于5 km/h"]
+
+
+def test_condition_specific_active_envelope_is_not_a_generic_parent_fallback(method):
+    service = ConstrainedScenarioSynthesisService(method)
+    project = _project()
+    project["speed_envelopes"] = [
+        _speed_envelope(
+            "Active", 0.0, 20.0, "Active transition speed <=20km/h",
+            condition="transition_speed",
+        ),
+    ]
+
+    synthesis_input = _build(
+        service, "Vehicle may collide with an obstacle.", project=project,
+        description="generic function failure",
+    )
+
+    assert synthesis_input.contextual_speed == {
+        "status": "PARENT_FALLBACK",
+        "classification": "PARENT_BROAD_RANGE_FALLBACK",
+        "requested_contexts": [],
+        "min_kph": 0.0,
+        "max_kph": 20.0,
+    }
 
 
 def test_slope_holding_plan_treats_road_variation_as_primary(method):

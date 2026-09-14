@@ -52,11 +52,11 @@ def test_projection_separates_harm_and_exposes_human_pending_reasons():
     state = HARAState(run_id="projection-test", functions=[{"function_id": "F-1", "name": "Function", "output": "Output"}], malfunctions=[{"malfunction_id": "MF-1", "function_id": "F-1", "guideword": "Loss", "description": "Output is lost", "vehicle_level_hazard": "Vehicle control is affected"}], scenarios=[ScenarioCandidate("SCN-1", "Parking area", "ignored", "ignored", facts={"operating_mode": "active"})], risk_results=[risk])
     method = SimpleNamespace(metadata={"method_source_hash": "method-hash"}, guidewords=SimpleNamespace(guidewords=["Loss"]))
     row = HARAReportProjectionService(schema).project(state, method).rows[0]
-    assert row.hazardous_event == "Vehicle enters an unsafe path"
-    assert row.potential_harm == "Pending（上游风险评定未完成）"
+    assert row.hazardous_event == "Vehicle enters an unsafe path。"
+    assert row.potential_harm == "待S评定完成后确定"
     assert row.severity_rationale == "缺少该危险事件的实际相对速度，S 暂不评定。"
-    assert row.exposure_rationale == "Exposure 场景维度覆盖规则未定义，E 暂不评定。"
-    assert row.controllability_rationale == "UNKNOWN 分支策略未定义，C 暂不评定。"
+    assert row.exposure_rationale == "暴露度场景维度覆盖规则未定义，E 暂不评定。"
+    assert row.controllability_rationale == "未知分支策略未定义，C 暂不评定。"
     assert row.asil_rationale == "S/E/C 未全部确定，ASIL 暂不评定。"
     assert row.ftti == "Pending"
     assert row.ftti_rationale == "当前运行未启用 FTTI 计算。"

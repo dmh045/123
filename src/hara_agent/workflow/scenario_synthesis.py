@@ -126,6 +126,10 @@ class ScenarioSynthesisRunner:
             str(item.get("malfunction_id", "")): item
             for item in state.malfunctions if isinstance(item, dict)
         }
+        functions = {
+            str(item.get("function_id", "")): item
+            for item in state.functions if isinstance(item, dict)
+        }
         assessments = {
             (str(item.get("malfunction_id", "")), str(item.get("scenario_id", ""))): item
             for item in self._eligible_records(state)
@@ -144,6 +148,7 @@ class ScenarioSynthesisRunner:
             inputs.append(self.synthesis.build_input(
                 malfunction=malfunction, parent=parent, assessment=assessment,
                 project_context=project_context,
+                function=functions.get(str(malfunction.get("function_id", "")), {}),
             ))
         before = Counter()
         for synthesis_input in inputs:
@@ -204,6 +209,8 @@ class ScenarioSynthesisRunner:
 
     @staticmethod
     def _provider_ready(synthesis_input: Any) -> bool:
+        if synthesis_input.contextual_speed.get("status") == "SOURCE_CONFLICT":
+            return False
         return all(
             (
                 bool(item.candidates) and item.generation_status != "METHOD_GAP"

@@ -12,6 +12,7 @@ from .canonical_renderer import HARAReportWorkbookRenderer, style_template_hash
 from .content_audit import audit_content_presentation, audit_potential_harm_path
 from .projection import HARAReportProjectionService
 from .report_schema import ReportSchema, load_report_schema
+from .scenario_projection_context import load_scenario_projection_contexts
 
 
 class OfflineReportRebuilder:
@@ -30,6 +31,8 @@ class OfflineReportRebuilder:
         review_root: str | Path = "runtime/review",
         causal_trace_path: str | Path | None = None,
         audit_output_dir: str | Path | None = None,
+        synthesis_candidates_path: str | Path | None = None,
+        speed_context_audit_path: str | Path | None = None,
     ) -> Path:
         checkpoint = Path(checkpoint_path).expanduser().resolve()
         state = HARAState.read_committed(json.loads(checkpoint.read_text(encoding="utf-8")))
@@ -53,6 +56,19 @@ class OfflineReportRebuilder:
                 raise FileNotFoundError(f"Causal trace not found: {causal_path}")
         summary = review_reader.summary()
         template_hash = style_template_hash(report_style_template_path)
+        if (synthesis_candidates_path is None) != (speed_context_audit_path is None):
+            raise ValueError(
+                "Fresh report projection requires both synthesis candidates and speed context audit"
+            )
+        scenario_projection_contexts = (
+            load_scenario_projection_contexts(
+                synthesis_candidates_path=synthesis_candidates_path,
+                speed_context_audit_path=speed_context_audit_path,
+            )
+            if synthesis_candidates_path is not None
+            and speed_context_audit_path is not None
+            else None
+        )
         view_model = HARAReportProjectionService(self.schema).project(
             state,
             resolution.method,
@@ -61,6 +77,7 @@ class OfflineReportRebuilder:
             run_summary=summary,
             style_template_hash=template_hash,
             risk_trace_reference=str(trace_path),
+            scenario_projection_contexts=scenario_projection_contexts,
         )
         audit_root = (
             Path(audit_output_dir).expanduser().resolve()
@@ -134,6 +151,8 @@ class OfflineReportRebuilder:
             pair_counts[pair] = pair_counts.get(pair, 0) + 1
         return {
             "rows": len(rows),
+            "scenario_detail_rows": len(view_model.scenario_details),
+            "grouping": dict(view_model.projection_metrics or {}),
             "unique_operational_scenario_count": len({row.operational_scenario for row in rows}),
             "unique_he_count": len(set(he_keys)),
             "duplicate_he_count": len(he_keys) - len(set(he_keys)),

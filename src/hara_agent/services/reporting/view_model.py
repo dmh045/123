@@ -42,6 +42,23 @@ class HARAReportRowView:
 
 
 @dataclass(frozen=True)
+class ScenarioDetailView:
+    hara_id: str
+    variant: str
+    scenario_id: str
+    operational_scenario: str
+    scenario_detail: str
+    speed_constraint: str
+    causal_status: str
+    hazardous_event: str
+    semantic_group_id: str = ""
+    object_interaction_summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {item.name: getattr(self, item.name) for item in fields(self)}
+
+
+@dataclass(frozen=True)
 class SummaryView:
     run_id: str
     method_source: str
@@ -109,6 +126,11 @@ class AuditReferenceView:
     risk_trace_reference: str
     clarification_ids: str
     assessment_status: str
+    semantic_group_id: str = ""
+    parent_scenario_id: str = ""
+    variant: str = ""
+    selected_atom_ids: str = ""
+    source_references: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {item.name: getattr(self, item.name) for item in fields(self)}
@@ -124,6 +146,8 @@ class HARAReportViewModel:
     schema_hash: str
     method_contract_hash: str
     style_template_hash: str
+    scenario_details: tuple[ScenarioDetailView, ...] = ()
+    projection_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +156,8 @@ class HARAReportViewModel:
             "method_basis": self.method_basis.to_dict(),
             "safety_goals": [item.to_dict() for item in self.safety_goals],
             "audit_references": [item.to_dict() for item in self.audit_references],
+            "scenario_details": [item.to_dict() for item in self.scenario_details],
+            "projection_metrics": dict(self.projection_metrics or {}),
             "schema_hash": self.schema_hash,
             "method_contract_hash": self.method_contract_hash,
             "style_template_hash": self.style_template_hash,
@@ -140,5 +166,5 @@ class HARAReportViewModel:
 
 __all__ = [
     "AuditReferenceView", "HARAReportRowView", "HARAReportViewModel",
-    "MethodBasisView", "SafetyGoalView", "SummaryView",
+    "MethodBasisView", "SafetyGoalView", "ScenarioDetailView", "SummaryView",
 ]

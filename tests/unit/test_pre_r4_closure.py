@@ -219,9 +219,9 @@ def test_static_object_gap_retains_unknown_candidates_but_stays_fail_closed(meth
         object_type="static_obstacle",
     )
     objects = next(item for item in synthesis_input.dimension_candidate_sets if item.dimension == "OBJECT")
-    assert objects.generation_status == "METHOD_GAP"
-    assert objects.candidates
-    assert all(item.semantic_compatibility.value == "UNKNOWN" for item in objects.candidates)
+    assert objects.applicability.status.value == "NOT_APPLICABLE"
+    assert objects.generation_status == "NOT_APPLICABLE"
+    assert objects.candidates == ()
 
 
 def test_abort_action_gap_is_explicit_and_stays_fail_closed(method):

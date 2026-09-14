@@ -1,4 +1,4 @@
-schema_version: hara-report-schema-v1
+schema_version: hara-report-schema-v2
 report_id: hara_report_v1
 
 # This file defines report vocabulary and presentation only.  Engineering
@@ -14,10 +14,12 @@ sheets:
     order: 3
   - name: 04_HARA
     order: 4
-  - name: 05_Method Basis
+  - name: 04A_Scenario Detail
     order: 5
-  - name: 06_Safety Goal
+  - name: 05_Method Basis
     order: 6
+  - name: 06_Safety Goal
+    order: 7
   - name: 99_Audit
     order: 99
 

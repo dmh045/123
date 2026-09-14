@@ -27,7 +27,7 @@ LEGACY_REFERENCE_SHEETS = frozenset({
 })
 NEW_REPORT_SHEETS = (
     "00_Summary", "01_Item Definition", "02_Functions", "03_Malfunctions",
-    "05_Method Basis", "99_Audit",
+    "04A_Scenario Detail", "05_Method Basis", "99_Audit",
 )
 TECHNICAL_MAIN_FIELDS = frozenset({
     "malfunction_id", "scenario_id", "hazardous_event_id", "function_id",
@@ -239,13 +239,18 @@ class HARAReportWorkbookRenderer:
                 self._malfunctions(view_model),
             )
             layout = self._render_main_hara(sheets[MAIN_SHEET], view_model, schema, registry)
+            self._render_scenario_details(
+                sheets["04A_Scenario Detail"], view_model, registry,
+            )
             self._render_method_basis(sheets["05_Method Basis"], view_model, registry)
             self._render_safety_goals(sheets[SAFETY_GOAL_SHEET], view_model, registry)
             self._render_audit(sheets["99_Audit"], view_model, registry)
             self._save_atomically(workbook, output)
         finally:
             workbook.close()
-        self.verify(output, schema, len(view_model.rows))
+        self.verify(
+            output, schema, len(view_model.rows), len(view_model.scenario_details),
+        )
         self.last_style_audit = self.style_restoration_audit(template, output, layout)
         self.last_new_sheet_style_audit = self.new_sheet_style_isolation_audit(output)
         return output
@@ -272,7 +277,8 @@ class HARAReportWorkbookRenderer:
             sheets[name] = workbook.create_sheet(title=name)
         visible = [
             sheets["00_Summary"], sheets["01_Item Definition"], sheets["02_Functions"],
-            sheets["03_Malfunctions"], sheets[MAIN_SHEET], sheets["05_Method Basis"],
+            sheets["03_Malfunctions"], sheets[MAIN_SHEET],
+            sheets["04A_Scenario Detail"], sheets["05_Method Basis"],
             sheets[SAFETY_GOAL_SHEET], sheets["99_Audit"],
         ]
         for sheet in visible:
@@ -294,7 +300,8 @@ class HARAReportWorkbookRenderer:
             ("Style template hash", values["style_template_hash"]),
             ("Report status", values["report_status"]), ("Release status", values["release_status"]),
             ("Functions", values["function_count"]), ("Guideword assessments", values["guideword_assessment_count"]),
-            ("Malfunctions", values["malfunction_count"]), ("Scenarios", values["scenario_count"]),
+            ("Malfunctions", values["malfunction_count"]),
+            ("Unique Retained Scenarios", values["scenario_count"]),
             ("Eligible Hazardous Events", values["eligible_hazardous_event_count"]),
             ("Severity finalized / pending", f"{values['severity_finalized']} / {values['severity_pending']}"),
             ("Exposure finalized / pending", f"{values['exposure_finalized']} / {values['exposure_pending']}"),
@@ -329,16 +336,47 @@ class HARAReportWorkbookRenderer:
         registry: TemplateStyleRegistry,
         headers: tuple[str, ...],
         records: list[tuple[Any, ...]],
+        width_source_columns: tuple[int, ...] | None = None,
     ) -> None:
         self._clear_sheet(sheet)
-        self._set_title(sheet, "B2:H2", "B2", title, registry, "summary_title")
+        title_last_column = get_column_letter(max(8, 1 + len(headers)))
+        self._set_title(
+            sheet, f"B2:{title_last_column}2", "B2", title,
+            registry, "summary_title",
+        )
         self._write_support_headers(sheet, headers, registry)
         for row_number, record in enumerate(records, start=5):
             for offset, value in enumerate(record):
                 self._write_cell(sheet, row_number, 2 + offset, value, registry, "data_static", wrap=True)
             sheet.row_dimensions[row_number].height = self._estimated_height(record, (26,) * len(record), registry)
-        self._finish_support_sheet(sheet, len(headers), max(5, len(records) + 4), registry)
+        self._finish_support_sheet(
+            sheet, len(headers), max(5, len(records) + 4), registry,
+            width_source_columns=width_source_columns,
+        )
         self._clean_new_sheet(sheet)
+
+    def _render_scenario_details(
+        self, sheet: Any, view_model: HARAReportViewModel,
+        registry: TemplateStyleRegistry,
+    ) -> None:
+        headers = (
+            "HARA-ID", "Semantic Group ID", "Variant", "Scenario ID", "Situational Description",
+            "Situational Detailing", "Speed Constraint", "Causal Status",
+            "Object / Interaction", "Hazardous Event",
+        )
+        records = [
+            (
+                item.hara_id, item.semantic_group_id, item.variant, item.scenario_id,
+                item.operational_scenario, item.scenario_detail,
+                item.speed_constraint, item.causal_status,
+                item.object_interaction_summary, item.hazardous_event,
+            )
+            for item in view_model.scenario_details
+        ]
+        self._render_records(
+            sheet, "Analytical Scenario Detail", registry, headers, records,
+            width_source_columns=(1, 5, 14, 11, 7, 8, 11, 16, 14, 7),
+        )
 
     @staticmethod
     def _clear_sheet(sheet: Any) -> None:
@@ -363,10 +401,19 @@ class HARAReportWorkbookRenderer:
             self._write_cell(sheet, 4, 2 + offset, header, registry, "subheader", wrap=True)
         sheet.row_dimensions[4].height = registry._source_heights.get(HEADER_BOTTOM_ROW) or 24
 
-    def _finish_support_sheet(self, sheet: Any, column_count: int, end_row: int, registry: TemplateStyleRegistry) -> None:
+    def _finish_support_sheet(
+        self, sheet: Any, column_count: int, end_row: int,
+        registry: TemplateStyleRegistry,
+        *, width_source_columns: tuple[int, ...] | None = None,
+    ) -> None:
         registry.apply_page_setup(sheet, registry.summary)
-        for offset in range(column_count):
-            registry.apply_width(sheet, 2 + offset, min(1 + offset, 21))
+        sources = width_source_columns or tuple(
+            min(1 + offset, 21) for offset in range(column_count)
+        )
+        if len(sources) != column_count:
+            raise ValueError("Support-sheet width mapping does not match its columns")
+        for offset, source_column in enumerate(sources):
+            registry.apply_width(sheet, 2 + offset, source_column)
         last_column = get_column_letter(1 + column_count)
         sheet.freeze_panes = "B5"
         sheet.auto_filter.ref = f"B4:{last_column}{end_row}"
@@ -543,20 +590,43 @@ class HARAReportWorkbookRenderer:
         sheet.print_area = f"A1:F{last_row}"
 
     def _render_audit(self, sheet: Any, view_model: HARAReportViewModel, registry: TemplateStyleRegistry) -> None:
-        trace_references = {item.hara_id: item.risk_trace_reference for item in view_model.audit_references}
+        rows_by_hara_id = {item.hara_id: item for item in view_model.rows}
         records = [
             (
-                row.hara_id, row.malfunction_id, row.scenario_id, row.hazardous_event_id,
-                row.function_id, row.assessment_status, row.clarification_ids,
-                view_model.method_contract_hash, view_model.schema_hash, view_model.style_template_hash,
-                trace_references.get(row.hara_id, ""),
+                item.hara_id,
+                rows_by_hara_id[item.hara_id].malfunction_id,
+                item.scenario_id,
+                item.hazardous_event_id,
+                rows_by_hara_id[item.hara_id].function_id,
+                item.assessment_status,
+                item.clarification_ids,
+                item.semantic_group_id,
+                item.parent_scenario_id,
+                item.variant,
+                item.selected_atom_ids,
+                item.source_references,
+                item.method_hash,
+                item.report_schema_hash,
+                item.style_template_hash,
+                item.risk_trace_reference,
             )
-            for row in view_model.rows
+            for item in view_model.audit_references
         ]
         self._render_records(
             sheet, "Audit and Traceability", registry,
-            ("HARA-ID", "Malfunction ID", "Scenario ID", "Hazardous Event ID", "Function ID", "Status", "Clarification IDs", "Method hash", "Report schema hash", "Style template hash", "Risk execution trace"),
+            (
+                "HARA-ID", "Malfunction ID", "Scenario ID",
+                "Hazardous Event ID", "Function ID", "Status",
+                "Clarification IDs", "Semantic Group ID", "Parent Scenario ID",
+                "Variant", "Selected Atom IDs", "Source References",
+                "Method hash", "Report schema hash", "Style template hash",
+                "Risk execution trace",
+            ),
             records,
+            width_source_columns=(
+                1, 2, 1, 7, 10, 16, 2, 5,
+                5, 14, 11, 7, 11, 11, 11, 16,
+            ),
         )
 
     @staticmethod
@@ -601,7 +671,10 @@ class HARAReportWorkbookRenderer:
                 os.unlink(temporary_name)
 
     @staticmethod
-    def verify(path: Path, schema: ReportSchema, expected_rows: int) -> None:
+    def verify(
+        path: Path, schema: ReportSchema, expected_rows: int,
+        expected_detail_rows: int | None = None,
+    ) -> None:
         workbook = load_workbook(path, read_only=False, data_only=False)
         try:
             required_sheets = {item.name for item in schema.sheets}
@@ -615,6 +688,17 @@ class HARAReportWorkbookRenderer:
             ]
             if len(data_rows) != expected_rows:
                 raise ValueError(f"Rendered HARA row count mismatch: {len(data_rows)} != {expected_rows}")
+            if expected_detail_rows is not None:
+                detail = workbook["04A_Scenario Detail"]
+                detail_rows = [
+                    row for row in range(5, detail.max_row + 1)
+                    if detail.cell(row, 2).value not in (None, "")
+                ]
+                if len(detail_rows) != expected_detail_rows:
+                    raise ValueError(
+                        "Rendered Scenario Detail row count mismatch: "
+                        f"{len(detail_rows)} != {expected_detail_rows}"
+                    )
             headers = [str(hara.cell(HEADER_BOTTOM_ROW, column).value or hara.cell(HEADER_TOP_ROW, column).value or "") for column in range(1, 25)]
             forbidden = {"Malfunction ID", "Scenario ID", "Hazardous Event ID", "Function ID", "Status", "Clarification ID"}
             if forbidden & set(headers):

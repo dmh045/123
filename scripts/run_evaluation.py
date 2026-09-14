@@ -16,6 +16,7 @@ from hara_agent.evaluation.pre_full_r4 import (
     write_baseline_verification, write_method_authority_clarification,
     write_pre_full_r4_closure, write_supported_smoke_report,
 )
+from hara_agent.evaluation.p5h2 import run_speed_context_consumption_audit
 
 
 def main() -> None:
@@ -25,6 +26,7 @@ def main() -> None:
         "calculation-input-readiness", "p5e-baseline",
         "method-authority-clarification", "supported-r4-smoke",
         "pre-full-r4-closure",
+        "p5h2-speed-audit",
     ))
     parser.add_argument("--run-id", default="")
     args = parser.parse_args()
@@ -52,6 +54,12 @@ def main() -> None:
         result = write_supported_smoke_report(ROOT, args.run_id)
         detail = (
             f"executed={result['scope']['executed']} decision={result['decision']}"
+        )
+    elif args.evaluation == "p5h2-speed-audit":
+        result = run_speed_context_consumption_audit(ROOT)
+        detail = (
+            "before=" + result["before"]["decision"]
+            + " after=" + result["after"]["decision"]
         )
     else:
         if not args.run_id:
