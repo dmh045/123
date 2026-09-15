@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Sequence
 
-from hara_agent.models import FunctionDefinition
+from hara_agent.models import FunctionDefinition, SourceRef
 from hara_agent.services.extraction import block_value, normalize_source_text
 
 
@@ -39,6 +39,7 @@ _NUMBER_HEADER_ALIASES = frozenset(
 @dataclass(frozen=True)
 class ExplicitFunctionSource:
     names: tuple[str, ...]
+    source_locations: tuple[str, ...]
     authoritative_source_location: str
 
 
@@ -88,8 +89,9 @@ def _table_sources(source_blocks: Sequence[Any]) -> list[ExplicitFunctionSource]
             ]
             number_column = number_columns[0] if len(number_columns) == 1 else None
             names: list[str] = []
+            source_locations: list[str] = []
             last_row = header_row
-            for row_number, _, cells in ordered_rows[position + 1 :]:
+            for row_number, row_location, cells in ordered_rows[position + 1 :]:
                 if row_number <= header_row or function_column >= len(cells):
                     continue
                 if number_column is not None:
@@ -101,10 +103,12 @@ def _table_sources(source_blocks: Sequence[Any]) -> list[ExplicitFunctionSource]
                 if not name or _header_key(name) in _FUNCTION_HEADER_ALIASES:
                     continue
                 names.append(name)
+                source_locations.append(row_location)
                 last_row = row_number
             if names:
                 sources.append(ExplicitFunctionSource(
                     names=tuple(names),
+                    source_locations=tuple(source_locations),
                     authoritative_source_location=(
                         f"table[{table_id}].row[{header_row}:{last_row}] "
                         f"(header={header_location})"
@@ -127,6 +131,7 @@ def _list_sources(source_blocks: Sequence[Any]) -> list[ExplicitFunctionSource]:
         ):
             continue
         names: list[str] = []
+        source_locations: list[str] = []
         last_location = heading_location
         expected_paragraph = int(heading_match.group(1)) + 1
         for candidate in blocks[index + 1 :]:
@@ -140,11 +145,13 @@ def _list_sources(source_blocks: Sequence[Any]) -> list[ExplicitFunctionSource]:
             if not item_match:
                 break
             names.append(item_match.group(1).strip())
+            source_locations.append(location)
             last_location = location
             expected_paragraph += 1
         if names:
             sources.append(ExplicitFunctionSource(
                 names=tuple(names),
+                source_locations=tuple(source_locations),
                 authoritative_source_location=(
                     f"{heading_location}:{last_location}"
                 ),
@@ -161,6 +168,8 @@ def detect_explicit_function_sources(
 def validate_function_source_parity(
     functions: Sequence[FunctionDefinition],
     source_blocks: Sequence[Any],
+    *,
+    source_id: str = "",
 ) -> dict[str, Any]:
     sources = detect_explicit_function_sources(source_blocks)
     if not sources:
@@ -197,9 +206,21 @@ def validate_function_source_parity(
             "authoritative_source_location": source.authoritative_source_location,
         })
 
+    if source_id:
+        for function, name, location in zip(
+            functions, source.names, source.source_locations
+        ):
+            function.sources = [SourceRef(
+                source_type="item_definition",
+                source_id=source_id,
+                location=location,
+                excerpt=name,
+            )]
+
     return {
         "status": "PASS",
         "expected_count": len(expected_names),
         "actual_count": len(actual_names),
         "authoritative_source_location": source.authoritative_source_location,
+        "membership_source_bindings": len(functions) if source_id else 0,
     }

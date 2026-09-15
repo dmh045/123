@@ -29,7 +29,7 @@ from .parsing import CONFIDENCE_PROMPT_CONTRACT
 class ItemArtifactExtractionAgent:
     """Extract core Item facts and Functions once from the full document."""
 
-    PROMPT_VERSION = "item-artifacts-v6-explicit-function-source"
+    PROMPT_VERSION = "item-artifacts-v7-explicit-function-source-binding"
     SYSTEM_PROMPT = """你是汽车功能安全HARA的相关项定义抽取Agent。只提取文档明确陈述的事实。
 必须综合全文，不得把某个固定章节、标题编号或模板工作流中的章节示例当成唯一来源。
 一次返回核心Item Definition和车辆级Functions。不得把标题、条件、步骤、后果或质量要求识别为Function；
@@ -43,6 +43,9 @@ class ItemArtifactExtractionAgent:
   that explicit source is the only membership authority for functions[].
 - Extract every function from that source in source order. Do not add, omit,
   merge, split, or replace its members.
+- For each Function, source_location and source_excerpt must identify its exact
+  source table row/list item. The excerpt must be one continuous verbatim
+  substring and must not concatenate evidence from other sections.
 - Operating states, workflow steps, preconditions, parking-in/parking-out phases,
   and HMI interaction flows are not Functions.
 - Other document content may enrich description, preconditions, triggers,
@@ -588,7 +591,7 @@ class ItemArtifactExtractionAgent:
             FunctionNormalizer._validate_unique(functions_value)
             self.validator.ensure_valid(functions_value)
             function_source_guard = validate_function_source_parity(
-                functions_value, source_blocks,
+                functions_value, source_blocks, source_id=source_id,
             )
             return (
                 facts_value,

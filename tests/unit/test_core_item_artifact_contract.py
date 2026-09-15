@@ -205,7 +205,42 @@ def test_explicit_itemdef_function_table_accepts_exact_nine_functions() -> None:
         "authoritative_source_location": (
             "table[6].row[1:10] (header=table[6].row[1])"
         ),
+        "membership_source_bindings": 9,
     }
+    assert [function.sources[0].location for function in functions] == [
+        f"table[6].row[{index}]" for index in range(2, 11)
+    ]
+    assert [function.sources[0].excerpt for function in functions] == (
+        EXPLICIT_FUNCTION_NAMES
+    )
+
+
+def test_explicit_function_rows_replace_joined_provider_source_references() -> None:
+    artifact = _current_item_artifact()
+    payload = _payload_with_function_names(EXPLICIT_FUNCTION_NAMES)
+    payload["functions"][4].update({
+        "source_location": "整车功能表第5项、泊入开始章节",
+        "source_excerpt": (
+            "开启功能后，系统判断激活功能。当车速低于20km/h时，"
+            "驾驶员双击拨杆激活AVP。"
+        ),
+    })
+    payload["functions"][5].update({
+        "source_location": "整车功能表第6项、状态转换章节",
+        "source_excerpt": "系统判断退出功能。AVP任务将被取消。",
+    })
+    client = _Client([payload])
+
+    _, functions, audit = ItemArtifactExtractionAgent(client).extract(
+        artifact.text, artifact.source_id, artifact.blocks,
+    )
+
+    assert functions[4].sources[0].location == "table[6].row[6]"
+    assert functions[4].sources[0].excerpt == "激活功能"
+    assert functions[5].sources[0].location == "table[6].row[7]"
+    assert functions[5].sources[0].excerpt == "退出功能"
+    assert audit["source_reference_repair_count"] == 0
+    assert audit["llm_call_count"] == 1
 
 
 def test_explicit_itemdef_function_table_rejects_missing_function() -> None:
@@ -281,7 +316,7 @@ def test_item_agent_accepts_string_consequences_without_second_llm_call() -> Non
     }]
     assert client.requests[0].response_schema == CORE_ITEM_ARTIFACTS_SCHEMA
     assert client.requests[0].prompt_version == (
-        "item-artifacts-v6-explicit-function-source"
+        "item-artifacts-v7-explicit-function-source-binding"
     )
     assert "only membership authority for functions[]" in (
         client.requests[0].system_prompt

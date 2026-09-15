@@ -227,7 +227,7 @@ def extract_item_artifacts(
             functions = [_function_from_dict(item) for item in cached_core["functions"]]
             artifact_agent.validator.ensure_valid(functions)
             function_source_guard = validate_function_source_parity(
-                functions, blocks,
+                functions, blocks, source_id=source_id,
             )
             artifact_agent._ensure_source_grounded(
                 facts, functions, document_text, blocks,
