@@ -21,6 +21,7 @@ from .core_item_artifact_contract import (
     normalize_core_item_artifacts,
 )
 from .function_agent import FunctionNormalizer
+from .function_source_guard import validate_function_source_parity
 from .item_definition_agent import ItemDefinitionNormalizer
 from .parsing import CONFIDENCE_PROMPT_CONTRACT
 
@@ -28,13 +29,27 @@ from .parsing import CONFIDENCE_PROMPT_CONTRACT
 class ItemArtifactExtractionAgent:
     """Extract core Item facts and Functions once from the full document."""
 
-    PROMPT_VERSION = "item-artifacts-v5-full-document-contract"
+    PROMPT_VERSION = "item-artifacts-v6-explicit-function-source"
     SYSTEM_PROMPT = """你是汽车功能安全HARA的相关项定义抽取Agent。只提取文档明确陈述的事实。
 必须综合全文，不得把某个固定章节、标题编号或模板工作流中的章节示例当成唯一来源。
 一次返回核心Item Definition和车辆级Functions。不得把标题、条件、步骤、后果或质量要求识别为Function；
 不得用常识补写ODD、速度或功能。核心输出需保留功能的前置条件、触发、ODD约束、回退行为和后果；
 复杂数值性能、驾驶员位置/控制通道及Exposure证据由MethodContract驱动的后续有界抽取处理，不得丢弃、猜测或从模板示例补写。
 所有结论必须有可定位来源；证据不足时返回null或空数组并标记PENDING。"""
+
+    FUNCTION_SOURCE_PROMPT = """Function truth-source rule:
+- If the Item Definition contains one explicit table or numbered list headed
+  '整车功能', 'vehicle-level function(s)', or an equivalent supported heading,
+  that explicit source is the only membership authority for functions[].
+- Extract every function from that source in source order. Do not add, omit,
+  merge, split, or replace its members.
+- Operating states, workflow steps, preconditions, parking-in/parking-out phases,
+  and HMI interaction flows are not Functions.
+- Other document content may enrich description, preconditions, triggers,
+  odd_constraints, fallback_behavior, and consequences of an existing Function,
+  but it must not change the Function member set.
+- Only when no unique explicit Function table/list exists may functions[] be
+  extracted from the full document under the existing rules."""
 
     def __init__(self, client: LLMClient, validator: FunctionValidator | None = None):
         self.client = client
@@ -469,7 +484,7 @@ class ItemArtifactExtractionAgent:
             raise ValueError("Item Artifact token预算必须大于0")
         request = LLMRequest(
             task="extract_core_item_artifacts",
-            system_prompt=self.SYSTEM_PROMPT,
+            system_prompt=self.SYSTEM_PROMPT + "\n\n" + self.FUNCTION_SOURCE_PROMPT,
             user_prompt=(
                 "只返回JSON对象，顶层必须包含item_definition和functions。"
                 "item_definition仅包含system_description、item_boundary、operating_modes、odd、"
@@ -572,9 +587,19 @@ class ItemArtifactExtractionAgent:
             ]
             FunctionNormalizer._validate_unique(functions_value)
             self.validator.ensure_valid(functions_value)
-            return facts_value, functions_value, warnings_value
+            function_source_guard = validate_function_source_parity(
+                functions_value, source_blocks,
+            )
+            return (
+                facts_value,
+                functions_value,
+                warnings_value,
+                function_source_guard,
+            )
 
-        facts, functions, warnings = parse_entities(normalized_data)
+        facts, functions, warnings, function_source_guard = parse_entities(
+            normalized_data
+        )
         source_reference_repair_response = None
         source_reference_repair_count = 0
         source_reference_repair_normalizations: list[dict[str, Any]] = []
@@ -628,7 +653,9 @@ class ItemArtifactExtractionAgent:
                 raise ValueError(
                     "source reference repair altered non-source Item Definition content"
                 )
-            facts, functions, warnings = parse_entities(repaired_data)
+            facts, functions, warnings, function_source_guard = parse_entities(
+                repaired_data
+            )
             source_reference_repairs = self._ensure_source_grounded(
                 facts, functions, document_text, source_blocks,
             )
@@ -678,6 +705,7 @@ class ItemArtifactExtractionAgent:
             ),
             "contract_normalizations": contract_normalizations,
             "candidate_cache_hit": candidate_cache_hit,
+            "function_source_guard": function_source_guard,
             "function_count": len(functions),
             "normalization_warnings": warnings,
             "source_reference_repairs": source_reference_repairs,

@@ -20,6 +20,9 @@ from hara_agent.services.semantic import (
     TargetedProjectFactExtractionAgent,
 )
 from hara_agent.services.semantic.item_definition_agent import ItemDefinitionNormalizer
+from hara_agent.services.semantic.function_source_guard import (
+    validate_function_source_parity,
+)
 from hara_agent.workflow.state import HARAState, WorkflowStage
 from hara_agent.workflow.review_artifacts import ReviewArtifactWriter
 
@@ -223,6 +226,9 @@ def extract_item_artifacts(
             facts = _facts_from_dict(cached_core["facts"])
             functions = [_function_from_dict(item) for item in cached_core["functions"]]
             artifact_agent.validator.ensure_valid(functions)
+            function_source_guard = validate_function_source_parity(
+                functions, blocks,
+            )
             artifact_agent._ensure_source_grounded(
                 facts, functions, document_text, blocks,
             )
@@ -236,6 +242,7 @@ def extract_item_artifacts(
                 "elapsed_seconds": 0.0,
                 "llm_call_count": 0,
                 "input_characters": len(document_text),
+                "function_source_guard": function_source_guard,
             }
         except (KeyError, TypeError, ValueError):
             core_cached = False

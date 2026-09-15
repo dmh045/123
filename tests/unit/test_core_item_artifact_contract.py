@@ -8,7 +8,7 @@ import pytest
 
 from hara_agent.infrastructure.llm import LLMResponse
 from hara_agent.models import ReviewStatus
-from hara_agent.services.extraction import ValidatedArtifactCache
+from hara_agent.services.extraction import DocumentBlock, DocumentReader, ValidatedArtifactCache
 from hara_agent.services.semantic.core_item_artifact_contract import (
     CORE_ITEM_ARTIFACTS_SCHEMA,
     CoreItemArtifactsContractError,
@@ -17,6 +17,37 @@ from hara_agent.services.semantic.core_item_artifact_contract import (
 from hara_agent.services.semantic.item_artifact_agent import (
     ItemArtifactExtractionAgent,
 )
+from hara_agent.services.semantic.function_source_guard import (
+    FunctionSourceMismatchError,
+)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+EXPLICIT_FUNCTION_NAMES = [
+    "输出制动扭矩",
+    "输出驱动扭矩",
+    "输出转向扭矩",
+    "开启功能",
+    "激活功能",
+    "退出功能",
+    "关闭功能",
+    "输出驻车制动",
+    "报警提示",
+]
+PSEUDO_PHASE_NAMES = [
+    "AVP界面进入",
+    "AVP泊入激活",
+    "AVP泊入巡航",
+    "AVP泊入车位",
+    "AVP泊入结束",
+    "AVP泊出准备",
+    "AVP泊出激活",
+    "AVP泊出车位",
+    "AVP泊出巡航",
+    "AVP泊出结束",
+    "AVP功能取消",
+    "AVP状态管理",
+]
 
 
 def _payload() -> dict:
@@ -53,6 +84,42 @@ def _payload() -> dict:
             "status": "PENDING",
         }],
     }
+
+
+def _current_item_artifact():
+    return DocumentReader().read(ROOT / "input/ItemDef.docx")
+
+
+def _payload_with_function_names(names: list[str]) -> dict:
+    payload = _payload()
+    payload["item_definition"].update({
+        "system_description": "自主代客泊车相关项定义",
+        "source_location": "paragraph[70]",
+        "source_excerpt": (
+            "本文档为奇瑞EH架构中智驾域的自主代客泊车在功能安全开发中的相关项定义。"
+            "该文档的目的是定义和描述ADS的自主代客泊车功能，及其与环境和其它相关项的依赖性和相互影响。"
+        ),
+    })
+    table_locations = {
+        name: f"table[6].row[{index + 2}]"
+        for index, name in enumerate(EXPLICIT_FUNCTION_NAMES)
+    }
+    payload["functions"] = [{
+        "function_id": f"F-{index + 1:03d}",
+        "name": name,
+        "output": f"{name}对应的车辆输出",
+        "description": f"执行{name}",
+        "preconditions": [],
+        "triggers": [],
+        "odd_constraints": [],
+        "fallback_behavior": None,
+        "consequences": [],
+        "source_location": table_locations.get(name, "paragraph[75]"),
+        "source_excerpt": name,
+        "confidence": 0.9,
+        "status": "PENDING",
+    } for index, name in enumerate(names)]
+    return payload
 
 
 def test_contract_mechanically_normalizes_single_string_list_fields() -> None:
@@ -103,6 +170,83 @@ class _Client:
         )
 
 
+def test_explicit_itemdef_function_table_rejects_pseudo_phase_functions() -> None:
+    artifact = _current_item_artifact()
+    client = _Client([_payload_with_function_names(PSEUDO_PHASE_NAMES)])
+
+    with pytest.raises(FunctionSourceMismatchError) as raised:
+        ItemArtifactExtractionAgent(client).extract(
+            artifact.text, artifact.source_id, artifact.blocks,
+        )
+
+    assert raised.value.code == "FUNCTION_SOURCE_MISMATCH"
+    assert raised.value.details["expected_count"] == 9
+    assert raised.value.details["actual_count"] == 12
+    assert raised.value.details["missing_names"] == EXPLICIT_FUNCTION_NAMES
+    assert raised.value.details["unexpected_names"] == PSEUDO_PHASE_NAMES
+    assert raised.value.details["authoritative_source_location"].startswith(
+        "table[6].row[1:10]"
+    )
+
+
+def test_explicit_itemdef_function_table_accepts_exact_nine_functions() -> None:
+    artifact = _current_item_artifact()
+    client = _Client([_payload_with_function_names(EXPLICIT_FUNCTION_NAMES)])
+
+    _, functions, audit = ItemArtifactExtractionAgent(client).extract(
+        artifact.text, artifact.source_id, artifact.blocks,
+    )
+
+    assert [function.name for function in functions] == EXPLICIT_FUNCTION_NAMES
+    assert audit["function_source_guard"] == {
+        "status": "PASS",
+        "expected_count": 9,
+        "actual_count": 9,
+        "authoritative_source_location": (
+            "table[6].row[1:10] (header=table[6].row[1])"
+        ),
+    }
+
+
+def test_explicit_itemdef_function_table_rejects_missing_function() -> None:
+    artifact = _current_item_artifact()
+    client = _Client([_payload_with_function_names(EXPLICIT_FUNCTION_NAMES[:-1])])
+
+    with pytest.raises(FunctionSourceMismatchError) as raised:
+        ItemArtifactExtractionAgent(client).extract(
+            artifact.text, artifact.source_id, artifact.blocks,
+        )
+
+    assert raised.value.details["expected_count"] == 9
+    assert raised.value.details["actual_count"] == 8
+    assert raised.value.details["missing_names"] == ["报警提示"]
+    assert raised.value.details["unexpected_names"] == []
+
+
+def test_process_phase_text_cannot_expand_explicit_function_table() -> None:
+    artifact = _current_item_artifact()
+    phase_blocks = [
+        DocumentBlock(
+            f"P-PHASE-{index:02d}",
+            "paragraph",
+            f"paragraph[{1000 + index}]",
+            name,
+        )
+        for index, name in enumerate(PSEUDO_PHASE_NAMES, start=1)
+    ]
+    blocks = [*artifact.blocks, *phase_blocks]
+    document_text = "\n".join(block.text for block in blocks)
+    client = _Client([_payload_with_function_names(EXPLICIT_FUNCTION_NAMES)])
+
+    _, functions, audit = ItemArtifactExtractionAgent(client).extract(
+        document_text, artifact.source_id, blocks,
+    )
+
+    assert [function.name for function in functions] == EXPLICIT_FUNCTION_NAMES
+    assert not set(PSEUDO_PHASE_NAMES) & {function.name for function in functions}
+    assert audit["function_source_guard"]["status"] == "PASS"
+
+
 def test_item_agent_accepts_string_consequences_without_second_llm_call() -> None:
     payload = _payload()
     payload["functions"][0]["consequences"] = "Vehicle follows the planned path"
@@ -126,12 +270,22 @@ def test_item_agent_accepts_string_consequences_without_second_llm_call() -> Non
     assert functions[0].consequences == ["Vehicle follows the planned path"]
     assert audit["schema_repair_count"] == 0
     assert audit["llm_call_count"] == 1
+    assert audit["function_source_guard"] == {
+        "status": "NOT_APPLICABLE",
+        "authoritative_source_count": 0,
+    }
     assert audit["contract_normalizations"] == [{
         "path": "functions[0].consequences",
         "from_type": "string",
         "to_type": "array",
     }]
     assert client.requests[0].response_schema == CORE_ITEM_ARTIFACTS_SCHEMA
+    assert client.requests[0].prompt_version == (
+        "item-artifacts-v6-explicit-function-source"
+    )
+    assert "only membership authority for functions[]" in (
+        client.requests[0].system_prompt
+    )
 
 
 def test_item_agent_repairs_unsafe_schema_once() -> None:

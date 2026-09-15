@@ -1,4 +1,10 @@
 from .function_agent import FunctionNormalizer
+from .function_source_guard import (
+    ExplicitFunctionSource,
+    FunctionSourceMismatchError,
+    detect_explicit_function_sources,
+    validate_function_source_parity,
+)
 from .item_artifact_agent import ItemArtifactExtractionAgent
 from .item_supplement_agent import EvidenceRoutingResult, ItemEvidenceRouter, ItemSupplementAgent
 from .targeted_project_fact_agent import TargetedProjectFactExtractionAgent
@@ -24,6 +30,8 @@ from .project_evidence_registry import (
 
 __all__ = [
     "FunctionNormalizer", "ItemArtifactExtractionAgent",
+    "ExplicitFunctionSource", "FunctionSourceMismatchError",
+    "detect_explicit_function_sources", "validate_function_source_parity",
     "EvidenceRoutingResult", "ItemEvidenceRouter", "ItemSupplementAgent", "TargetedProjectFactExtractionAgent", "GuidewordApplicabilityAgent", "MalfunctionHazardAgent",
     "MalfunctionGuidewordGateViolation", "validate_malfunction_guideword_gate",
     "ScenarioFeasibilityAgent", "ScenarioRiskFactAgent",
